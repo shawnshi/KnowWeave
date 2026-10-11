@@ -754,14 +754,17 @@ def bulk_reconciliation(payload_file: str, dry_run: bool = True) -> str:
     from vector_lake.tool_bulk_reconciliation import bulk_reconcile
     return bulk_reconcile(operations, dry_run)
 
-if __name__ == "__main__":
-    # stdout carries the JSON-RPC stream; no banner, no version check.
-    #
-    # The embedding SDK costs ~4.8 s of first-use latency (``import google.genai`` 3.5 s plus
-    # ``genai.Client()`` 1.3 s) and this process answers many searches, so it pays that off
-    # the request path while the host completes the handshake.  Best effort: if it does not
-    # finish in time, the first embedding call simply pays the cost as before.
-    from vector_lake.embedding_scheduler import start_prewarm_thread
+def main():
+    """Own synchronous embedding clients for this CLI server lifetime."""
+    from vector_lake.embedding_scheduler import shutdown_embedding_clients, start_prewarm_thread
 
-    start_prewarm_thread()
-    mcp.run(show_banner=False)
+    try:
+        start_prewarm_thread()
+        # stdout carries JSON-RPC; no banner or version check.
+        mcp.run(show_banner=False)
+    finally:
+        shutdown_embedding_clients()
+
+
+if __name__ == "__main__":
+    main()

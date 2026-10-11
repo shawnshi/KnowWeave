@@ -88,7 +88,14 @@ def _claim_index_repair() -> str:
 def _tantivy_repair() -> str:
     from vector_lake import tantivy_index
 
-    return f"rebuilt {tantivy_index.rebuild_from_sqlite()} document(s) from the FTS5 table"
+    try:
+        docs = tantivy_index.rebuild_from_sqlite()
+    except tantivy_index.MirrorReplayDeferred as exc:
+        # The registry's 'repaired' action is reserved for completed repairs.
+        raise tantivy_index.MirrorReplayDeferred(
+            f"rebuild scheduled, not completed; continue via replay_pending: {exc}"
+        ) from exc
+    return f"rebuilt {docs} document(s) from the FTS5 table"
 
 
 def _vector_health() -> tuple[str, str]:
@@ -202,17 +209,32 @@ def _fts_health() -> tuple[str, str]:
 
 
 def _tantivy_health() -> tuple[str, str]:
+    import os
+
     from vector_lake import db_store, tantivy_index
 
     if not tantivy_index.enabled():
-        return HEALTHY, "not in use (VECTOR_LAKE_FTS=fts5)"
-    counts = _counts(db_store.get_connection())
-    stats = tantivy_index.stats()
-    if not stats["exists"]:
-        return DEGRADED, "enabled but no index directory exists"
-    if stats["docs"] < counts["fts_rows"]:
-        return DEGRADED, f"{stats['docs']} document(s) vs {counts['fts_rows']} FTS row(s) -- mirror behind"
-    return HEALTHY, f"{stats['docs']} document(s), mirror current"
+        if os.environ.get("VECTOR_LAKE_FTS", "fts5").strip().lower() == "tantivy":
+            return DEGRADED, "Tantivy requested but unavailable; FTS5 serving"
+        return HEALTHY, "not in use (VECTOR_LAKE_FTS=fts5); FTS5 serving"
+    try:
+        state = db_store.tantivy_mirror_state()
+        detail = (
+            f"phase={state['phase']}, pending={state['pending']}, blocked={state['blocked']}, "
+            f"control_attempts={state['attempt_count']}"
+        )
+        if state["last_error"]:
+            detail += f"; control error: {state['last_error']}"
+        queue_error = db_store.get_connection().execute(
+            "SELECT last_error FROM tantivy_mirror_queue WHERE last_error IS NOT NULL LIMIT 1"
+        ).fetchone()
+        if queue_error is not None:
+            detail += f"; queue error: {queue_error['last_error']}"
+        if tantivy_index.current_token() is None:
+            return DEGRADED, detail + "; mirror not validated; FTS5 serving"
+        return HEALTHY, detail + "; mirror current (validated token/incarnation)"
+    except Exception as exc:  # noqa: BLE001 - unreadable is not healthy or empty
+        return DEGRADED, f"mirror error: {type(exc).__name__}: {exc}; FTS5 serving"
 
 
 def _claim_index_health() -> tuple[str, str]:

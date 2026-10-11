@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use pyo3::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 /// 快速 Personalized PageRank (PPR) 随机游走
 /// 严格对齐 `tool_search.py` 的算法公式
@@ -29,7 +29,11 @@ pub fn fast_personalized_pagerank(
     for _ in 0..step_count {
         let mut next_scores: HashMap<String, f64> = HashMap::with_capacity(adj.len());
         for k in adj.keys() {
-            let initial = if seed_set.contains(k) { restart_mass } else { 0.0 };
+            let initial = if seed_set.contains(k) {
+                restart_mass
+            } else {
+                0.0
+            };
             next_scores.insert(k.clone(), initial);
         }
 
@@ -121,7 +125,13 @@ impl PprIndex {
             row_sum[i] = total;
         }
 
-        PprIndex { nodes, index_of, in_adj, edges, row_sum }
+        PprIndex {
+            nodes,
+            index_of,
+            in_adj,
+            edges,
+            row_sum,
+        }
     }
 
     fn __len__(&self) -> usize {
@@ -152,6 +162,15 @@ pub fn prepared_personalized_pagerank(
     let step_count = steps.unwrap_or(2);
     let seed_set: HashSet<&String> = seed_keys.iter().collect();
     let num_seeds = seed_set.len() as f64;
+    if step_count == 0 {
+        // No propagation: legacy retains every initial seed, including unknown keys.
+        let mut result: Vec<(String, f64)> = seed_set
+            .iter()
+            .map(|seed| (seed.to_string(), 1.0 / num_seeds))
+            .collect();
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        return result;
+    }
     let restart_mass = (1.0 - alpha_val) / num_seeds;
 
     // 未知种子（不在图里）仍然计入分母：旧实现用整个 seed_set 的长度算 restart_mass，
@@ -176,7 +195,11 @@ pub fn prepared_personalized_pagerank(
     let mut next_present = vec![false; node_count];
     for _ in 0..step_count {
         for i in 0..node_count {
-            next[i] = if index.in_adj[i] && seed_mask[i] { restart_mass } else { 0.0 };
+            next[i] = if index.in_adj[i] && seed_mask[i] {
+                restart_mass
+            } else {
+                0.0
+            };
             next_present[i] = index.in_adj[i];
         }
         for i in 0..node_count {

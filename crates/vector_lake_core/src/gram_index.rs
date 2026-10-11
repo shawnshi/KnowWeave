@@ -1,10 +1,7 @@
-use std::collections::{HashMap, HashSet};
 use pyo3::prelude::*;
+use std::collections::{HashMap, HashSet};
 
-const FIELD_WEIGHTS: [u32; 16] = [
-    0, 4, 3, 7, 1, 5, 4, 8,
-    0, 0, 0, 0, 0, 0, 0, 0,
-];
+const FIELD_WEIGHTS: [u32; 16] = [0, 4, 3, 7, 1, 5, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// 打包 `[(doc, mask), ...]` -> 小端 uint32 紧凑字节流
 #[pyfunction]
@@ -83,11 +80,7 @@ pub fn accumulate_postings(
 pub fn extract_grams(key_blob: &str, text_blob: &str, page_blob: &str) -> HashMap<String, u8> {
     let mut grams: HashMap<String, u8> = HashMap::new();
 
-    let fields = [
-        (1u8, key_blob),
-        (2u8, text_blob),
-        (4u8, page_blob),
-    ];
+    let fields = [(1u8, key_blob), (2u8, text_blob), (4u8, page_blob)];
 
     for (bit, blob) in fields {
         if blob.is_empty() {
@@ -121,7 +114,10 @@ pub fn extract_grams(key_blob: &str, text_blob: &str, page_blob: &str) -> HashMa
                 }
             } else if let Some(s_idx) = start {
                 if i - s_idx >= 3 {
-                    let run: String = chars[s_idx..i].iter().map(|ch| ch.to_ascii_lowercase()).collect();
+                    let run: String = chars[s_idx..i]
+                        .iter()
+                        .map(|ch| ch.to_ascii_lowercase())
+                        .collect();
                     *grams.entry(run).or_insert(0) |= bit;
                 }
                 start = None;
@@ -129,7 +125,10 @@ pub fn extract_grams(key_blob: &str, text_blob: &str, page_blob: &str) -> HashMa
         }
         if let Some(s_idx) = start {
             if len - s_idx >= 3 {
-                let run: String = chars[s_idx..len].iter().map(|ch| ch.to_ascii_lowercase()).collect();
+                let run: String = chars[s_idx..len]
+                    .iter()
+                    .map(|ch| ch.to_ascii_lowercase())
+                    .collect();
                 *grams.entry(run).or_insert(0) |= bit;
             }
         }
@@ -196,4 +195,56 @@ pub fn fast_accumulate_terms(
     }
 
     accumulator
+}
+
+/// Intersect document ids; exact substring verification still belongs to Python.
+#[pyfunction]
+pub fn intersect_postings(py: Python<'_>, mut blobs: Vec<Vec<u8>>) -> PyResult<Vec<u32>> {
+    if blobs.iter().map(Vec::len).sum::<usize>() > 64 * 1024 * 1024 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "postings capacity exceeded",
+        ));
+    }
+    py.allow_threads(move || {
+        blobs.sort_by_key(Vec::len);
+        let mut result: Option<Vec<u32>> = None;
+        for blob in blobs {
+            if blob.len() % 4 != 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "postings must contain complete uint32 entries",
+                ));
+            }
+            let mut doc = 0u32;
+            let mut docs = Vec::with_capacity(blob.len() / 4);
+            for bytes in blob.chunks_exact(4) {
+                let packed = u32::from_le_bytes(bytes.try_into().unwrap());
+                doc = doc.checked_add(packed >> 4).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("postings document id overflow")
+                })?;
+                if docs.last() != Some(&doc) {
+                    docs.push(doc);
+                }
+            }
+            result = Some(match result {
+                None => docs,
+                Some(previous) => {
+                    let mut common = Vec::with_capacity(previous.len().min(docs.len()));
+                    let (mut a, mut b) = (0, 0);
+                    while a < previous.len() && b < docs.len() {
+                        match previous[a].cmp(&docs[b]) {
+                            std::cmp::Ordering::Less => a += 1,
+                            std::cmp::Ordering::Greater => b += 1,
+                            std::cmp::Ordering::Equal => {
+                                common.push(previous[a]);
+                                a += 1;
+                                b += 1;
+                            }
+                        }
+                    }
+                    common
+                }
+            });
+        }
+        Ok(result.unwrap_or_default())
+    })
 }

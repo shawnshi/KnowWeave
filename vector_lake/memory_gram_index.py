@@ -196,6 +196,8 @@ def _searches_since_last_rebuild() -> int | None:
 
 
 _LONG_RUN = re.compile(r"[0-9a-z]{3,}")
+# Existing native releases casefold ASCII runs and cannot accept lone surrogates.
+_NATIVE_GRAM_UNSAFE = re.compile(r"[A-Z\ud800-\udfff]")
 
 # Field-mask weights, indexed by mask (bit0 key, bit1 text, bit2 page).
 #
@@ -234,6 +236,9 @@ def extract_grams(key_blob: str, text_blob: str, page_blob: str) -> dict[str, in
     what ``_query_terms`` produces; the runs are indexed so that a long Latin
     token also narrows to a single posting lookup.
     """
+    blobs = (key_blob or "", text_blob or "", page_blob or "")
+    if HAVE_CORE and not any(_NATIVE_GRAM_UNSAFE.search(blob) for blob in blobs):
+        return vector_lake_core.extract_grams(*blobs)
     grams: dict[str, int] = {}
     for bit, blob in ((1, key_blob), (2, text_blob), (4, page_blob)):
         if not blob:
@@ -910,6 +915,19 @@ def accumulate_relevance(
     weights = _FIELD_WEIGHTS
     total = int(total_docs or gram_index_state().get("base_docs") or 0)
     frequencies = df if df is not None else term_document_frequencies(terms, skip_docs)
+    if HAVE_CORE and all(not term or len(term) <= 2 for term in terms):
+        term_blobs = []
+        factors = {}
+        for term in terms:
+            if term:
+                blob = _term_base(term, conn)
+                if blob is not None:
+                    term_blobs.append((term, blob))
+                    factors[term] = idf_weight(frequencies.get(term, 0), total)
+        # The native batch omits zero-IDF documents; the legacy scorer retains them.
+        # Mixed long terms also keep their existing per-term reduction order.
+        if all(factor > 0.0 for factor in factors.values()):
+            return vector_lake_core.fast_accumulate_terms(term_blobs, factors, skip_docs, weights)
     accumulator: dict[int, float] = {}
 
     def _fold(term: str, folded: dict[int, int]) -> None:
@@ -939,15 +957,25 @@ def accumulate_relevance(
 def _composite_candidates(term: str, conn) -> set[int]:
     """Documents that could contain ``term`` (every constituent bigram present)."""
     bigrams = {term[i : i + 2] for i in range(len(term) - 1)}
-    smallest: set[int] | None = None
+    blobs = []
     for bigram in bigrams:
         blob = _term_base(bigram, conn)
-        docs = {doc for doc, _ in _entries(blob)} if blob is not None else set()
-        if not docs:
+        if not blob:
             return set()
-        if smallest is None or len(docs) < len(smallest):
-            smallest = docs
-    return smallest or set()
+        blobs.append(blob)
+    native = getattr(vector_lake_core, "intersect_postings", None) if HAVE_CORE else None
+    if native is not None and sum(map(len, blobs)) <= 64 * 1024 * 1024:
+        return set(native(blobs))
+    candidates: set[int] | None = None
+    for blob in sorted(blobs, key=len):
+        docs = {doc for doc, _ in _entries(blob)}
+        if candidates is None:
+            candidates = docs
+        else:
+            candidates.intersection_update(docs)
+        if not candidates:
+            return set()
+    return candidates or set()
 
 
 def _accumulate_composite(terms: list[str], weights: list[int], accumulator: dict) -> None:

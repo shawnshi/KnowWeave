@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from vector_lake import db_store, indexer, mutation_coordinator
 from vector_lake.mutation_coordinator import execute_mutation_plan
 from vector_lake.watchdog_app import WikiIndexHandler, index_queue, process_mutation_outbox_batch
@@ -78,3 +80,83 @@ def test_watchdog_ignores_managed_projection_event(isolated_memory):
     WikiIndexHandler().queue_path(str(target))
 
     assert index_queue.empty()
+
+
+@pytest.mark.parametrize("failure", ["markdown", "lexical", "none"])
+def test_existing_worker_lexical_fairness_and_connection_cleanup(isolated_memory, monkeypatch, failure):
+    from vector_lake import tantivy_index, watchdog_app
+
+    monkeypatch.setenv("VECTOR_LAKE_FTS", "tantivy")
+    db_store.init_db()
+    db_store.upsert_search_index("a", "sharedword", "", "sharedword")
+    tantivy_index.reset()
+    calls = {"markdown": 0, "lexical": 0, "close": 0, "sleep": 0}
+    statuses = []
+    replay = tantivy_index.replay_pending
+    close = db_store.close_connection
+
+    def lexical(**kwargs):
+        calls["lexical"] += 1
+        assert kwargs == {"max_rows": 100, "max_bytes": 4194304, "max_attempts": 3}
+        if failure == "lexical":
+            raise ValueError("fixture lexical fault")
+        return replay(**kwargs)
+
+    def markdown(**kwargs):
+        calls["markdown"] += 1
+        if failure == "markdown":
+            raise RuntimeError("fixture Markdown fault")
+        return {"claimed": 0}
+
+    def cleanup():
+        calls["close"] += 1
+        close()
+
+    def sleep(seconds):
+        calls["sleep"] += 1
+        if calls["sleep"] == 2:
+            raise SystemExit("fixture stop after two ticks")
+
+    monkeypatch.setattr(tantivy_index, "replay_pending", lexical)
+    monkeypatch.setattr(watchdog_app, "process_mutation_outbox_batch", markdown)
+    monkeypatch.setattr(watchdog_app, "heal_page_index_projection", lambda: None)
+    monkeypatch.setattr(watchdog_app, "write_status", lambda *args, **kwargs: statuses.append((args, kwargs)))
+    monkeypatch.setattr(watchdog_app.time, "sleep", sleep)
+    monkeypatch.setattr(db_store, "close_connection", cleanup)
+    try:
+        with pytest.raises(SystemExit, match="fixture stop"):
+            watchdog_app.index_worker_loop()
+        assert calls == {"markdown": 2, "lexical": 2, "close": 2, "sleep": 2}
+        lexical_status = [args for args, kw in statuses if kw.get("component") == "tantivy"]
+        assert len(lexical_status) == 2
+        if failure == "lexical":
+            assert all(args[0] == "error" and "ValueError" in args[4] for args in lexical_status)
+        else:
+            assert db_store.tantivy_mirror_state()["phase"] == "replay"
+            assert db_store.tantivy_mirror_state()["pending"] == 1
+            assert all(args[0] == "processing" for args in lexical_status)
+    finally:
+        tantivy_index.reset()
+
+
+def test_worker_reports_blocked_without_hot_retry(isolated_memory, monkeypatch):
+    from vector_lake import tantivy_index, watchdog_app
+    from vector_lake.watchdog_status import get_status_file
+
+    db_store.init_db()
+    monkeypatch.setenv("VECTOR_LAKE_FTS", "tantivy")
+    tantivy_index.reset()
+    try:
+        db_store.upsert_search_index("a", "sharedword", "", "sharedword")
+        watchdog_app.process_tantivy_mirror_step()
+        watchdog_app.process_tantivy_mirror_step()
+        conn = db_store.get_connection()
+        conn.execute("UPDATE tantivy_mirror_queue SET attempt_count=3, last_error='fixture exhausted'")
+        conn.commit()
+        result = watchdog_app.process_tantivy_mirror_step()
+        assert result["commits"] == 0 and result["blocked"] == 1
+        status = json.loads(get_status_file().read_text())["components"]["tantivy"]
+        assert status["status"] == "error" and "blocked=1" in status["current_action"]
+        assert "blocked" in status["last_error"]
+    finally:
+        tantivy_index.reset()

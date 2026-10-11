@@ -1,5 +1,5 @@
-use pyo3::prelude::*;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pyo3::prelude::*;
 
 #[pyclass]
 #[derive(Clone, Debug)]
@@ -19,7 +19,9 @@ impl MarkdownBlock {
     fn __repr__(&self) -> String {
         format!(
             "MarkdownBlock(kind={:?}, heading={:?}, text_len={})",
-            self.kind, self.heading, self.text.len()
+            self.kind,
+            self.heading,
+            self.text.len()
         )
     }
 }
@@ -66,24 +68,31 @@ pub fn fast_split_frontmatter(content: &str) -> (String, String) {
         return (String::new(), content.to_string());
     }
 
-    let search_start = 4;
-    let end_marker = "\n---";
-    if let Some(pos) = content[search_start..].find(end_marker) {
-        let yaml_end = search_start + pos;
-        let yaml_part = &content[search_start..yaml_end];
-
-        let mut body_start = yaml_end + end_marker.len();
-        if content[body_start..].starts_with("\r\n") {
-            body_start += 2;
-        } else if content[body_start..].starts_with('\n') {
-            body_start += 1;
-        }
-
-        let body_part = &content[body_start..];
-        (yaml_part.to_string(), body_part.to_string())
-    } else {
-        (String::new(), content.to_string())
+    // Include the opening line's newline so an empty YAML section can close immediately.
+    // Match complete closing lines, as the Python reference's \r?\n---(?:\r?\n|$) does.
+    for (offset, _) in content[3..].match_indices("\n---") {
+        let newline = 3 + offset;
+        let delimiter_end = newline + 4;
+        let suffix = &content[delimiter_end..];
+        let body_start = if suffix.starts_with("\r\n") {
+            delimiter_end + 2
+        } else if suffix.starts_with('\n') {
+            delimiter_end + 1
+        } else if suffix.is_empty() {
+            delimiter_end
+        } else {
+            continue;
+        };
+        let yaml_end = if content.as_bytes()[newline - 1] == b'\r' {
+            newline - 1
+        } else {
+            newline
+        };
+        // Python slices from byte 4 even for CRLF; its slice is empty when end < start.
+        let yaml_part = &content[4..yaml_end.max(4)];
+        return (yaml_part.to_string(), content[body_start..].to_string());
     }
+    (String::new(), content.to_string())
 }
 
 /// 快速统计指定章节标记下的列表项数量
@@ -172,20 +181,19 @@ pub fn fast_extract_blocks(body: &str) -> Vec<MarkdownBlock> {
     for event in parser {
         match event {
             Event::Start(Tag::Heading { .. }) => {
-                buffer = Some(Buffer::Heading);
-                text.clear();
+                // Nested headings contribute text to an enclosing item, not a new buffer.
+                if list_depth == 0 && other_container_depth == 0 && item_depth == 0 {
+                    buffer = Some(Buffer::Heading);
+                    text.clear();
+                }
             }
             Event::End(TagEnd::Heading(_)) => {
-                // Only a top-level heading moves `current_heading`.  The Python walk visits just the
-                // top level of mistune's AST, so a heading nested in a list item or a blockquote
-                // never becomes the heading of the following blocks -- measured on
-                // `Concept_GAIN-矩阵.md`, where an H1 inside the timeline list left every later
-                // bullet attributed to the previous section under mistune and to the H1 here.
-                if list_depth == 0 && other_container_depth == 0 && item_depth == 0 {
+                // Only the buffer opened by a top-level heading may be consumed here.
+                if buffer == Some(Buffer::Heading) {
                     current_heading = Some(text.trim().to_string());
+                    text.clear();
+                    buffer = None;
                 }
-                text.clear();
-                buffer = None;
             }
             Event::Start(Tag::Paragraph) => {
                 // A paragraph inside a list item, a blockquote or a table is not its own claim.
@@ -195,7 +203,9 @@ pub fn fast_extract_blocks(body: &str) -> Vec<MarkdownBlock> {
                 }
             }
             Event::End(TagEnd::Paragraph) => {
-                if item_depth == 0 && list_depth == 0 && other_container_depth == 0
+                if item_depth == 0
+                    && list_depth == 0
+                    && other_container_depth == 0
                     && buffer == Some(Buffer::Paragraph)
                 {
                     let raw = text.trim().to_string();
@@ -242,7 +252,9 @@ pub fn fast_extract_blocks(body: &str) -> Vec<MarkdownBlock> {
                 // Deeper: keep accumulating into the enclosing item's buffer.
             }
             Event::End(TagEnd::Item) => {
-                if item_depth == 1 && list_depth == 1 && other_container_depth == 0
+                if item_depth == 1
+                    && list_depth == 1
+                    && other_container_depth == 0
                     && buffer == Some(Buffer::Item)
                 {
                     let raw = text.trim().to_string();

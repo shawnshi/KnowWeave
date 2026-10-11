@@ -1,4 +1,8 @@
-"""Two-stage vector index: binary prefilter, then exact full-precision rerank.
+"""Candidate retrieval followed by the original SQL full-precision L2 rerank.
+
+Auto/ram can use a bounded optional RAM full scan. Explicit two_stage keeps the
+binary path described below; unavailable shadows keep the legacy scan. Query
+views pin selection, metadata and rerank to one readonly SQLite generation.
 
 Why this shape (measured on the production corpus, 7162 x 3072, ``gemini-embedding-2``):
 
@@ -20,9 +24,13 @@ half-written vector cannot be observed.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass
 import logging
 import os
 import sqlite3
+import threading
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -37,11 +45,22 @@ META_TABLE = "vec_emb_two_stage_meta"
 # correct).  Depth buys margin for such regions; the adaptive "extend until the boundary is not
 # inside a tie crowd" rule is the next step, not implemented here.
 DEFAULT_SHORTLIST = 256
-DEFAULT_FUSION_MODES = ("auto", "two_stage", "legacy")
+DEFAULT_FUSION_MODES = ("auto", "ram", "two_stage", "legacy")
+DEFAULT_RAM_SHORTLIST = 64
+_VIEWS = threading.local()
+
+
+def _reset_views_after_fork() -> None:
+    global _VIEWS
+    _VIEWS = threading.local()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_views_after_fork)
 
 
 def mode() -> str:
-    """``auto`` (default) uses the shadow when it is present and consistent, else the legacy scan."""
+    """``auto`` prefers optional RAM candidates; scoring stays SQL. Explicit two_stage is binary."""
     requested = os.environ.get("VECTOR_LAKE_VECTOR_INDEX", "auto").strip().lower()
     if requested not in DEFAULT_FUSION_MODES:
         log.warning("Unknown VECTOR_LAKE_VECTOR_INDEX=%r; using 'auto'.", requested)
@@ -174,6 +193,82 @@ def build(conn: sqlite3.Connection, *, shortlist: int = DEFAULT_SHORTLIST) -> di
     return {"row_count": row_count, "model": model, "dimension": dimension, "shortlist": shortlist}
 
 
+@dataclass
+class QueryView:
+    conn: sqlite3.Connection
+    state: dict | None
+    requested_mode: str
+    backend: str
+    lease: Any = None
+    owned: bool = False
+    state_token: tuple = ()
+
+    @property
+    def stamp(self) -> tuple:
+        return (self.requested_mode, self.backend,
+                self.conn.execute("PRAGMA data_version").fetchone()[0], self.conn.total_changes,
+                self.conn.execute("PRAGMA schema_version").fetchone()[0])
+
+
+def _current_view(conn: sqlite3.Connection) -> QueryView | None:
+    view = getattr(_VIEWS, "current", None)
+    return view if view is not None and view.conn is conn else None
+
+
+@contextmanager
+def query_view(conn: sqlite3.Connection, *, status_hint: tuple | None = None):
+    """Keep candidate/selector/SQL rerank on one snapshot; never own a caller's transaction.
+
+    A borrowed transaction uses the old binary/legacy arm and never caches data
+    that a rollback/savepoint could undo without changing total_changes.
+    """
+    nested = _current_view(conn)
+    if nested is not None:
+        yield nested
+        return
+    owned = not getattr(conn, "in_transaction", True)
+    requested = mode()
+    query_only = None
+    previous = getattr(_VIEWS, "current", None)
+    view = None
+    try:
+        if owned:
+            query_only = conn.execute("PRAGMA query_only").fetchone()[0]
+            conn.execute("PRAGMA query_only = ON")
+            conn.execute("BEGIN DEFERRED")
+            # Pin before inspecting a reused token: a commit after this SELECT
+            # belongs to the next view, not a mixture of two source generations.
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        state_token = ()
+        if owned:
+            state_token = (conn, os.getpid(), requested,
+                           conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes,
+                           conn.execute("PRAGMA schema_version").fetchone()[0])
+        if requested == "legacy":
+            state = None
+        elif owned and status_hint is not None and status_hint[0] == state_token:
+            state = status_hint[1]
+        else:
+            state = status(conn)
+        lease = None
+        if owned and state is not None and requested in ("auto", "ram"):
+            from vector_lake import ram_candidate_index
+            lease = ram_candidate_index.acquire(conn, state)
+        backend = "legacy" if state is None else "ram" if lease is not None else "two_stage"
+        view = QueryView(conn, state, requested, backend, lease, owned, state_token)
+        _VIEWS.current = view
+        yield view
+    finally:
+        _VIEWS.current = previous
+        if view is not None and view.lease is not None:
+            view.lease.close()
+        if owned and query_only is not None:
+            try:
+                conn.rollback()
+            finally:
+                conn.execute("PRAGMA query_only = ON" if query_only else "PRAGMA query_only = OFF")
+
+
 def shortlist_keys(
     conn: sqlite3.Connection,
     query_blob: bytes,
@@ -181,12 +276,14 @@ def shortlist_keys(
     *,
     state: dict | None = None,
 ) -> list[str]:
-    """Binary-prefilter page keys, cheapest possible: no rerank, no scores.
+    """Candidate keys without final scores; exactly the requested depth.
 
-    This is the half of the search that filtering actually needs first -- a caller that will reject
-    most candidates on metadata should not pay to score them.  Depth is the caller's ``k``, which is
-    also what makes widening meaningful: a deeper call examines more of the corpus.
+    Inside a query view this uses its RAM lease when available; standalone calls
+    retain the old binary kernel. Metadata rejection still precedes SQL rerank.
     """
+    view = _current_view(conn)
+    if view is not None and view.lease is not None:
+        return view.lease.shortlist(query_blob, k)
     rows = conn.execute(
         f"SELECT page_key FROM {BITS_TABLE}"
         " WHERE bits MATCH vec_bit(vec_quantize_binary(vec_f32(?))) AND k = ?"
@@ -222,13 +319,26 @@ def search(
     *,
     state: dict,
 ) -> list[tuple[str, float]]:
-    """``[(page_key, L2 distance)]`` ascending, from the shortlist + exact rerank.
+    """``[(page_key, original SQL L2 distance)]`` from this view's candidate arm.
 
-    Distinct L2 distance semantics from the legacy scan: same vectors, same metric, computed on a
-    subset that the study showed contains every true top-10 for all 24 measured queries.
+    RAM is an exact float32 scan for candidate selection, not an alternate final
+    scorer. Floating/tie boundaries may differ from the full SQL scan. Explicit
+    binary retains its recorded shortlist floor; RAM uses a floor of64.
     """
-    shortlist = max(int(limit), int(state.get("shortlist") or DEFAULT_SHORTLIST))
-    return rerank_keys(conn, query_blob, shortlist_keys(conn, query_blob, shortlist, state=state), limit)
+    with query_view(conn) as view:
+        if view.state is None:
+            rows = conn.execute(
+                "SELECT page_key, distance FROM vec_embeddings"
+                " WHERE embedding MATCH ? AND k = ? ORDER BY distance", (query_blob, limit)
+            ).fetchall()
+            return [(row[0], float(row[1])) for row in rows]
+        floor = DEFAULT_RAM_SHORTLIST if view.backend == "ram" else int(
+            view.state.get("shortlist") or DEFAULT_SHORTLIST
+        )
+        shortlist = max(int(limit), floor)
+        return rerank_keys(
+            conn, query_blob, shortlist_keys(conn, query_blob, shortlist, state=view.state), limit
+        )
 
 
 def rebuild_report(dry_run: bool = True, shortlist: int = DEFAULT_SHORTLIST) -> str:

@@ -40,12 +40,28 @@ EDGE_CASES = {
 
 
 @requires_prepared
+@pytest.mark.parametrize("steps", [0, 2])
 @pytest.mark.parametrize("name", sorted(EDGE_CASES))
-def test_prepared_index_is_bit_identical(name):
+def test_prepared_index_is_bit_identical(name, steps):
     adj, seeds = EDGE_CASES[name]
-    legacy = core.fast_personalized_pagerank(adj, list(seeds), 0.85, 2)
+    legacy = core.fast_personalized_pagerank(adj, list(seeds), 0.85, steps)
     index = core.PprIndex(adj)
-    assert core.prepared_personalized_pagerank(index, list(seeds), 0.85, 2) == legacy
+    assert core.prepared_personalized_pagerank(index, list(seeds), 0.85, steps) == legacy
+
+
+@requires_prepared
+@pytest.mark.parametrize(
+    "seeds, expected",
+    [
+        (["ghost"], [("ghost", 1.0)]),
+        (["a", "ghost"], [("a", 0.5), ("ghost", 0.5)]),
+        (["ghost", "ghost"], [("ghost", 1.0)]),
+    ],
+)
+def test_zero_step_retains_unknown_and_deduplicated_seeds(seeds, expected):
+    adj = {"a": []}
+    assert core.fast_personalized_pagerank(adj, seeds, 0.85, 0) == expected
+    assert core.prepared_personalized_pagerank(core.PprIndex(adj), seeds, 0.85, 0) == expected
 
 
 @requires_prepared

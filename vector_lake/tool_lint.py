@@ -82,6 +82,42 @@ def _type_prefix(key: str) -> str:
     return key.split("_")[0] if "_" in key else ""
 
 
+def _candidate_name_pairs(names: list[str], threshold: float):
+    """Yield upper-bound survivors in the legacy length-bucket order, in bounded batches."""
+    native = getattr(vector_lake_core, "NamePairIndex", None) if HAVE_CORE else None
+    if (native is not None and len(names) <= 100_000
+            and sum(map(len, names)) <= 16_000_000
+            and not any(re.search(r"[\ud800-\udfff]", name) for name in names)):
+        index = native(names, threshold)
+        done = False
+        while not done:
+            pairs, done = index.next_pairs()
+            yield from pairs
+        return
+    lengths = [len(name) for name in names]
+    counts = [Counter(name) for name in names]
+    masks = [_character_mask(name) for name in names]
+    by_length: dict[int, list[int]] = defaultdict(list)
+    for index, length in enumerate(lengths):
+        by_length[length].append(index)
+    ordered_lengths = sorted(by_length)
+    for length_index, length in enumerate(ordered_lengths):
+        for other_length in ordered_lengths[length_index:]:
+            if not _length_ceiling_can_exceed(length, other_length, threshold):
+                break
+            left, right = by_length[length], by_length[other_length]
+            for position, a in enumerate(left):
+                for b in right[position + 1 if other_length == length else 0:]:
+                    total = length + other_length
+                    if total:
+                        unmatched = (masks[a] & ~masks[b]).bit_count()
+                        if 2.0 * (length - unmatched) / total <= threshold:
+                            continue
+                        if 2.0 * _common_character_count(counts[a], counts[b]) / total <= threshold:
+                            continue
+                    yield a, b
+
+
 def _family_sizes(pairs: list[tuple[str, str]]) -> list[int]:
     """Sizes of the connected components of a pair graph, largest first.
 
@@ -725,70 +761,39 @@ def lint_vector_lake(auto_fix: bool = False):
     # after the multiset -> 6 058 ``SequenceMatcher`` calls, in 2.7 s.  The old window made 375 283
     # comparisons in ~1 s and found 3 797 of those 6 058.
     core_names = {key: (key.split("_", 1)[1] if "_" in key else key).lower() for key in keys_list}
-    core_lengths = {key: len(name) for key, name in core_names.items()}
-    character_counts = {key: Counter(name) for key, name in core_names.items()}
-    character_masks = {key: _character_mask(name) for key, name in core_names.items()}
     series_keys = {key: _naming_series_key(key) for key in keys_list}
     by_type_prefix: dict[str, list[str]] = defaultdict(list)
     for key in keys_list:
         by_type_prefix[_type_prefix(key)].append(key)
 
     for type_members in by_type_prefix.values():
-        by_length: dict[int, list[str]] = defaultdict(list)
-        for key in type_members:
-            by_length[core_lengths[key]].append(key)
-        lengths = sorted(by_length)
-        for length_index, length in enumerate(lengths):
-            for other_length in lengths[length_index:]:
-                if not _length_ceiling_can_exceed(
-                    length, other_length, SIMILARITY_MERGE_THRESHOLD
-                ):
-                    # The ceiling only falls as the other length grows, so the rest are out too.
-                    break
-                left = by_length[length]
-                right = by_length[other_length]
-                for position, key_a in enumerate(left):
-                    for key_b in right[position + 1 if other_length == length else 0:]:
-                        length_a = core_lengths[key_a]
-                        length_b = core_lengths[key_b]
-                        if length_a + length_b:
-                            unmatched = bin(
-                                character_masks[key_a] & ~character_masks[key_b]
-                            ).count("1")
-                            if 2.0 * (length_a - unmatched) / (length_a + length_b) <= SIMILARITY_MERGE_THRESHOLD:
-                                continue
-                            common = _common_character_count(
-                                character_counts[key_a], character_counts[key_b]
-                            )
-                            if 2.0 * common / (length_a + length_b) <= SIMILARITY_MERGE_THRESHOLD:
-                                continue
-                            if HAVE_CORE and hasattr(vector_lake_core, "fast_sequence_matcher_ratio"):
-                                ratio = vector_lake_core.fast_sequence_matcher_ratio(core_names[key_a], core_names[key_b])
-                            else:
-                                ratio = SequenceMatcher(None, core_names[key_a], core_names[key_b]).ratio()
-                        else:
-                            # Two empty stems.  ``ratio()`` is 1.0 by definition, and the length
-                            # filters would divide by zero, so the answer is stated rather than
-                            # computed.
-                            ratio = 1.0
-                        if ratio > SIMILARITY_MERGE_THRESHOLD:
-                            if series_keys[key_a] == series_keys[key_b]:
-                                # Same convention, different date/issue/version: a distinct entity,
-                                # not a second name for this one.  Kept for the summary rather
-                                # than reported, and decided after the score so the count means
-                                # "pairs the score would have called duplicates".
-                                series_pairs.append((key_a, key_b))
-                                continue
-                            if pair_key(key_a, key_b) in accepted_collision_keys:
-                                # Read and rejected once already.  Re-reporting it every run is how
-                                # a stable count stops carrying information; the ledger holds the
-                                # reason, and a pair can be carved back out of it.
-                                accepted_collision_pairs += 1
-                                continue
-                            issues["similarity"].append(
-                                f"Name collision: {key_a}.md <-> {key_b}.md ({ratio:.0%})"
-                            )
-                            collision_pairs.append((key_a, key_b))
+        names = [core_names[key] for key in type_members]
+        for left_index, right_index in _candidate_name_pairs(names, SIMILARITY_MERGE_THRESHOLD):
+            key_a, key_b = type_members[left_index], type_members[right_index]
+            if not names[left_index] and not names[right_index]:
+                ratio = 1.0
+            elif HAVE_CORE and hasattr(vector_lake_core, "fast_sequence_matcher_ratio"):
+                ratio = vector_lake_core.fast_sequence_matcher_ratio(names[left_index], names[right_index])
+            else:
+                ratio = SequenceMatcher(None, names[left_index], names[right_index]).ratio()
+            if ratio > SIMILARITY_MERGE_THRESHOLD:
+                if series_keys[key_a] == series_keys[key_b]:
+                    # Same convention, different date/issue/version: a distinct entity,
+                    # not a second name for this one.  Kept for the summary rather
+                    # than reported, and decided after the score so the count means
+                    # "pairs the score would have called duplicates".
+                    series_pairs.append((key_a, key_b))
+                    continue
+                if pair_key(key_a, key_b) in accepted_collision_keys:
+                    # Read and rejected once already.  Re-reporting it every run is how
+                    # a stable count stops carrying information; the ledger holds the
+                    # reason, and a pair can be carved back out of it.
+                    accepted_collision_pairs += 1
+                    continue
+                issues["similarity"].append(
+                    f"Name collision: {key_a}.md <-> {key_b}.md ({ratio:.0%})"
+                )
+                collision_pairs.append((key_a, key_b))
 
     collision_families = _family_sizes(collision_pairs)
     series_families = _family_sizes(series_pairs)

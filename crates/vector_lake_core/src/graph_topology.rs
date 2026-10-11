@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct FastNodeInput {
@@ -14,12 +14,21 @@ pub struct FastNodeInput {
 }
 
 fn zero_evidence_below_threshold(
-    max_affinity: Option<f64>, multiplier: f64,
-    max_multiplier: Option<f64>, min_relevance: f64,
+    max_affinity: Option<f64>,
+    multiplier: f64,
+    max_multiplier: Option<f64>,
+    min_relevance: f64,
 ) -> bool {
-    let (Some(affinity), Some(maximum)) = (max_affinity, max_multiplier) else { return false; };
-    if ![affinity, multiplier, maximum].iter().all(|value| value.is_finite() && *value >= 0.0)
-        || !min_relevance.is_finite() { return false; }
+    let (Some(affinity), Some(maximum)) = (max_affinity, max_multiplier) else {
+        return false;
+    };
+    if ![affinity, multiplier, maximum]
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0)
+        || !min_relevance.is_finite()
+    {
+        return false;
+    }
     // Match the existing scorer's grouping and Rust rounding (not Python's).
     let bound = affinity * (multiplier * maximum);
     bound.is_finite() && (bound * 1000.0).round() / 1000.0 < min_relevance
@@ -48,7 +57,9 @@ pub fn fast_calculate_weighted_edges(
             for (type_b, score_val) in inner_dict.iter() {
                 let t_b: String = type_b.extract()?;
                 let score: f64 = score_val.extract()?;
-                max_affinity = max_affinity.filter(|_| score.is_finite()).map(|value| value.max(score));
+                max_affinity = max_affinity
+                    .filter(|_| score.is_finite())
+                    .map(|value| value.max(score));
                 affinity_cache.insert((t_a.clone(), t_b), score);
             }
         }
@@ -65,16 +76,19 @@ pub fn fast_calculate_weighted_edges(
     for (k, v) in nodes_payload.iter() {
         let key: String = k.extract()?;
         if let Ok(dict) = v.downcast::<PyDict>() {
-            let node_type: String = dict.get_item("type")?
+            let node_type: String = dict
+                .get_item("type")?
                 .and_then(|x| x.extract::<String>().ok())
                 .unwrap_or_else(|| "concept".to_string())
                 .to_lowercase();
 
-            let links: Vec<String> = dict.get_item("links")?
+            let links: Vec<String> = dict
+                .get_item("links")?
                 .and_then(|x| x.extract::<Vec<String>>().ok())
                 .unwrap_or_default();
 
-            let sources: Vec<String> = dict.get_item("sources")?
+            let sources: Vec<String> = dict
+                .get_item("sources")?
                 .and_then(|x| x.extract::<Vec<String>>().ok())
                 .unwrap_or_default();
 
@@ -82,29 +96,40 @@ pub fn fast_calculate_weighted_edges(
             if let Some(t_item) = dict.get_item("triples")? {
                 if let Ok(t_dict) = t_item.downcast::<PyDict>() {
                     for (tgt, w_val) in t_dict.iter() {
-                        if let (Ok(t_str), Ok(w_num)) = (tgt.extract::<String>(), w_val.extract::<f64>()) {
+                        if let (Ok(t_str), Ok(w_num)) =
+                            (tgt.extract::<String>(), w_val.extract::<f64>())
+                        {
                             triples.insert(t_str, w_num);
                         }
                     }
                 }
             }
 
-            let multiplier: f64 = dict.get_item("multiplier")?
+            let multiplier: f64 = dict
+                .get_item("multiplier")?
                 .and_then(|x| x.extract::<f64>().ok())
                 .unwrap_or(1.0);
 
-            max_multiplier = max_multiplier.filter(|_| multiplier.is_finite() && multiplier >= 0.0)
+            max_multiplier = max_multiplier
+                .filter(|_| multiplier.is_finite() && multiplier >= 0.0)
                 .map(|value| value.max(multiplier));
 
-            let degree_weight: f64 = dict.get_item("degree_weight")?
+            let degree_weight: f64 = dict
+                .get_item("degree_weight")?
                 .and_then(|x| x.extract::<f64>().ok())
                 .unwrap_or(0.0);
 
             for s in &sources {
-                source_to_nodes.entry(s.clone()).or_default().push(key.clone());
+                source_to_nodes
+                    .entry(s.clone())
+                    .or_default()
+                    .push(key.clone());
             }
             for l in &links {
-                reverse_links.entry(l.clone()).or_default().insert(key.clone());
+                reverse_links
+                    .entry(l.clone())
+                    .or_default()
+                    .insert(key.clone());
             }
 
             node_keys.push(key.clone());
@@ -129,14 +154,23 @@ pub fn fast_calculate_weighted_edges(
     let mut triple_only_endpoints: HashSet<String> = HashSet::new();
     // No distinct pair can come from a singleton posting. Avoid even the
     // linear triple mask scan when there is no zero-contribution fanout.
-    let has_zero_fanout = reverse_links.iter().any(|(neighbor, linked)|
-        linked.len() > 1 && nodes.get(neighbor).map(|node| node.degree_weight).unwrap_or(0.0) == 0.0)
-        || (overlap_w == 0.0 && source_to_nodes.values().any(|linked| linked.len() > 1));
+    let has_zero_fanout = reverse_links.iter().any(|(neighbor, linked)| {
+        linked.len() > 1
+            && nodes
+                .get(neighbor)
+                .map(|node| node.degree_weight)
+                .unwrap_or(0.0)
+                == 0.0
+    }) || (overlap_w == 0.0
+        && source_to_nodes.values().any(|linked| linked.len() > 1));
     if has_zero_fanout {
         for (key, node) in &nodes {
             for target in node.triples.keys() {
                 if nodes.contains_key(target)
-                    && !reverse_links.get(target).map_or(false, |linked| linked.contains(key)) {
+                    && !reverse_links
+                        .get(target)
+                        .map_or(false, |linked| linked.contains(key))
+                {
                     triple_only_endpoints.insert(key.clone());
                     triple_only_endpoints.insert(target.clone());
                 }
@@ -157,7 +191,12 @@ pub fn fast_calculate_weighted_edges(
         let mut candidate_neighbor_scores: HashMap<&String, f64> = HashMap::new();
 
         let skip_zero_postings = !triple_only_endpoints.contains(key_a)
-            && zero_evidence_below_threshold(max_affinity, node_a.multiplier, max_multiplier, min_rel);
+            && zero_evidence_below_threshold(
+                max_affinity,
+                node_a.multiplier,
+                max_multiplier,
+                min_rel,
+            );
         if overlap_w != 0.0 || !skip_zero_postings {
             for source in &node_a.sources {
                 if let Some(b_nodes) = source_to_nodes.get(source) {
@@ -173,7 +212,9 @@ pub fn fast_calculate_weighted_edges(
         for neighbor in &node_a.links {
             if let Some(b_nodes) = reverse_links.get(neighbor) {
                 let deg_w = nodes.get(neighbor).map(|n| n.degree_weight).unwrap_or(0.0);
-                if deg_w == 0.0 && skip_zero_postings { continue; }
+                if deg_w == 0.0 && skip_zero_postings {
+                    continue;
+                }
                 for key_b in b_nodes {
                     if key_a < key_b {
                         *candidate_neighbor_scores.entry(key_b).or_insert(0.0) += deg_w;
@@ -242,8 +283,12 @@ pub fn fast_calculate_weighted_edges(
     }
 
     // 4. 去重并保留 Top-K 边 (dedupe_and_prune)
-    raw_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| a.0.cmp(&b.0)).then_with(|| a.1.cmp(&b.1)));
+    raw_edges.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
 
     let mut incident_counts: HashMap<String, usize> = HashMap::new();
     let mut pruned_edges = Vec::with_capacity(raw_edges.len());

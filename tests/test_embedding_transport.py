@@ -9,7 +9,7 @@ Measured on 2026-09-19, first embedding in a fresh process:
 
 The two returned **bit-identical** vectors for the same text (cosine 1.00000000), which is what
 makes the cheaper path a transport change rather than a behaviour change.  The SDK stays as the
-proven fallback; the point of these tests is that the default path never pays the import, that the
+explicit alternative, not an automatic error fallback; the point of these tests is that the default path never pays the import, that the
 request and response shapes are what the endpoint expects, and that error semantics still match
 what the retry loop classifies.
 """
@@ -19,6 +19,8 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+import urllib.request
+from http.client import HTTPMessage
 
 import pytest
 
@@ -30,7 +32,7 @@ class _FakeResponse(io.BytesIO):
         return self
 
     def __exit__(self, *exc):
-        return False
+        return None
 
 
 def _config():
@@ -43,6 +45,23 @@ def _rest_transport(monkeypatch):
     embedding_scheduler.reset_client_cache()
     yield
     embedding_scheduler.reset_client_cache()
+
+
+def test_default_urllib_retains_legacy_redirect_behavior_not_httpx_policy():
+    """Legacy 302 converts POST to GET and retains custom key; opt-in rejects it.
+
+    This is a stdlib-handler probe, not a real provider or redirect security claim.
+    """
+    request = urllib.request.Request(
+        "https://first.invalid/embed", data=b"{}",
+        headers={"x-goog-api-key": "dummy-legacy-redirect"}, method="POST",
+    )
+    redirected = urllib.request.HTTPRedirectHandler().redirect_request(
+        request, io.BytesIO(), 302, "Found", HTTPMessage(), "https://second.invalid/collect",
+    )
+    assert redirected is not None
+    assert redirected.get_method() == "GET"
+    assert redirected.get_header("X-goog-api-key") == "dummy-legacy-redirect"
 
 
 def test_the_default_transport_is_rest(monkeypatch):
@@ -103,7 +122,7 @@ def test_an_http_error_carries_its_status_and_body(monkeypatch):
 
     def _fail(request, timeout=None):
         raise urllib.error.HTTPError(
-            request.full_url, 429, "Too Many Requests", {}, io.BytesIO(b'{"error":"quota"}')
+            request.full_url, 429, "Too Many Requests", HTTPMessage(), io.BytesIO(b'{"error":"quota"}')
         )
 
     monkeypatch.setattr("urllib.request.urlopen", _fail)
@@ -129,7 +148,7 @@ def test_embed_texts_does_not_import_the_sdk_on_the_default_path(monkeypatch):
         lambda contents, cfg, **_kwargs: [[0.1] * cfg.dimension for _ in contents],
     )
     client_calls = []
-    monkeypatch.setattr(embedding_scheduler, "_shared_client", lambda: client_calls.append(1))
+    monkeypatch.setattr(embedding_scheduler, "_create_client", lambda: client_calls.append(1))
 
     values = embedding_scheduler.embed_texts(["hello"], budget_seconds=5)
 
@@ -138,7 +157,7 @@ def test_embed_texts_does_not_import_the_sdk_on_the_default_path(monkeypatch):
 
 
 def test_the_sdk_path_is_still_available(monkeypatch):
-    """The fallback has to keep working, unchanged."""
+    """The explicitly selected SDK path must remain available."""
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv(embedding_scheduler.EMBEDDING_TRANSPORT_ENV, "sdk")
     config = _config()
@@ -152,7 +171,10 @@ def test_the_sdk_path_is_still_available(monkeypatch):
     class _Client:
         models = _Models()
 
-    monkeypatch.setattr(embedding_scheduler, "_shared_client", lambda: _Client())
+        def close(self):
+            pass
+
+    monkeypatch.setattr(embedding_scheduler, "_create_client", lambda: _Client())
     values = embedding_scheduler.embed_texts(["hello"], budget_seconds=5)
 
     assert len(values) == 1

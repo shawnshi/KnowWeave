@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -413,16 +414,12 @@ REST_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}
 
 
 def embedding_transport() -> str:
-    """``"rest"`` (default) or ``"sdk"``.
+    """Default urllib REST, opt-in pooled REST, or explicitly selected SDK.
 
-    The SDK path costs ``import google.genai`` (3.5 s) plus ``genai.Client()`` (1.3 s) in every
-    fresh process -- measured, and 80 % of what looked like "embedding latency" on the first
-    query of a server or the whole of a CLI search.  The REST call is the same endpoint the SDK
-    posts to, so the default avoids that import entirely and the SDK stays available as the
-    proven fallback (``VECTOR_LAKE_EMBEDDING_TRANSPORT=sdk``, or an unexpected REST failure).
+    A selected backend's errors never trigger automatic transport fallback.
     """
     value = str(os.environ.get(EMBEDDING_TRANSPORT_ENV, "rest") or "rest").strip().lower()
-    return value if value in {"rest", "sdk"} else "rest"
+    return value if value in {"rest", "rest-httpx", "sdk"} else "rest"
 
 
 def _embedding_deadline(budget_seconds: float | None) -> float | None:
@@ -506,6 +503,130 @@ def _rest_embed_contents(contents: list[str], config, *, deadline: float | None 
     return values_list
 
 
+def _load_httpx():
+    try:
+        import httpx
+    except ModuleNotFoundError as exc:
+        if exc.name == "httpx":
+            raise RuntimeError("rest-httpx requires the optional httpx package") from exc
+        # A broken installation/transitive import is not a missing optional backend.
+        raise
+    return httpx
+
+
+def _httpx_route(endpoint):
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    try:
+        target = urlsplit(endpoint)
+        if target.scheme not in {"http", "https"} or not target.hostname or target.username or target.password:
+            raise ValueError("invalid target")
+        origin = (target.scheme, target.hostname.lower(), target.port or (443 if target.scheme == "https" else 80))
+        proxy = None if urllib.request.proxy_bypass(target.netloc) else urllib.request.getproxies().get(target.scheme)
+        if proxy:
+            if not isinstance(proxy, str):
+                raise ValueError("invalid proxy")
+            if "://" not in proxy:
+                proxy = "http://" + proxy
+            parsed = urlsplit(proxy)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+                raise ValueError("incompatible proxy")
+            _ = parsed.port
+        return origin, proxy
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Embedding endpoint/proxy configuration is incompatible with rest-httpx") from exc
+
+
+def _create_httpx_client(proxy, timeout):
+    import ssl
+    from http.cookiejar import CookieJar, DefaultCookiePolicy
+
+    httpx = _load_httpx()
+
+    class RejectCookies(DefaultCookiePolicy):
+        def set_ok(self, cookie, request):
+            return False
+
+        def return_ok(self, cookie, request):
+            return False
+
+    transport = httpx.HTTPTransport(
+        verify=ssl.create_default_context(), proxy=proxy, trust_env=False,
+        limits=httpx.Limits(max_connections=8, max_keepalive_connections=8, keepalive_expiry=5),
+        http1=True, http2=False, retries=0,
+    )
+    try:
+        return httpx.Client(
+            transport=transport, trust_env=False, follow_redirects=False,
+            timeout=timeout, cookies=CookieJar(policy=RejectCookies()),
+        )
+    except BaseException:
+        try:
+            transport.close()
+        except Exception as exc:  # noqa: BLE001 - preserve original constructor error
+            log.warning("Embedding HTTPX constructor cleanup failed (%s).", type(exc).__name__)
+        raise
+
+
+def _httpx_embed_contents(contents: list[str], config, *, deadline: float | None = None) -> list[list[float]]:
+    """One pooled REST attempt; no redirects, cookies, or hidden retries."""
+    import json as _json
+
+    api_key = str(os.environ.get("GEMINI_API_KEY") or "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+    endpoint = REST_ENDPOINT.format(model=config.model)
+    origin, proxy = _httpx_route(endpoint)
+    httpx = _load_httpx()
+    factory = _create_httpx_client
+    base_timeout = _env_int("VECTOR_LAKE_EMBEDDING_TIMEOUT_MS", 30_000) / 1000.0
+    key = (factory, origin, proxy, base_timeout)
+    payload = _json.dumps({
+        "requests": [
+            {"model": f"models/{config.model}", "content": {"parts": [{"text": str(text)}]}}
+            for text in contents
+        ]
+    }).encode("utf-8")
+    try:
+        with (
+            _HTTPX_CLIENTS.borrow(key, lambda: factory(proxy, base_timeout), deadline=deadline) as client,
+            client.stream(
+                "POST", endpoint, content=payload,
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key, "Accept-Encoding": "identity"},
+                timeout=_transport_timeout(deadline),
+            ) as response,
+        ):
+            body = response.read()
+            if not 200 <= response.status_code < 300:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    # No provider body/URL echo: allowlisted quota markers suffice for
+                    # the existing scheduler classifier, even for an echoed credential.
+                    detail = body[:300].decode("utf-8", "replace").lower()
+                    quota = " quota" if "quota" in detail or "resource_exhausted" in detail else ""
+                    raise RuntimeError(f"HTTP {response.status_code} from the embedding endpoint:{quota}") from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Embedding HTTPX transport failed ({type(exc).__name__})") from exc
+    _remaining_budget(deadline)
+    payload_json = _json.loads(body.decode("utf-8"))
+    embeddings = payload_json.get("embeddings") or []
+    values_list = [list(item.get("values") or []) for item in embeddings]
+    if len(values_list) != len(contents):
+        raise EmbeddingResponseError(
+            f"Embedding response count mismatch: expected {len(contents)}, got {len(values_list)}"
+        )
+    for index, values in enumerate(values_list):
+        if len(values) != config.dimension:
+            raise EmbeddingResponseError(
+                f"Embedding dimension mismatch at position {index}: "
+                f"expected {config.dimension}, got {len(values)}"
+            )
+    _remaining_budget(deadline)
+    return values_list
+
+
 def _provider_contents(contents: list[str]) -> list[Any]:
     from google.genai import types
 
@@ -525,85 +646,222 @@ def _create_client():
     ))
 
 
-# ``_create_client()`` measured 1.7-6.9 s per call on the operator machine (the
-# ``google.genai`` import plus auth/transport setup), and it was invoked for
-# every embedding request -- including the single-vector query embedding on the
-# search hot path, where it dominated the 2.4 s retrieve latency.  One client per
-# process is enough; ``httpx`` underneath it is safe for concurrent use.
-#
-# The cache is keyed on the identity of the resolved factory so that rebinding
-# ``_create_client`` (tests, alternate transports) takes effect instead of being
-# silently served a stale client.
-_CLIENT_CACHE: tuple | None = None
-_CLIENT_CACHE_LOCK = threading.Lock()
+class EmbeddingClientLifecycleError(RuntimeError):
+    """Client acquisition is unavailable (shutdown, fork, or invalidated construction)."""
 
 
-def _shared_client():
-    global _CLIENT_CACHE
+@dataclass(eq=False)
+class _ClientGeneration:
+    key: tuple
+    epoch: int
+    state: str = "constructing"
+    client: Any = None
+    borrowers: int = 0
+
+
+class _ClientManager:
+    """Two live generations including constructors and unsuccessful closes.
+
+    The manager owns only synchronous clients it constructs, never injected clients.
+    Construction/close may block: the deadline is cooperative, not cancellation.
+    """
+
+    def __init__(self):
+        self.pid = os.getpid()
+        self.condition = threading.Condition()
+        self.epoch = 0
+        self.stopped = False
+        self.generations: list[_ClientGeneration] = []
+
+    def _check_pid(self):
+        # Must precede even acquiring the inherited condition after a fork.
+        if self.pid != os.getpid():
+            raise EmbeddingClientLifecycleError("Inherited embedding manager cannot be reused; use spawn")
+
+    def _close(self, generation):
+        self._check_pid()
+        try:
+            generation.client.close()
+        except Exception as exc:  # noqa: BLE001 - never mask a request's original error
+            log.warning("Embedding client close failed (%s); resource retained as close_failed", type(exc).__name__)
+            with self.condition:
+                generation.state = "close_failed"
+                self.condition.notify_all()
+        else:
+            with self.condition:
+                self.generations.remove(generation)
+                self.condition.notify_all()
+
+    def invalidate(self, *, shutdown=False, reopen=False):
+        self._check_pid()
+        closing = []
+        with self.condition:
+            self.epoch += 1
+            if shutdown:
+                self.stopped = True
+            elif reopen:
+                self.stopped = False
+            for generation in self.generations:
+                if generation.state == "active":
+                    generation.state = "retired"
+                if generation.state == "retired" and not generation.borrowers:
+                    generation.state = "closing"
+                    closing.append(generation)
+            self.condition.notify_all()
+        for generation in closing:
+            self._close(generation)
+
+    @contextmanager
+    def borrow(self, key, factory, *, deadline=None):
+        self._check_pid()
+        wait_deadline = time.monotonic() + _transport_timeout(deadline)
+        while True:
+            closing = []
+            reservation = None
+            with self.condition:
+                if self.stopped:
+                    raise EmbeddingClientLifecycleError("Embedding clients are shut down")
+                _remaining_budget(wait_deadline)
+                selected = next((g for g in self.generations if g.state == "active" and g.key == key), None)
+                if selected is not None:
+                    selected.borrowers += 1
+                    break
+                for generation in self.generations:
+                    if generation.state == "active":
+                        generation.state = "retired"
+                    if generation.state == "retired" and not generation.borrowers:
+                        generation.state = "closing"
+                        closing.append(generation)
+                if not closing and len(self.generations) < 2 and not any(
+                    g.state == "constructing" for g in self.generations
+                ):
+                    reservation = _ClientGeneration(key, self.epoch)
+                    self.generations.append(reservation)
+                elif not closing:
+                    self.condition.wait(timeout=_remaining_budget(wait_deadline))
+            for generation in closing:
+                self._close(generation)
+            if reservation is None:
+                continue
+            try:
+                reservation.client = factory()
+            except BaseException:
+                self._check_pid()
+                with self.condition:
+                    self.generations.remove(reservation)
+                    self.condition.notify_all()
+                raise
+            self._check_pid()
+            with self.condition:
+                invalidated = self.stopped or reservation.epoch != self.epoch
+                expired = time.monotonic() >= wait_deadline
+                if invalidated or expired:
+                    reservation.state = "closing"
+                else:
+                    reservation.state = "active"
+                    reservation.borrowers = 1
+                    selected = reservation
+                self.condition.notify_all()
+            if invalidated or expired:
+                self._close(reservation)
+                if invalidated:
+                    raise EmbeddingClientLifecycleError("Embedding client construction was invalidated")
+                raise EmbeddingBudgetExceeded("Embedding client construction exceeded acquisition budget")
+            break
+        assert selected is not None
+        try:
+            _remaining_budget(deadline)
+            yield selected.client
+        finally:
+            self._check_pid()
+            with self.condition:
+                selected.borrowers -= 1
+                close = selected.state == "retired" and not selected.borrowers
+                if close:
+                    selected.state = "closing"
+                self.condition.notify_all()
+            if close:
+                self._close(selected)
+
+
+_SDK_CLIENTS = _ClientManager()
+_HTTPX_CLIENTS = _ClientManager()
+
+
+def _borrow_sdk_client(*, deadline=None):
     factory = _create_client
-    cached = _CLIENT_CACHE
-    if cached is not None and cached[0] is factory:
-        return cached[1]
-    with _CLIENT_CACHE_LOCK:
-        cached = _CLIENT_CACHE
-        if cached is not None and cached[0] is factory:
-            return cached[1]
-        client = factory()
-        _CLIENT_CACHE = (factory, client)
-        return client
+    key = (factory, _env_int("VECTOR_LAKE_EMBEDDING_TIMEOUT_MS", 30_000))
+    return _SDK_CLIENTS.borrow(key, factory, deadline=deadline)
 
 
-def reset_client_cache() -> None:
-    """Drop the reused embedding client (credential rotation, transport swap)."""
-    global _CLIENT_CACHE
-    with _CLIENT_CACHE_LOCK:
-        _CLIENT_CACHE = None
+def reset_client_cache(*, reopen: bool = False) -> None:
+    """Retire clients without cancelling active leases.
+
+    No-argument reset never reopens shutdown. ``reopen=True`` explicitly starts a
+    new lifecycle for tests/embedded hosts, after the owner has stopped old work.
+    SDK auth/endpoint/proxy and TLS trust changes require this explicit reset.
+    """
+    _SDK_CLIENTS.invalidate(reopen=reopen)
+    _HTTPX_CLIENTS.invalidate(reopen=reopen)
+
+
+def shutdown_embedding_clients() -> None:
+    """Stop new borrowing; close idle clients, drain active ones on last release.
+
+    Owns synchronous SDK resources only, not SDK .aio or caller-injected clients.
+    Shutdown is idempotent and does not wait for or cancel active requests.
+    """
+    _SDK_CLIENTS.invalidate(shutdown=True)
+    _HTTPX_CLIENTS.invalidate(shutdown=True)
+
+
+def _sdk_prewarm_safe() -> bool:
+    import sys
+
+    base_urls = sys.modules.get("google.genai._base_url")
+    if base_urls is not None and (
+        getattr(base_urls, "_default_base_gemini_url", None)
+        or getattr(base_urls, "_default_base_vertex_url", None)
+    ):
+        return False
+    # Local google-genai client.py/_api_client.py: enterprise can acquire ADC at
+    # construction; DebugConfig can create replay/record files. On-demand auth is unchanged.
+    excluded = (
+        "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE",
+        "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_GENAI_CLIENT_MODE", "GOOGLE_GENAI_REPLAYS_DIRECTORY", "GOOGLE_GENAI_REPLAY_ID",
+        "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
+    )
+    return bool(os.environ.get("GEMINI_API_KEY")) and embedding_transport() == "sdk" and not any(
+        os.environ.get(name) for name in excluded
+    ) and _create_client is _DEFAULT_SDK_FACTORY
+
+
+_DEFAULT_SDK_FACTORY = _create_client
 
 
 def prewarm_client() -> bool:
-    """Build the embedding client before the first request needs it.
-
-    ``import google.genai`` costs 3.5 s and ``genai.Client()`` a further 1.3 s on the
-    operator machine -- both are paid inside the first embedding-needing call, which put
-    4.8 s in front of the first search of every fresh process (a fresh ``search`` at 5.02 s
-    against 0.76 s for the next one in the same server).  Neither step performs network I/O
-    (auth is lazy), so a long-lived server can pay for them while it is still starting.
-
-    Best effort by construction: a server that cannot build the client must still serve
-    lexical search, so every failure is swallowed and reported as ``False``.  Returns
-    ``True`` when a client is cached.  Callers run this off the request path; see
-    :func:`start_prewarm_thread`.
-    """
-    if not os.environ.get("GEMINI_API_KEY"):
-        return False
-    if embedding_transport() != "sdk":
-        # The REST transport never builds a client, so paying 4.8 s to warm one would be pure
-        # cost -- the opposite of what this function is for.
+    """Best-effort constructor warmup in restricted API-key mode; no REST warmup."""
+    if not _sdk_prewarm_safe():
         return False
     try:
-        _shared_client()
-        return True
+        with _borrow_sdk_client():
+            return True
     except Exception as exc:  # noqa: BLE001 - prewarming must never fail a server start
-        log.warning("Embedding client prewarm failed (%s: %s).", type(exc).__name__, exc)
+        log.warning("Embedding client prewarm failed (%s).", type(exc).__name__)
         return False
 
 
 def start_prewarm_thread() -> threading.Thread | None:
-    """Pre-warm the client on a daemon thread, unless disabled or unnecessary.
-
-    ``VECTOR_LAKE_EMBEDDING_PREWARM=off`` (or ``0``) disables it -- a host that starts many
-    short-lived processes should not pay a background import it may never use.
-
-    Returns the thread, or ``None`` when nothing was started.
-    """
+    """Start best-effort SDK warmup only when safe and not shut down."""
     if str(os.environ.get("VECTOR_LAKE_EMBEDDING_PREWARM", "")).strip().lower() in {"off", "0", "false"}:
         return None
-    if not os.environ.get("GEMINI_API_KEY"):
+    if not _sdk_prewarm_safe():
         return None
-    if embedding_transport() != "sdk":
-        # Nothing to warm: the REST transport never constructs a client, so a thread that only
-        # calls :func:`prewarm_client` would return False without doing anything.
-        return None
+    _SDK_CLIENTS._check_pid()
+    with _SDK_CLIENTS.condition:
+        if _SDK_CLIENTS.stopped:
+            return None
     thread = threading.Thread(
         target=prewarm_client, name="embedding-client-prewarm", daemon=True
     )
@@ -652,6 +910,12 @@ def _request_embeddings(
     deadline = _embedding_deadline(budget_seconds) if deadline is None else deadline
     _remaining_budget(deadline)
     transport = embedding_transport()
+    if transport == "sdk" and client is None:
+        with _borrow_sdk_client(deadline=deadline) as owned_client:
+            return _request_embeddings(
+                owned_client, contents, request_tokens, config, limiter,
+                durable_reservation=durable_reservation, deadline=deadline,
+            )
     # Built lazily: this import is the 3.5 s the REST transport exists to avoid.
     provider_contents = _provider_contents(contents) if transport == "sdk" else []
     for attempt in range(config.max_retries + 1):
@@ -661,6 +925,8 @@ def _request_embeddings(
             _remaining_budget(deadline)
             if transport == "rest":
                 values = _rest_embed_contents(contents, config, deadline=deadline)
+            elif transport == "rest-httpx":
+                values = _httpx_embed_contents(contents, config, deadline=deadline)
             else:
                 timeout_ms = int(_transport_timeout(deadline) * 1000)
                 if timeout_ms < 1:
@@ -723,7 +989,7 @@ def embed_texts(
     tokens = sum(estimate_embedding_tokens(text) for text in normalized)
     _remaining_budget(deadline)
     return _request_embeddings(
-        _shared_client() if embedding_transport() == "sdk" else None,
+        None,
         normalized,
         tokens,
         config,
@@ -804,18 +1070,13 @@ def embedding_backfill(
     last_error = ""
     consecutive_failures = 0
     try:
-        # Only the SDK transport needs a client.  Building one unconditionally imported
-        # ``google.genai`` (and raised ImportError on a host without it) even though
-        # ``_request_embeddings`` would ignore the client and post over REST -- the cost the
-        # REST transport exists to remove, on the one path that embeds in bulk.
-        client = _shared_client() if embedding_transport() == "sdk" else None
         limiter = MinuteRateLimiter(config)
         for batch in batches:
             contents = [item["text"] for item in batch]
             batch_tokens = sum(int(item["tokens"]) for item in batch)
             try:
                 values_list = _request_embeddings(
-                    client, contents, batch_tokens, config, limiter, budget_seconds=budget_seconds
+                    None, contents, batch_tokens, config, limiter, budget_seconds=budget_seconds
                 )
                 for item, values in zip(batch, values_list, strict=True):
                     db_store.upsert_embedding(

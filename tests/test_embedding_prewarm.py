@@ -23,9 +23,9 @@ def _clean_client_cache(monkeypatch):
     # Prewarming exists for the SDK path only: the REST transport (the default) never builds a
     # client, so these tests pin the transport they are about.
     monkeypatch.setenv(embedding_scheduler.EMBEDDING_TRANSPORT_ENV, "sdk")
-    embedding_scheduler.reset_client_cache()
+    embedding_scheduler.reset_client_cache(reopen=True)
     yield
-    embedding_scheduler.reset_client_cache()
+    embedding_scheduler.reset_client_cache(reopen=True)
 
 
 def test_prewarm_is_skipped_without_an_api_key(monkeypatch):
@@ -48,6 +48,7 @@ def test_prewarm_swallows_a_client_construction_failure(monkeypatch):
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(embedding_scheduler, "_create_client", _explode)
+    monkeypatch.setattr(embedding_scheduler, "_DEFAULT_SDK_FACTORY", _explode)
 
     assert embedding_scheduler.prewarm_client() is False
 
@@ -56,7 +57,8 @@ def test_prewarm_caches_the_client_so_the_next_call_is_free(monkeypatch):
     builds = []
 
     class _Client:
-        pass
+        def close(self):
+            pass
 
     def _factory():
         builds.append(1)
@@ -64,16 +66,19 @@ def test_prewarm_caches_the_client_so_the_next_call_is_free(monkeypatch):
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(embedding_scheduler, "_create_client", _factory)
+    monkeypatch.setattr(embedding_scheduler, "_DEFAULT_SDK_FACTORY", _factory)
 
     assert embedding_scheduler.prewarm_client() is True
     assert len(builds) == 1
     # The read path's own accessor must be served from the prewarmed cache.
-    assert isinstance(embedding_scheduler._shared_client(), _Client)
+    with embedding_scheduler._borrow_sdk_client() as client:
+        assert isinstance(client, _Client)
     assert len(builds) == 1
 
 
 def test_thread_is_daemonic_and_started_once(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("VECTOR_LAKE_EMBEDDING_PREWARM", "on")
     started = threading.Event()
 
     def _slow_prewarm():

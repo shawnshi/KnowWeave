@@ -24,6 +24,9 @@ def _sdk_transport(monkeypatch):
     path they were written for instead of silently issuing a real request.
     """
     monkeypatch.setenv(embedding_scheduler.EMBEDDING_TRANSPORT_ENV, "sdk")
+    embedding_scheduler.reset_client_cache(reopen=True)
+    yield
+    embedding_scheduler.reset_client_cache(reopen=True)
 
 
 def _purpose(memory_dir):
@@ -136,7 +139,7 @@ def test_embedding_backfill_rejects_partial_provider_response(isolated_memory, m
     monkeypatch.setattr(
         embedding_scheduler,
         "_create_client",
-        lambda: SimpleNamespace(models=FakeModels()),
+        lambda: SimpleNamespace(models=FakeModels(), close=lambda: None),
     )
     result = embedding_backfill(
         {
@@ -173,7 +176,7 @@ def test_embedding_backfill_rejects_wrong_dimension(isolated_memory, monkeypatch
     monkeypatch.setattr(
         embedding_scheduler,
         "_create_client",
-        lambda: SimpleNamespace(models=FakeModels()),
+        lambda: SimpleNamespace(models=FakeModels(), close=lambda: None),
     )
     result = embedding_backfill(
         {"nodes": {"Concept_A": {"title": "A"}}},
@@ -452,7 +455,8 @@ def test_the_backfill_stamps_which_model_produced_the_stored_vectors(isolated_me
                 embed_content=lambda model, contents, config=None: SimpleNamespace(
                     embeddings=[SimpleNamespace(values=[1.0] * 3072) for _ in contents]
                 )
-            )
+            ),
+            close=lambda: None,
         ),
     )
 

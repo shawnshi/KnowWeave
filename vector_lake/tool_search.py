@@ -15,6 +15,7 @@ from html import escape
 
 from vector_lake import governance_store, search_ledger
 from vector_lake import author_facet
+from vector_lake.domain_dictionary import PUBLIC_QUERY_PROFILE, QUERY_EXPANSION_DICT
 from vector_lake.node_vocabulary import strip_prefix
 from vector_lake.schema_validator import canonical_domain
 from vector_lake.wiki_utils import get_index_path, get_wiki_dir
@@ -22,7 +23,9 @@ from vector_lake.wiki_utils import get_index_path, get_wiki_dir
 try:
     import vector_lake_core
     HAVE_CORE = True
-except ImportError:
+except ModuleNotFoundError as exc:
+    if exc.name != "vector_lake_core":
+        raise
     vector_lake_core = None
     HAVE_CORE = False
 
@@ -95,14 +98,8 @@ def _fusion_mode() -> str:
 
 
 def _fts_backend_name() -> str:
-    """Which lexical backend is actually serving queries: the same answer the harness records.
-
-    Read through ``tantivy_index.enabled()`` rather than the environment, so a host that asked for
-    tantivy but has no wheel reports ``fts5`` -- it fell back, and the ledger must say so.
-    """
-    from vector_lake import tantivy_index
-
-    return "tantivy" if tantivy_index.enabled() else "fts5"
+    """Actual path for the last lexical call; default before a call is FTS5."""
+    return getattr(_LAST_FTS_ERROR, "backend", "fts5")
 
 
 def _expansion_quota(pool_size: int) -> int | None:
@@ -221,12 +218,6 @@ STOP_WORDS = {
     "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
     "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for",
     "of", "and", "or", "but", "with", "by", "from", "as", "it", "this", "that",
-}
-
-QUERY_EXPANSION_DICT = {
-    "医疗信息化": ["HIT", "卫宁", "电子病历", "医疗IT"],
-    "大模型": ["LLM", "大语言模型", "Agent", "智能体"],
-    "医疗AI": ["临床Agent", "大模型医疗落地", "电子病历 智能化"],
 }
 
 def _passes_filters(node: dict, domain: str | None, cluster: str | None, include_history: bool, filter_expr: str | None) -> bool:
@@ -379,26 +370,21 @@ def _get_vector_search_results(query_vector: list[float], limit: int = 50) -> tu
         import sqlite_vec
         conn = get_connection()
         query_blob = sqlite_vec.serialize_float32(query_vector)
-        # Two-stage path (binary prefilter + exact rerank) replaces the brute-force scan; it is
-        # used only when its shadow index reports itself consistent, so a missing or drifted
-        # shadow degrades to the scan below instead of answering from stale vectors.
         from vector_lake import two_stage_index
-        state = None if two_stage_index.mode() == "legacy" else two_stage_index.status(conn)
-        if state is not None:
-            scored = two_stage_index.search(conn, query_blob, limit, state=state)
-        else:
-            if two_stage_index.mode() == "two_stage":
-                log.warning(
-                    "VECTOR_LAKE_VECTOR_INDEX=two_stage but the shadow index is unavailable;"
-                    " using the legacy brute-force scan."
+        with two_stage_index.query_view(conn) as view:
+            if view.state is not None:
+                scored = two_stage_index.search(conn, query_blob, limit, state=view.state)
+            else:
+                if view.requested_mode in ("two_stage", "ram"):
+                    log.warning(
+                        "VECTOR_LAKE_VECTOR_INDEX=%s but the shadow index is unavailable;"
+                        " using the legacy brute-force scan.", view.requested_mode,
+                    )
+                cursor = conn.execute(
+                    "SELECT page_key, distance FROM vec_embeddings WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                    (query_blob, limit)
                 )
-            # Using match because it's fast. It returns L2 distance.
-            # Cosine similarity for normalized vectors: 1 - L2^2 / 2
-            cursor = conn.execute(
-                "SELECT page_key, distance FROM vec_embeddings WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (query_blob, limit)
-            )
-            scored = [(row["page_key"], row["distance"]) for row in cursor.fetchall()]
+                scored = [(row["page_key"], row["distance"]) for row in cursor.fetchall()]
 
         results = {}
         for page_key, dist in scored:
@@ -465,82 +451,88 @@ def _get_vector_search_results_filtered(
 
         conn = get_connection()
         query_blob = sqlite_vec.serialize_float32(query_vector)
-        # Both tokens matter: data_version observes other connections, total_changes our own.
-        # Keep the pre-read token, so a write during a round also invalidates the next round.
-        if reuse is not None:
-            stamp = (
-                conn, conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes,
-                query_blob, id(catalog), domain, cluster, include_history, filter_expr,
-            )
-            if reuse.get("stamp") != stamp:
-                reuse.clear()
-                reuse.update(
-                    stamp=stamp, state=two_stage_index.status(conn), verdicts={},
-                    # KNN prefix/tie behaviour was verified on this runtime.  Unknown versions
-                    # retain demand-sized scans rather than silently inheriting that assumption.
-                    prefix_safe=conn.execute("SELECT vec_version()").fetchone()[0] == "v0.1.9",
+        hint = reuse.get("status_hint") if reuse is not None else None
+        with two_stage_index.query_view(conn, status_hint=hint) as view:
+            # Both tokens matter: data_version observes other connections, total_changes our own.
+            # Keep the pre-read token, so a write during a round also invalidates the next round.
+            if reuse is not None:
+                if not view.owned:
+                    reuse.clear()  # A caller can roll back a savepoint without changing total_changes.
+                stamp = (
+                    conn, *view.stamp,
+                    query_blob, id(catalog), domain, cluster, include_history, filter_expr,
                 )
-            state = reuse["state"]
-        else:
-            state = two_stage_index.status(conn)
-        if state is None:
-            return None, None, 0
-        # Exactly what the caller asked for, with no floor.  The widening loop *is* the depth
-        # mechanism: a floor of the recorded shortlist made its first four steps (25/50/100/200)
-        # examine the same 256 candidates four times, and it also returned pages drawn from a deeper
-        # pool than the step the loop had asked about.  Both are avoidable, and neither buys recall
-        # the loop cannot buy by widening.
-        depth = max(1, int(limit))
-        if reuse is None or depth > MAX_FILTERED_RECALL_CANDIDATES:
-            keys = two_stage_index.shortlist_keys(conn, query_blob, depth, state=state)
-            verdicts = {}
-        else:
-            previous = reuse.get("keys")
-            if previous is None or not reuse.get("prefix_safe", True):
-                keys = two_stage_index.shortlist_keys(conn, query_blob, depth, state=state)
-                reuse["keys"] = keys
-            elif depth <= len(previous) or reuse.get("pooled") or len(previous) < reuse["depth"]:
-                keys = previous[:depth]
+                if reuse.get("stamp") != stamp:
+                    reuse.clear()
+                    reuse.update(
+                        stamp=stamp, state=view.state, verdicts={},
+                        # KNN prefix/tie behaviour was verified on this runtime.  Unknown versions
+                        # retain demand-sized scans rather than silently inheriting that assumption.
+                        prefix_safe=(view.backend == "ram" or
+                                     conn.execute("SELECT vec_version()").fetchone()[0] == "v0.1.9"),
+                    )
+                reuse["status_hint"] = (view.state_token, view.state) if view.owned else None
+                state = reuse["state"]
             else:
-                pool = two_stage_index.shortlist_keys(
-                    conn, query_blob, MAX_FILTERED_RECALL_CANDIDATES, state=state
-                )
-                if pool[:len(previous)] != previous:
-                    # KNN tie behaviour is backend-owned.  Never union incompatible prefixes:
-                    # that would admit candidates the original depth did not contain.
-                    reuse["prefix_safe"] = False
+                state = view.state
+            if state is None:
+                return None, None, 0
+            # Exactly what the caller asked for, with no floor.  The widening loop *is* the depth
+            # mechanism: a floor of the recorded shortlist made its first four steps (25/50/100/200)
+            # examine the same 256 candidates four times, and it also returned pages drawn from a deeper
+            # pool than the step the loop had asked about.  Both are avoidable, and neither buys recall
+            # the loop cannot buy by widening.
+            depth = max(1, int(limit))
+            if reuse is None or depth > MAX_FILTERED_RECALL_CANDIDATES:
+                keys = two_stage_index.shortlist_keys(conn, query_blob, depth, state=state)
+                verdicts = {}
+            else:
+                previous = reuse.get("keys")
+                if previous is None or not reuse.get("prefix_safe", True):
                     keys = two_stage_index.shortlist_keys(conn, query_blob, depth, state=state)
                     reuse["keys"] = keys
+                elif depth <= len(previous) or reuse.get("pooled") or len(previous) < reuse["depth"]:
+                    keys = previous[:depth]
                 else:
-                    reuse.update(keys=pool, pooled=True)
-                    keys = pool[:depth]
-            reuse["depth"] = depth
-            if not reuse.get("prefix_safe", True):
-                reuse["verdicts"] = {
-                    key: reuse["verdicts"][key] for key in keys if key in reuse["verdicts"]
-                }
-            verdicts = reuse["verdicts"]
-        unseen = [key for key in keys if key not in verdicts]
-        # An expression may read arbitrary fields; ordinary selectors need only three columns.
-        if unseen:
-            if filter_expr:
-                nodes = catalog.nodes_by_key(unseen)
-            else:
-                cheap = getattr(catalog, "filter_fields", None)
-                nodes = cheap(unseen) if cheap is not None else catalog.nodes_by_key(unseen)
-            verdicts.update({
-                key: key in nodes and _passes_filters(
-                    nodes[key], domain, cluster, include_history, filter_expr
-                )
-                for key in unseen
-            })
-        eligible = [key for key in keys if verdicts[key]]
-        results: dict[str, float] = {}
-        for key, dist in two_stage_index.rerank_keys(conn, query_blob, eligible, limit):
-            sim = 1.0 - (dist * dist) / 2.0
-            if sim > VECTOR_MIN_COSINE:
-                results[key] = sim
-        return results, None, len(keys)
+                    pool = two_stage_index.shortlist_keys(
+                        conn, query_blob, MAX_FILTERED_RECALL_CANDIDATES, state=state
+                    )
+                    if pool[:len(previous)] != previous:
+                        # KNN tie behaviour is backend-owned.  Never union incompatible prefixes:
+                        # that would admit candidates the original depth did not contain.
+                        reuse["prefix_safe"] = False
+                        keys = two_stage_index.shortlist_keys(conn, query_blob, depth, state=state)
+                        reuse["keys"] = keys
+                    else:
+                        reuse.update(keys=pool, pooled=True)
+                        keys = pool[:depth]
+                reuse["depth"] = depth
+                if not reuse.get("prefix_safe", True):
+                    reuse["verdicts"] = {
+                        key: reuse["verdicts"][key] for key in keys if key in reuse["verdicts"]
+                    }
+                verdicts = reuse["verdicts"]
+            unseen = [key for key in keys if key not in verdicts]
+            # An expression may read arbitrary fields; ordinary selectors need only three columns.
+            if unseen:
+                if filter_expr:
+                    nodes = catalog.nodes_by_key(unseen)
+                else:
+                    cheap = getattr(catalog, "filter_fields", None)
+                    nodes = cheap(unseen) if cheap is not None else catalog.nodes_by_key(unseen)
+                verdicts.update({
+                    key: key in nodes and _passes_filters(
+                        nodes[key], domain, cluster, include_history, filter_expr
+                    )
+                    for key in unseen
+                })
+            eligible = [key for key in keys if verdicts[key]]
+            results: dict[str, float] = {}
+            for key, dist in two_stage_index.rerank_keys(conn, query_blob, eligible, limit):
+                sim = 1.0 - (dist * dist) / 2.0
+                if sim > VECTOR_MIN_COSINE:
+                    results[key] = sim
+            return results, None, len(keys)
     except Exception as e:
         if reuse is not None:
             reuse.clear()
@@ -555,6 +547,9 @@ _LAST_MEMORY_VIEWS = threading.local()
 def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
     from vector_lake import tokenizer as _tokenizer
 
+    if not hasattr(_LAST_FTS_ERROR, "backends"):
+        _LAST_FTS_ERROR.backends = set()
+    _LAST_FTS_ERROR.backend = "none"
     query_tok = _tokenizer.tokenize_joined(query)
         
     # Sanitize query_tok for FTS5 (remove special syntax characters)
@@ -566,48 +561,39 @@ def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
         return []
         
     try:
-        from vector_lake.db_store import get_connection
-        conn = get_connection()
-
-        # The switch has to be honoured *here* as well as in ``db_store.search_wiki``.  This
-        # function is the lexical half of the hybrid retrieval pipeline, and it queries
-        # ``wiki_search_index`` directly -- so when only that other site was wired, the
-        # ``VECTOR_LAKE_FTS`` switch was inert on the path that actually answers queries.  Measured:
-        # both arms of the round-3 eval returned byte-identical results and the same four FTS5
-        # failures, which is how the gap was found.
-        from vector_lake import tantivy_index
+        from vector_lake import db_store, tantivy_index
+        conn = db_store.get_connection()
 
         if tantivy_index.enabled():
-            # The same sanitized term list the FTS5 arm searches, so the comparison isolates the
-            # engine.  Term queries carry no syntax, so the `.`/`'` inputs that make FTS5 raise
-            # "syntax error near" simply match literally here.
-            # Term queries bypass Tantivy's lowercase analyzer; match its indexed token form.
-            ranked = tantivy_index.search([term.lower() for term in query_tok.split()], limit=limit)
-            if not ranked:
-                _LAST_FTS_ERROR.msg = None
-                return []
-            keys = [key for key, _score in ranked]
-            ranks = dict(ranked)
-            placeholders = ",".join("?" for _ in keys)
-            metadata = {
-                row["node_key"]: (row["title"], row["summary"])
-                for row in conn.execute(
-                    f"SELECT node_key, title, summary FROM wiki_search_index"
-                    f" WHERE node_key IN ({placeholders})",
-                    keys,
-                )
-            }
-            _LAST_FTS_ERROR.msg = None
-            return [
-                {
-                    "node_key": key,
-                    "title": metadata.get(key, ("", ""))[0],
-                    "summary": metadata.get(key, ("", ""))[1],
-                    "rank": ranks[key],
-                }
-                for key in keys
-                if key in metadata
-            ]
+            try:
+                if not conn.in_transaction:
+                    db_store.init_db()
+                before = tantivy_index.current_token()
+                ranked = tantivy_index.search_if_current(
+                    [term.lower() for term in query_tok.split()], limit=limit,
+                ) if before is not None else None
+                if ranked is not None:
+                    keys = [key for key, _score in ranked]
+                    ranks = dict(ranked)
+                    placeholders = ",".join("?" for _ in keys)
+                    metadata = {
+                        row["node_key"]: (row["title"], row["summary"])
+                        for row in conn.execute(
+                            f"SELECT node_key, title, summary FROM wiki_search_index"
+                            f" WHERE node_key IN ({placeholders})", keys,
+                        )
+                    } if keys else {}
+                    if tantivy_index.current_token() == before:
+                        _LAST_FTS_ERROR.msg = None
+                        _LAST_FTS_ERROR.backend = "tantivy"
+                        _LAST_FTS_ERROR.backends.add("tantivy")
+                        return [
+                            {"node_key": key, "title": metadata[key][0],
+                             "summary": metadata[key][1], "rank": ranks[key]}
+                            for key in keys if key in metadata
+                        ]
+            except Exception as exc:  # noqa: BLE001 - native fault is not a valid empty result
+                log.warning("Tantivy query failed (%s: %s); using FTS5", type(exc).__name__, exc)
 
         clean_toks = [t.replace('"', '') for t in query_tok.split()]
         query_esc = " ".join(f'"{t}"' for t in clean_toks if t.strip())
@@ -621,8 +607,11 @@ def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
             WHERE wiki_search_index MATCH ? 
             ORDER BY rank LIMIT ?
         """, (query_esc, limit))
+        rows = [dict(row) for row in cur.fetchall()]
         _LAST_FTS_ERROR.msg = None
-        return [dict(row) for row in cur.fetchall()]
+        _LAST_FTS_ERROR.backend = "fts5"
+        _LAST_FTS_ERROR.backends.add("fts5")
+        return rows
     except Exception as e:
         msg = f"FTS5 query failed ({type(e).__name__}: {e})"
         log.warning(msg)
@@ -698,38 +687,10 @@ def _keyword_intent(query: str) -> str:
     return "general"
 
 
-_QUERY_TERMS_REGISTERED = False
-
-
-def _ensure_query_terms() -> None:
-    """Register ``QUERY_EXPANSION_DICT`` terms once, *outside* any cached function.
-
-    This used to run inside ``_expand_query_locally``, which is ``lru_cache``d: the side effect
-    happened on a miss and not on a hit, and the cache key covered the backend identity but not the
-    dictionary state.  No backend in this tree exposes ``add_word`` -- ``tokenizer.add_word`` returns
-    False and warns once -- so nothing depends on it today.  It is still the wrong place for a
-    global mutation: the next backend that does support it would make indexing and querying disagree
-    about where words end, which is exactly what the search index's content digest exists to prevent.
-    """
-    global _QUERY_TERMS_REGISTERED
-    if _QUERY_TERMS_REGISTERED:
-        return
-    from vector_lake import tokenizer as _tokenizer
-
-    if _tokenizer.backend_name() != "unavailable":
-        for term in QUERY_EXPANSION_DICT:
-            _tokenizer.add_word(term)
-        for expansions in QUERY_EXPANSION_DICT.values():
-            for expansion in expansions:
-                _tokenizer.add_word(expansion)
-    _QUERY_TERMS_REGISTERED = True
-
-
 @functools.lru_cache(maxsize=128)
-def _local_expansions(query: str) -> tuple[str, ...]:
-    """The token set for a query.  Pure: same input, same output, no global side effects."""
+def _local_expansions_cached(query: str, tokenizer_identity, expansion_profile, snapshot) -> tuple[str, ...]:
     expanded_terms = set([query])
-    for key, expansions in QUERY_EXPANSION_DICT.items():
+    for key, expansions in snapshot:
         if key in query:
             expanded_terms.update(expansions)
 
@@ -764,9 +725,25 @@ def _local_expansions(query: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
+class _LocalExpansionCache:
+    """Resolve identity before lookup while retaining the existing cache-control API."""
+
+    cache_clear = staticmethod(_local_expansions_cached.cache_clear)
+    cache_info = staticmethod(_local_expansions_cached.cache_info)
+
+    def __call__(self, query: str) -> tuple[str, ...]:
+        from vector_lake import tokenizer as _tokenizer
+
+        # Compatibility edits must not reuse tokens from different expansions or whitespace.
+        snapshot = tuple((key, tuple(values)) for key, values in QUERY_EXPANSION_DICT.items())
+        return _local_expansions_cached(query, _tokenizer.cache_identity(), PUBLIC_QUERY_PROFILE, snapshot)
+
+
+_local_expansions = _LocalExpansionCache()
+
+
 def _expand_query_locally(query: str) -> list[str]:
-    """The expansion tokens for a query.  Registers the dictionary terms first, once."""
-    _ensure_query_terms()
+    """A caller-owned copy of expansion tokens; never mutate a tokenizer dictionary."""
     return list(_local_expansions(query))
 
 
@@ -1032,12 +1009,31 @@ def _entity_name_priority() -> float:
 RERANK_TOKEN_CACHE_MAX_CHARS = 4096
 
 
-@functools.lru_cache(maxsize=256)
-def _cached_rerank_tokens(text: str, backend: str) -> tuple[str, ...]:
-    """Pool metadata tokens; backend identity participates in cache invalidation."""
+def _rerank_tokens_uncached(text: str, backend: str) -> tuple[str, ...]:
     from vector_lake import tokenizer as _tokenizer
 
     return tuple(token.lower() for token in _tokenizer.tokenize_joined(text).split())
+
+
+@functools.lru_cache(maxsize=256)
+def _rerank_tokens_cached(text: str, backend: str, tokenizer_identity, expansion_profile) -> tuple[str, ...]:
+    return _rerank_tokens_uncached(text, backend)
+
+
+class _RerankTokenCache:
+    """Resolve actual identity before lookup; preserve controls and oversized-token bypass."""
+
+    cache_clear = staticmethod(_rerank_tokens_cached.cache_clear)
+    cache_info = staticmethod(_rerank_tokens_cached.cache_info)
+    __wrapped__ = staticmethod(_rerank_tokens_uncached)
+
+    def __call__(self, text: str, backend: str) -> tuple[str, ...]:
+        from vector_lake import tokenizer as _tokenizer
+
+        return _rerank_tokens_cached(text, backend, _tokenizer.cache_identity(), PUBLIC_QUERY_PROFILE)
+
+
+_cached_rerank_tokens = _RerankTokenCache()
 
 
 def _rerank_candidates_locally(query: str, candidates: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
@@ -1343,6 +1339,7 @@ def _search_scored_pages(
     # assigned further down raised ``NameError: cannot access free variable 'fusion_mode'`` on exactly
     # those paths.
     fusion_mode = _fusion_mode()
+    _LAST_FTS_ERROR.backends = set()
 
     def _record(returned_rows, notes, error=None):
         search_ledger.record(
@@ -1354,7 +1351,7 @@ def _search_scored_pages(
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
             error=error,
             fusion=fusion_mode,
-            fts_backend=_fts_backend_name(),
+            fts_backend="+".join(sorted(_LAST_FTS_ERROR.backends)) or "none",
         )
         _mark("ledger")
         if timings is not None:
@@ -1431,6 +1428,8 @@ def _search_scored_pages(
                 fallback_hits.sort(key=lambda x: x["score"], reverse=True)
                 fts_results = fallback_hits[:_candidate_depth()]
                 if fts_results:
+                    _LAST_FTS_ERROR.backend = "index.json"
+                    _LAST_FTS_ERROR.backends.add("index.json")
                     vector_notes.append(f"FTS5 fallback: matched {len(fts_results)} node(s) from index.json")
         for position, row in enumerate(fts_results):
             key = row['node_key']

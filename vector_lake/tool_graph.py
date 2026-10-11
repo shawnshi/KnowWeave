@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import webbrowser
 from datetime import datetime, timezone
@@ -9,6 +10,15 @@ from filelock import FileLock, Timeout
 from vector_lake import get_extension_root
 from vector_lake import governance_store
 from vector_lake.wiki_utils import get_claim_graph_path, get_index_path, get_memory_dir
+
+try:
+    import vector_lake_core
+    HAVE_CORE = True
+except ModuleNotFoundError as exc:
+    if exc.name != "vector_lake_core":
+        raise
+    vector_lake_core = None
+    HAVE_CORE = False
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -23,6 +33,57 @@ DEFAULT_MAX_CLAIM_EDGES = 5000
 # an unlocked read.  The fallback is still needed, but it is now long enough to
 # be exceptional, and it is reported in the payload when it happens.
 DEFAULT_INDEX_LOCK_TIMEOUT_SECONDS = 20.0
+
+
+def _normalize_backbone_edges(selected_candidates: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    # Step 5: Normalize relations and compute backbone degrees
+    backbone_degrees: dict[str, int] = {}
+    normalized_edges = []
+    for edge in selected_candidates:
+        s = edge["source"]
+        t = edge["target"]
+        w = round(float(edge.get("weight", 1.0)), 3)
+        rel = edge.get("relation")
+        if not rel:
+            rel = "strong_association" if w >= 10.0 else ("association" if w >= 5.0 else "related_to")
+
+        normalized_edges.append({
+            "source": s,
+            "target": t,
+            "weight": w,
+            "relation": rel,
+        })
+        backbone_degrees[s] = backbone_degrees.get(s, 0) + 1
+        backbone_degrees[t] = backbone_degrees.get(t, 0) + 1
+
+    return normalized_edges, backbone_degrees
+
+
+
+def _native_backbone_candidates(raw_edges, valid_node_ids, max_edges, min_weight):
+    native = getattr(vector_lake_core, "fast_backbone_indices", None) if HAVE_CORE else None
+    if (native is None or not isinstance(max_edges, int)
+            or len(raw_edges) > 1_000_000 or len(valid_node_ids) > 100_000
+            or not all(isinstance(node, str) for node in valid_node_ids)):
+        return None
+    node_ids = {node: index for index, node in enumerate(sorted(valid_node_ids))}
+    edges = []
+    for index, edge in enumerate(raw_edges):
+        source, target = edge.get("source"), edge.get("target")
+        if not source or not target or source == target:
+            continue
+        if source not in valid_node_ids or target not in valid_node_ids:
+            continue
+        weight = float(edge.get("weight", 1.0))
+        if weight < min_weight:
+            continue
+        # Python sorting of NaN has special ordering behavior; do not change it.
+        if not math.isfinite(weight):
+            return None
+        edges.append((node_ids[source], node_ids[target], weight, index))
+    # Python accepts arbitrarily large integers; never pass an unbounded budget to usize.
+    indices = native(len(node_ids), edges, min(max_edges, len(edges)))
+    return [raw_edges[index] for index in indices]
 
 
 def _extract_backbone_edges(
@@ -54,6 +115,9 @@ def _extract_backbone_edges(
     """
     if not raw_edges or max_edges <= 0:
         return [], {}
+    native_candidates = _native_backbone_candidates(raw_edges, valid_node_ids, max_edges, min_weight)
+    if native_candidates is not None:
+        return _normalize_backbone_edges(native_candidates)
 
     # Step 1: Filter dangling endpoints and self-loops
     clean_edges = []
@@ -135,28 +199,7 @@ def _extract_backbone_edges(
 
         selected_candidates = [unique_edges[i] for i in sorted(chosen_indices)]
 
-    # Step 5: Normalize relations and compute backbone degrees
-    backbone_degrees: dict[str, int] = {}
-    normalized_edges = []
-    for edge in selected_candidates:
-        s = edge["source"]
-        t = edge["target"]
-        w = round(float(edge.get("weight", 1.0)), 3)
-        rel = edge.get("relation")
-        if not rel:
-            rel = "strong_association" if w >= 10.0 else ("association" if w >= 5.0 else "related_to")
-
-        normalized_edges.append({
-            "source": s,
-            "target": t,
-            "weight": w,
-            "relation": rel,
-        })
-        backbone_degrees[s] = backbone_degrees.get(s, 0) + 1
-        backbone_degrees[t] = backbone_degrees.get(t, 0) + 1
-
-    return normalized_edges, backbone_degrees
-
+    return _normalize_backbone_edges(selected_candidates)
 
 def _graph_output_path(memory_dir: str) -> str:
     """Default dashboard location: the ``scratch`` isolation zone of the lake.

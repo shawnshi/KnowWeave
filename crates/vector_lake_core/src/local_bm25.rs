@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 
 /// 纯内存极速 Okapi BM25 局部候选池重排引擎
 /// 接收 query 分词与候选文档分词列表，直接输出混合重排后的 (原下标, 混合得分)
@@ -18,7 +18,9 @@ pub fn fast_bm25_rerank(
         return Vec::new();
     }
     if n != upstream_scores.len() {
-        return (0..n).map(|i| (i, upstream_scores.get(i).copied().unwrap_or(0.0))).collect();
+        return (0..n)
+            .map(|i| (i, upstream_scores.get(i).copied().unwrap_or(0.0)))
+            .collect();
     }
 
     let blend_weight = weight.unwrap_or(0.4).clamp(0.0, 1.0);
@@ -47,7 +49,11 @@ pub fn fast_bm25_rerank(
         doc_tfs.push(tf_map);
     }
 
-    let avgdl = if n > 0 { (total_len as f64) / (n as f64) } else { 1.0 };
+    let avgdl = if n > 0 {
+        (total_len as f64) / (n as f64)
+    } else {
+        1.0
+    };
 
     // 3. 计算 BM25 得分
     let mut lexical_scores = vec![0.0f64; n];
@@ -79,13 +85,19 @@ pub fn fast_bm25_rerank(
         let mut min_val = f64::INFINITY;
         let mut max_val = f64::NEG_INFINITY;
         for &v in vals {
-            if v < min_val { min_val = v; }
-            if v > max_val { max_val = v; }
+            if v < min_val {
+                min_val = v;
+            }
+            if v > max_val {
+                max_val = v;
+            }
         }
         if max_val - min_val <= 1e-12 {
             vec![0.0; vals.len()]
         } else {
-            vals.iter().map(|&v| (v - min_val) / (max_val - min_val)).collect()
+            vals.iter()
+                .map(|&v| (v - min_val) / (max_val - min_val))
+                .collect()
         }
     };
 

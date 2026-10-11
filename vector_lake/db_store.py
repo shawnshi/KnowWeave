@@ -10,6 +10,7 @@ import uuid
 from contextlib import contextmanager
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from vector_lake.wiki_utils import get_index_path
 from vector_lake.wiki_utils import get_meta_dir
@@ -1027,6 +1028,8 @@ _SCHEMA_SENTINELS: tuple[str, ...] = (
     "operational_memory",
     "operational_memory_index",
     "wiki_search_index",
+    "tantivy_mirror_state",
+    "tantivy_mirror_queue",
     "page_index_nodes",
     "page_index_edges",
     "page_index_state",
@@ -1841,6 +1844,42 @@ def _init_db_once(db_key: str):
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS tantivy_mirror_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                epoch INTEGER NOT NULL CHECK (epoch >= 0),
+                phase TEXT NOT NULL CHECK (phase IN ('needs_clear', 'seeding', 'replay', 'ready')),
+                seed_after_rowid INTEGER NOT NULL,
+                seed_through_rowid INTEGER NOT NULL,
+                incarnation TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                available_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT
+            )
+        """)
+        conn.execute("""
+            INSERT OR IGNORE INTO tantivy_mirror_state
+                (singleton, revision, epoch, phase, seed_after_rowid, seed_through_rowid)
+            SELECT 1, 0, 0, 'needs_clear', 0, COALESCE(MAX(rowid), 0)
+            FROM wiki_search_index
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tantivy_mirror_queue (
+                node_key TEXT PRIMARY KEY NOT NULL,
+                epoch INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+                fts_rowid INTEGER,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                available_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT,
+                CHECK ((operation = 'upsert' AND fts_rowid IS NOT NULL)
+                    OR (operation = 'delete' AND fts_rowid IS NULL))
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tantivy_mirror_eligible "
+                     "ON tantivy_mirror_queue(epoch, available_at, generation)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS alias_registry (
                 key TEXT PRIMARY KEY,
                 value TEXT,
@@ -2054,6 +2093,329 @@ def _init_db_once(db_key: str):
 
 
 
+@contextmanager
+def _fts_mutation():
+    """Atomic FTS + mirror intent, without taking ownership of a caller transaction.
+
+    Schema adoption must happen before BEGIN/SAVEPOINT. Missing derived schema
+    inside a caller transaction is an error, never a reason to commit that caller.
+    """
+    conn = get_connection()
+    if not conn.in_transaction:
+        init_db()
+        with transaction():
+            yield conn
+        return
+    for table in ("tantivy_mirror_state", "tantivy_mirror_queue"):
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,)).fetchone():
+            raise RuntimeError("Initialize Tantivy mirror schema before opening a transaction")
+    if not conn.execute("SELECT 1 FROM tantivy_mirror_state WHERE singleton = 1").fetchone():
+        raise RuntimeError("Missing Tantivy mirror control row")
+    name = "fts_" + uuid.uuid4().hex
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield conn
+        conn.execute(f"RELEASE {name}")
+    except BaseException:
+        conn.execute(f"ROLLBACK TO {name}")
+        conn.execute(f"RELEASE {name}")
+        raise
+
+
+def _enqueue_tantivy_intent(conn, node_key: str, operation: str, rowid: int | None):
+    changed = conn.execute("UPDATE tantivy_mirror_state SET revision = revision + 1, "
+                           "phase = CASE WHEN phase = 'ready' THEN 'replay' ELSE phase END WHERE singleton = 1")
+    if changed.rowcount != 1:
+        raise RuntimeError("Missing Tantivy mirror control row")
+    queued = conn.execute("""
+        INSERT INTO tantivy_mirror_queue (node_key, epoch, generation, operation, fts_rowid)
+        SELECT ?, epoch, revision, ?, ? FROM tantivy_mirror_state WHERE singleton = 1
+        ON CONFLICT(node_key) DO UPDATE SET epoch = excluded.epoch,
+            generation = excluded.generation, operation = excluded.operation,
+            fts_rowid = excluded.fts_rowid, attempt_count = 0, available_at = 0, last_error = NULL
+    """, (node_key, operation, rowid))
+    if queued.rowcount != 1:
+        raise RuntimeError("Tantivy mirror intent was not enqueued")
+
+
+def _reset_tantivy_epoch(conn):
+    changed = conn.execute("""
+        UPDATE tantivy_mirror_state SET revision = revision + 1, epoch = epoch + 1,
+            phase = 'needs_clear', seed_after_rowid = 0,
+            seed_through_rowid = (SELECT COALESCE(MAX(rowid), 0) FROM wiki_search_index),
+            incarnation = NULL, attempt_count = 0, available_at = 0, last_error = NULL
+        WHERE singleton = 1
+    """)
+    if changed.rowcount != 1:
+        raise RuntimeError("Missing Tantivy mirror control row")
+    conn.execute("DELETE FROM tantivy_mirror_queue")
+
+
+@dataclass(frozen=True)
+class TantivyMirrorToken:
+    """Fresh autocommit readiness identity; native incarnation must also be validated."""
+
+    revision: int
+    epoch: int
+    incarnation: str
+
+
+@dataclass(frozen=True)
+class TantivyMirrorIntent:
+    """Snapshot identity and admitted payload (None for delete or rejected upsert)."""
+
+    node_key: str
+    epoch: int
+    generation: int
+    operation: str
+    fts_rowid: int | None
+    payload_bytes: int
+    title: str | None = None
+    summary: str | None = None
+    text: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class TantivyMirrorBatch:
+    """At most max_rows candidates and max_bytes materialized UTF-8 input."""
+
+    epoch: int
+    intents: tuple[TantivyMirrorIntent, ...]
+    rejected: tuple[TantivyMirrorIntent, ...]
+    payload_bytes: int
+
+
+def _tantivy_limits(max_rows=100, max_bytes=4 * 1024 * 1024, max_attempts=3):
+    for name, value, cap in (("max_rows", max_rows, 100), ("max_bytes", max_bytes, 4 * 1024 * 1024),
+                             ("max_attempts", max_attempts, 3)):
+        if type(value) is not int or not 1 <= value <= cap:
+            raise ValueError(f"{name} must be an integer in [1, {cap}]")
+
+
+def _tantivy_autocommit():
+    conn = get_connection()
+    if conn.in_transaction or getattr(_LOCAL, "in_transaction", False):
+        raise RuntimeError("Tantivy consumer requires SQLite autocommit")
+    init_db()
+    return conn
+
+
+def tantivy_mirror_state(max_attempts: int = 3) -> dict:
+    """Control fields plus pending/blocked counts; no native availability claim."""
+    _tantivy_limits(max_attempts=max_attempts)
+    conn = _tantivy_autocommit()
+    with read_snapshot():
+        state = dict(conn.execute("SELECT * FROM tantivy_mirror_state WHERE singleton = 1").fetchone())
+        counts = conn.execute("SELECT COUNT(*), COALESCE(SUM(attempt_count >= ?), 0) "
+                              "FROM tantivy_mirror_queue", (max_attempts,)).fetchone()
+    state.update(pending=counts[0], blocked=counts[1])
+    return state
+
+
+def request_tantivy_rebuild() -> int:
+    """Invalidate readiness, capture seed high-water rowid, discard obsolete intents; return epoch."""
+    conn = _tantivy_autocommit()
+    with transaction():
+        if conn.execute("SELECT 1 FROM wiki_search_index GROUP BY node_key HAVING COUNT(*) > 1 LIMIT 1").fetchone():
+            raise RuntimeError("Duplicate FTS node_key prevents Tantivy rebuild")
+        _reset_tantivy_epoch(conn)
+        return conn.execute("SELECT epoch FROM tantivy_mirror_state WHERE singleton = 1").fetchone()[0]
+
+
+def tantivy_mirror_admit_clear(epoch: int, max_attempts: int = 3) -> bool:
+    """Persist one clear attempt before native work, including crash attempts."""
+    _tantivy_limits(max_attempts=max_attempts)
+    conn = _tantivy_autocommit()
+    with transaction():
+        return conn.execute("UPDATE tantivy_mirror_state SET attempt_count = attempt_count + 1 "
+                            "WHERE singleton = 1 AND epoch = ? AND phase = 'needs_clear' "
+                            "AND attempt_count < ? AND available_at <= ?",
+                            (epoch, max_attempts, time.time())).rowcount == 1
+
+
+def tantivy_mirror_ack_clear(epoch: int, incarnation: str) -> bool:
+    """After successful native clear/release, conditionally start seeding this epoch."""
+    if not isinstance(incarnation, str) or not incarnation or len(incarnation) > 128:
+        raise ValueError("incarnation must be a nonempty string of at most 128 characters")
+    conn = _tantivy_autocommit()
+    with transaction():
+        return conn.execute("UPDATE tantivy_mirror_state SET phase = 'seeding', incarnation = ?, "
+                            "attempt_count = 0, available_at = 0, last_error = NULL "
+                            "WHERE singleton = 1 AND epoch = ? AND phase = 'needs_clear' AND attempt_count > 0",
+                            (incarnation, epoch)).rowcount == 1
+
+
+def _tantivy_retry_delay(retry_delay: float):
+    if not isinstance(retry_delay, (int, float)) or not 0 <= retry_delay <= 3600:
+        raise ValueError("retry_delay must be in [0, 3600] seconds")
+
+
+def tantivy_mirror_fail_clear(epoch: int, error: str, retry_delay: float = 1) -> bool:
+    """Retain bounded control error; no internal retry and no attempt increment."""
+    _tantivy_retry_delay(retry_delay)
+    conn = _tantivy_autocommit()
+    with transaction():
+        return conn.execute("UPDATE tantivy_mirror_state SET last_error = ?, available_at = ? "
+                            "WHERE singleton = 1 AND epoch = ? AND phase = 'needs_clear'",
+                            (str(error)[:2000], time.time() + retry_delay, epoch)).rowcount == 1
+
+
+def tantivy_mirror_seed(epoch: int, max_rows: int = 100) -> dict:
+    """One metadata-only keyset page; existing newer intents always win. No native replay until done."""
+    _tantivy_limits(max_rows=max_rows)
+    conn = _tantivy_autocommit()
+    with transaction():
+        state = conn.execute("SELECT * FROM tantivy_mirror_state WHERE singleton = 1").fetchone()
+        if state["epoch"] != epoch or state["phase"] != "seeding":
+            return {"scanned": 0, "enqueued": 0, "phase": state["phase"], "conflict": True}
+        if state["seed_after_rowid"] == 0 and conn.execute(
+            "SELECT 1 FROM wiki_search_index GROUP BY node_key HAVING COUNT(*) > 1 LIMIT 1"
+        ).fetchone():
+            raise RuntimeError("Duplicate FTS node_key prevents Tantivy seeding")
+        rows = conn.execute("SELECT rowid, node_key FROM wiki_search_index "
+                            "WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?",
+                            (state["seed_after_rowid"], state["seed_through_rowid"], max_rows)).fetchall()
+        added = 0
+        for row in rows:
+            added += conn.execute("INSERT OR IGNORE INTO tantivy_mirror_queue "
+                                  "(node_key, epoch, generation, operation, fts_rowid) VALUES (?, ?, ?, 'upsert', ?)",
+                                  (row["node_key"], epoch, state["revision"], row["rowid"])).rowcount
+        after = rows[-1]["rowid"] if rows else state["seed_through_rowid"]
+        done = len(rows) < max_rows or after >= state["seed_through_rowid"]
+        phase = "replay" if done else "seeding"
+        conn.execute("UPDATE tantivy_mirror_state SET seed_after_rowid = ?, phase = ? WHERE singleton = 1",
+                     (after, phase))
+        return {"scanned": len(rows), "enqueued": added, "phase": phase, "conflict": False}
+
+
+def tantivy_mirror_select(max_rows: int = 100, max_bytes: int = 4 * 1024 * 1024,
+                         max_attempts: int = 3) -> TantivyMirrorBatch:
+    """Short snapshot: sizes first, text only for fitting rows. Caller must hold native ownership.
+
+    At most max_rows eligible candidates are inspected. Oversized/missing rows
+    are returned as rejected metadata, never text. Byte-budget deferred rows
+    remain eligible for later steps. Selection does not consume attempts.
+    """
+    _tantivy_limits(max_rows, max_bytes, max_attempts)
+    conn = _tantivy_autocommit()
+    selected, rejected = [], []
+    total = 0
+    with read_snapshot():
+        state = conn.execute("SELECT epoch, phase FROM tantivy_mirror_state WHERE singleton = 1").fetchone()
+        epoch = state["epoch"]
+        if state["phase"] != "replay":
+            return TantivyMirrorBatch(epoch, (), (), 0)
+        rows = conn.execute("""
+            SELECT q.*, f.rowid AS found_rowid,
+                length(CAST(q.node_key AS BLOB)) +
+                COALESCE(length(CAST(f.title AS BLOB)), 0) +
+                COALESCE(length(CAST(f.summary AS BLOB)), 0) +
+                COALESCE(length(CAST(f.text AS BLOB)), 0) AS payload_bytes
+            FROM tantivy_mirror_queue q LEFT JOIN wiki_search_index f
+                ON q.operation = 'upsert' AND f.rowid = q.fts_rowid AND f.node_key = q.node_key
+            WHERE q.epoch = ? AND q.attempt_count < ? AND q.available_at <= ?
+            ORDER BY q.generation, q.node_key LIMIT ?
+        """, (epoch, max_attempts, time.time(), max_rows)).fetchall()
+        for row in rows:
+            size = row["payload_bytes"]
+            error = None
+            if row["operation"] == "upsert" and row["found_rowid"] is None:
+                error = "FTS rowid/node_key missing; rebuild required"
+            elif size > max_bytes:
+                error = "FTS payload exceeds max_bytes; not materialized"
+            identity = {"node_key": row["node_key"], "epoch": epoch, "generation": row["generation"],
+                        "operation": row["operation"], "fts_rowid": row["fts_rowid"], "payload_bytes": size}
+            if error:
+                rejected.append(TantivyMirrorIntent(**identity, error=error))
+                continue
+            if total + size > max_bytes:
+                continue
+            payload = {}
+            if row["operation"] == "upsert":
+                payload = dict(conn.execute("SELECT title, summary, text FROM wiki_search_index "
+                                            "WHERE rowid = ? AND node_key = ?",
+                                            (row["fts_rowid"], row["node_key"])).fetchone())
+            selected.append(TantivyMirrorIntent(**identity, **payload))
+            total += size
+    return TantivyMirrorBatch(epoch, tuple(selected), tuple(rejected), total)
+
+
+def tantivy_mirror_admit(batch: TantivyMirrorBatch, max_attempts: int = 3) -> tuple[TantivyMirrorIntent, ...]:
+    """Persist attempts; return only still-current intents to send to native. Retain rejected rows."""
+    _tantivy_limits(max_attempts=max_attempts)
+    if len(batch.intents) + len(batch.rejected) > 100 or batch.payload_bytes > 4 * 1024 * 1024:
+        raise ValueError("Batch exceeds admission limits")
+    conn = _tantivy_autocommit()
+    admitted = []
+    with transaction():
+        state = conn.execute("SELECT epoch, phase FROM tantivy_mirror_state WHERE singleton = 1").fetchone()
+        if state["epoch"] != batch.epoch or state["phase"] != "replay":
+            return ()
+        for item in batch.rejected:
+            conn.execute("UPDATE tantivy_mirror_queue SET attempt_count = ?, last_error = ? "
+                         "WHERE node_key = ? AND epoch = ? AND generation = ?",
+                         (max_attempts, str(item.error)[:2000], item.node_key, item.epoch, item.generation))
+        for item in batch.intents:
+            changed = conn.execute("UPDATE tantivy_mirror_queue SET attempt_count = attempt_count + 1 "
+                                   "WHERE node_key = ? AND epoch = ? AND generation = ? "
+                                   "AND attempt_count < ? AND available_at <= ?",
+                                   (item.node_key, item.epoch, item.generation, max_attempts, time.time())).rowcount
+            if changed:
+                admitted.append(item)
+    return tuple(admitted)
+
+
+def tantivy_mirror_ack(intents: tuple[TantivyMirrorIntent, ...]) -> int:
+    """Native commit AND release precede this conditional ACK; newer generations survive."""
+    if len(intents) > 100:
+        raise ValueError("At most 100 ACKs per step")
+    conn = _tantivy_autocommit()
+    with transaction():
+        return sum(conn.execute("DELETE FROM tantivy_mirror_queue WHERE node_key = ? AND epoch = ? "
+                                "AND generation = ?", (item.node_key, item.epoch, item.generation)).rowcount
+                   for item in intents)
+
+
+def tantivy_mirror_fail(intents: tuple[TantivyMirrorIntent, ...], error: str, retry_delay: float = 1) -> int:
+    """Retain conditional errors after admission; never immediately retry or overwrite newer intent."""
+    _tantivy_retry_delay(retry_delay)
+    if len(intents) > 100:
+        raise ValueError("At most 100 failures per step")
+    conn = _tantivy_autocommit()
+    with transaction():
+        return sum(conn.execute("UPDATE tantivy_mirror_queue SET last_error = ?, available_at = ? "
+                                "WHERE node_key = ? AND epoch = ? AND generation = ?",
+                                (str(error)[:2000], time.time() + retry_delay,
+                                 item.node_key, item.epoch, item.generation)).rowcount for item in intents)
+
+
+def tantivy_mirror_mark_ready(epoch: int, incarnation: str) -> bool:
+    """Only after native success/release; require replay drained in the same write transaction."""
+    conn = _tantivy_autocommit()
+    with transaction():
+        if conn.execute("SELECT 1 FROM wiki_search_index GROUP BY node_key HAVING COUNT(*) > 1 LIMIT 1").fetchone():
+            raise RuntimeError("Duplicate FTS node_key prevents Tantivy readiness")
+        return conn.execute("UPDATE tantivy_mirror_state SET phase = 'ready' WHERE singleton = 1 "
+                            "AND epoch = ? AND incarnation = ? AND phase = 'replay' "
+                            "AND NOT EXISTS (SELECT 1 FROM tantivy_mirror_queue)", (epoch, incarnation)).rowcount == 1
+
+
+def tantivy_mirror_read_token() -> TantivyMirrorToken | None:
+    """Single fresh autocommit view; None inside caller transactions or when not ready.
+
+    Compare tokens before/after native + metadata reads. Native owner must
+    separately validate incarnation/schema; this helper performs no native IO.
+    """
+    conn = get_connection()
+    if conn.in_transaction or getattr(_LOCAL, "in_transaction", False):
+        return None
+    row = conn.execute("SELECT revision, epoch, incarnation FROM tantivy_mirror_state "
+                       "WHERE singleton = 1 AND phase = 'ready' AND incarnation IS NOT NULL "
+                       "AND NOT EXISTS (SELECT 1 FROM tantivy_mirror_queue)").fetchone()
+    return TantivyMirrorToken(*row) if row else None
+
+
 def _tantivy():
     """The optional tantivy mirror for the FTS projection, or ``None`` when it is off.
 
@@ -2081,11 +2443,6 @@ def _tan_quiet(action, *args, **kwargs):
 def search_index_keys() -> set[str]:
     """Every node_key currently materialised in the FTS projection."""
     init_db()
-    mirror = _tantivy()
-    if mirror is not None:
-        keys = _tan_quiet(mirror.search_keys)
-        if keys is not None:
-            return keys
     return {
         row["node_key"]
         for row in get_connection().execute("SELECT DISTINCT node_key FROM wiki_search_index")
@@ -2113,8 +2470,7 @@ def upsert_search_index(
     rows that do not exist -- an FTS5 table cannot serve a lookup on a column, so each delete scans
     the whole virtual index.  ``None`` keeps the previous behaviour for callers that cannot say.
     """
-    conn = get_connection()
-    with transaction():
+    with _fts_mutation() as conn:
         # FTS5 does not support ON CONFLICT REPLACE, so this deletes then inserts -- and the delete
         # must go through the rowid: ``WHERE node_key = ?`` scans the whole virtual table (52.4 ms
         # per row measured, against 0.33 ms by rowid).  The node_key form is kept as well so a row
@@ -2143,21 +2499,15 @@ def upsert_search_index(
                 " (node_key, content_hash, updated_at, fts_rowid) VALUES (?, ?, ?, ?)",
                 (node_key, content_hash, datetime.now(timezone.utc).isoformat(), cursor.lastrowid),
             )
-    mirror = _tantivy()
-    if mirror is not None:
-        _tan_quiet(mirror.upsert, node_key, title, summary, text)
+        _enqueue_tantivy_intent(conn, node_key, "upsert", cursor.lastrowid)
 
 
 def clear_search_index():
     """Reset the FTS projection and its content-hash state."""
-    init_db()
-    conn = get_connection()
-    with transaction():
+    with _fts_mutation() as conn:
         conn.execute("DELETE FROM wiki_search_index")
         conn.execute("DELETE FROM wiki_search_index_state")
-    mirror = _tantivy()
-    if mirror is not None:
-        _tan_quiet(mirror.clear)
+        _reset_tantivy_epoch(conn)
 
 
 def _search_index_rowid(conn: sqlite3.Connection, node_key: str) -> int | None:
@@ -2357,8 +2707,7 @@ def finish_embedding_run(run_id: str, status: str, processed: int, failed_batche
         )
 
 def delete_search_index(node_key: str):
-    conn = get_connection()
-    with transaction():
+    with _fts_mutation() as conn:
         # By rowid when it was recorded: `WHERE node_key = ?` scans the whole FTS index
         # (52.4 ms per row measured against 0.33 ms), and the node_key form stays as the
         # fallback for rows whose position predates the backfill.
@@ -2372,13 +2721,10 @@ def delete_search_index(node_key: str):
         conn.execute("DELETE FROM wiki_search_index_state WHERE node_key = ?", (node_key,))
         _delete_vectors(conn, [node_key])
         conn.execute("DELETE FROM vec_embedding_inputs WHERE node_key = ?", (node_key,))
-    mirror = _tantivy()
-    if mirror is not None:
-        _tan_quiet(mirror.delete_node, node_key)
+        _enqueue_tantivy_intent(conn, node_key, "delete", None)
 
 def delete_node_cascade(node_key: str):
-    conn = get_connection()
-    with transaction():
+    with _fts_mutation() as conn:
         rows = conn.execute(
             "SELECT entity_id FROM entities "
             "WHERE entity_id = ? OR canonical_name = ? "
@@ -2408,9 +2754,7 @@ def delete_node_cascade(node_key: str):
         conn.execute("DELETE FROM wiki_search_index_state WHERE node_key = ?", (node_key,))
         _delete_vectors(conn, related_ids)
         conn.execute(f"DELETE FROM vec_embedding_inputs WHERE node_key IN ({placeholders})", related_ids)
-        mirror = _tantivy()
-        if mirror is not None:
-            _tan_quiet(mirror.delete_node, node_key)
+        _enqueue_tantivy_intent(conn, node_key, "delete", None)
         conn.execute(
             "DELETE FROM operational_memory WHERE f_source_claim_id IN ("
             "SELECT claim_id FROM claims WHERE f_page_key = ? OR f_source_page IN (?, ?))",
@@ -2733,30 +3077,33 @@ def search_wiki(query: str, limit: int = 50) -> list[dict]:
     conn = get_connection()
     mirror = _tantivy()
     if mirror is not None:
-        # Ranking comes from tantivy, metadata from the authoritative projection (so a mirror
-        # that knows about more keys than the FTS table still cannot invent a page).
-        ranked = _tan_quiet(mirror.search, query_tok.split(), limit)
-        if ranked:
-            keys = [key for key, _ in ranked]
-            ranks = dict(ranked)
-            placeholders = ",".join("?" for _ in keys)
-            cur = conn.execute(
-                f"SELECT node_key, title, summary FROM wiki_search_index WHERE node_key IN ({placeholders})",
-                keys,
+        try:
+            if not conn.in_transaction:
+                init_db()
+            before = mirror.current_token()
+            ranked = mirror.search_if_current(query_tok.split(), limit) if before is not None else None
+            if ranked is not None:
+                keys = [key for key, _ in ranked]
+                ranks = dict(ranked)
+                placeholders = ",".join("?" for _ in keys)
+                metadata = {
+                    row["node_key"]: (row["title"], row["summary"])
+                    for row in conn.execute(
+                        f"SELECT node_key, title, summary FROM wiki_search_index WHERE node_key IN ({placeholders})",
+                        keys,
+                    )
+                } if keys else {}
+                # A fresh token after metadata rejects even a dirty->ready race.
+                if mirror.current_token() == before:
+                    return [
+                        {"node_key": key, "title": metadata[key][0],
+                         "summary": metadata[key][1], "rank": ranks[key]}
+                        for key in keys if key in metadata
+                    ]
+        except Exception as exc:  # noqa: BLE001 - mirror faults must fall back to authoritative SQL
+            logging.getLogger("vector-lake-tantivy").warning(
+                "tantivy read failed: %s: %s; using FTS5", type(exc).__name__, exc,
             )
-            metadata = {row["node_key"]: (row["title"], row["summary"]) for row in cur.fetchall()}
-            return [
-                {
-                    "node_key": key,
-                    "title": metadata.get(key, ("", ""))[0],
-                    "summary": metadata.get(key, ("", ""))[1],
-                    "rank": ranks[key],
-                }
-                for key in keys
-                if key in metadata
-            ]
-        if ranked is not None:
-            return []
 
     query_esc = " ".join(f'"{t}"' for t in query_tok.split())
 

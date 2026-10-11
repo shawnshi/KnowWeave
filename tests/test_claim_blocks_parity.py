@@ -15,6 +15,7 @@ divergence at some point (see CHANGELOG 2026-09-25):
 """
 from __future__ import annotations
 
+import mistune
 import pytest
 
 from vector_lake import claim_extractor
@@ -39,6 +40,26 @@ def _rust_signature(body):
     return [(b.kind, b.heading, b.raw_text) for b in core.fast_extract_blocks(body)]
 
 
+def _mistune_signature(body, monkeypatch):
+    parser_calls = []
+    create_markdown = mistune.create_markdown
+
+    def parser_spy(*args, **kwargs):
+        parser_calls.append(kwargs.get("renderer"))
+        return create_markdown(*args, **kwargs)
+
+    def forbid_native(_body):
+        raise AssertionError("the independent reference must not call Rust")
+
+    with monkeypatch.context() as reference:
+        reference.setattr(claim_extractor, "CLAIM_BLOCK_BACKEND", "python")
+        reference.setattr(core, "fast_extract_blocks", forbid_native)
+        reference.setattr(mistune, "create_markdown", parser_spy)
+        result = _signature(claim_extractor._iter_blocks(body))
+    assert parser_calls == ["ast"]
+    return result
+
+
 FIXTURES = {
     "paragraph and heading": "# 标题\n\n一个段落。\n\n## 小节\n\n另一个段落。\n",
     "blockquote is not a claim": "前段。\n\n> **规则**: 引用块里的内容不是断言。\n\n后段。\n",
@@ -59,9 +80,20 @@ FIXTURES = {
 
 @requires_parity_core
 @pytest.mark.parametrize("name", sorted(FIXTURES))
-def test_rust_matches_mistune(name):
+def test_rust_matches_mistune(name, monkeypatch):
     body = FIXTURES[name]
-    assert _rust_signature(body) == _signature(claim_extractor._iter_blocks(body)), name
+    actual = _rust_signature(body)
+    assert actual == _mistune_signature(body, monkeypatch), name
+
+
+@requires_parity_core
+@pytest.mark.parametrize("prefix", ["", "## Outer\n\n"])
+def test_nested_heading_keeps_parent_item_and_outer_heading(prefix, monkeypatch):
+    body = prefix + "- Parent\n\n  # Nested\n\n  Tail\n"
+    expected = _mistune_signature(body, monkeypatch)
+    heading = "Outer" if prefix else None
+    assert expected == [("bullet", heading, "ParentNestedTail")]
+    assert _rust_signature(body) == expected
 
 
 @requires_parity_core

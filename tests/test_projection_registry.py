@@ -154,6 +154,76 @@ def test_tantivy_mirror_is_healthy_when_not_in_use(monkeypatch):
     assert "not in use" in detail
 
 
+@pytest.mark.parametrize("condition", ["ready", "dirty", "blocked", "control", "missing", "error"])
+def test_tantivy_health_requires_validated_token_not_counts(isolated_memory, monkeypatch, condition):
+    from vector_lake import tantivy_index
+    from tests.test_tantivy_index import _drain
+
+    db_store.init_db()
+    monkeypatch.setenv("VECTOR_LAKE_FTS", "tantivy")
+    tantivy_index.reset()
+    try:
+        db_store.upsert_search_index("a", "oldword", "", "oldword")
+        _drain()
+        if condition in {"dirty", "blocked", "error"}:
+            db_store.upsert_search_index("a", "newword", "", "newword")
+            assert tantivy_index.stats()["docs"] == 1  # Equal counts can hide stale content.
+        if condition == "blocked":
+            conn = db_store.get_connection()
+            conn.execute("UPDATE tantivy_mirror_queue SET attempt_count=3, last_error='fixture exhausted'")
+            conn.commit()
+        elif condition == "control":
+            db_store.request_tantivy_rebuild()
+            for _ in range(3):
+                assert db_store.tantivy_mirror_admit_clear(db_store.tantivy_mirror_state()["epoch"])
+            db_store.tantivy_mirror_fail_clear(db_store.tantivy_mirror_state()["epoch"], "fixture clear exhausted")
+        elif condition == "missing":
+            tantivy_index._incarnation_file().unlink()
+        elif condition == "error":
+            monkeypatch.setattr(tantivy_index, "current_token", lambda: (_ for _ in ()).throw(ValueError("fixture probe error")))
+        state, detail = projection_registry._tantivy_health()
+        assert state == (projection_registry.HEALTHY if condition == "ready" else projection_registry.DEGRADED)
+        if condition == "blocked":
+            assert "blocked=1" in detail and "fixture exhausted" in detail
+        elif condition == "control":
+            assert "control_attempts=3" in detail and "fixture clear exhausted" in detail
+        elif condition == "error":
+            assert "ValueError" in detail and "fixture probe error" in detail
+        if condition != "ready":
+            assert "FTS5 serving" in detail
+    finally:
+        tantivy_index.reset()
+
+
+def test_tantivy_deferred_repair_is_not_reported_completed(isolated_memory, monkeypatch):
+    from vector_lake import tantivy_index
+
+    db_store.init_db()
+    monkeypatch.setenv("VECTOR_LAKE_FTS", "tantivy")
+    tantivy_index.reset()
+    original = tantivy_index.rebuild_from_sqlite
+    monkeypatch.setattr(tantivy_index, "rebuild_from_sqlite", lambda: original(max_steps=1))
+    try:
+        result = projection_registry.reconcile(only="tantivy_mirror")["tantivy_mirror"]
+        assert result["action"] == "failed"  # Existing registry error contract, not false 'repaired'.
+        assert "MirrorReplayDeferred" in result["error"]
+        assert "scheduled, not completed" in result["error"]
+        assert db_store.tantivy_mirror_state()["phase"] == "seeding"
+        state, _ = projection_registry._tantivy_health()
+        assert state == projection_registry.DEGRADED
+    finally:
+        tantivy_index.reset()
+
+
+def test_tantivy_unavailable_dependency_is_visible(monkeypatch):
+    from vector_lake import tantivy_index
+
+    monkeypatch.setenv("VECTOR_LAKE_FTS", "tantivy")
+    monkeypatch.setattr(tantivy_index, "enabled", lambda: False)
+    state, detail = projection_registry._tantivy_health()
+    assert state == projection_registry.DEGRADED and "unavailable" in detail
+
+
 def test_governance_is_reported_as_a_human_queue(monkeypatch):
     _with_counts(monkeypatch, governance_items=14545)
 

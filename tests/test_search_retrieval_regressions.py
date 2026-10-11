@@ -51,7 +51,8 @@ def _keys(query, nodes, edges=(), **kwargs):
 
 @pytest.mark.parametrize("backend", ["fts5", "tantivy"])
 @pytest.mark.parametrize("filtered", [False, True])
-def test_expansion_preserves_original_and_contextual_alternative(isolated_memory, monkeypatch, backend, filtered):
+@pytest.mark.parametrize("caught_up", [False, True])
+def test_expansion_preserves_original_and_contextual_alternative(isolated_memory, monkeypatch, backend, filtered, caught_up):
     if backend == "tantivy":
         pytest.importorskip("tantivy")
     monkeypatch.setenv("VECTOR_LAKE_FTS", backend)
@@ -62,12 +63,44 @@ def test_expansion_preserves_original_and_contextual_alternative(isolated_memory
     }
     nodes["Concept_OtherDomain"] = {**_node("Other", "LLM 部署"), "domain": "General"}
     _seed_fts(nodes)
+    if backend == "tantivy" and caught_up:
+        from tests.test_tantivy_index import _drain
+        _drain()
     keys = _keys("大模型 部署", nodes, domain="AI_Engineering" if filtered else None)
     assert "Concept_Original" in keys
     assert "Concept_Alias" in keys
     assert "Concept_NoQualifier" not in keys
     if filtered:
         assert "Concept_OtherDomain" not in keys
+
+
+@pytest.mark.parametrize("mode", ["dirty", "ready", "disabled", "mixed"])
+def test_ledger_records_actual_lexical_paths(isolated_memory, monkeypatch, mode):
+    from tests.test_tantivy_index import _drain
+
+    monkeypatch.setenv("VECTOR_LAKE_FTS", "tantivy" if mode != "disabled" else "fts5")
+    monkeypatch.setattr(tool_search, "QUERY_EXPANSION_DICT", {"alpha": ["beta"]})
+    nodes = {"a": _node("alpha context"), "b": _node("beta context")}
+    _seed_fts(nodes)
+    if mode in {"ready", "mixed"}:
+        _drain()
+    recorded = []
+    monkeypatch.setattr(tool_search.search_ledger, "record", lambda *args, **kw: recorded.append(kw))
+    original = tool_search._get_fts_search_results
+    calls = []
+
+    def transition(query, limit=50):
+        rows = original(query, limit)
+        calls.append(query)
+        if mode == "mixed" and len(calls) == 1:
+            db_store.upsert_search_index("b", "beta context", "", "")
+        return rows
+
+    monkeypatch.setattr(tool_search, "_get_fts_search_results", transition)
+    assert set(_keys("alpha context", nodes)) == {"a", "b"}
+    assert recorded[-1]["fts_backend"] == {
+        "dirty": "fts5", "ready": "tantivy", "disabled": "fts5", "mixed": "fts5+tantivy",
+    }[mode]
 
 
 def test_original_recall_keeps_its_slots_when_full(isolated_memory, monkeypatch):

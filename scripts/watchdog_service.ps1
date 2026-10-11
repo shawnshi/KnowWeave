@@ -14,7 +14,13 @@ crash or a hard kill. The watchdog itself keeps exactly one instance through
 [CmdletBinding()]
 param(
     [string]$Python = '',
-    [int]$KeepLogs = 10
+    [int]$KeepLogs = 10,
+    [string]$MemoryDir = '',
+    [string]$PayloadRoot = '',
+    [ValidateSet('0', '1')]
+    [string]$RunnerAutostart,
+    [ValidateRange(0, 2147483647)]
+    [Nullable[int]]$CatchupIntervalSeconds
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +53,28 @@ $err = Join-Path $scratch "watchdog_service-$stamp-err.log"
 # The MCP server runs with the same pair; without them the log mangles non-ASCII page names.
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONUTF8 = '1'
+$env:PYTHONPATH = $root
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:PYTHONOPTIMIZE = '0'
+
+# Task-scoped settings, not global environment changes. Unbound settings retain
+# the inherited environment/runtime defaults.
+foreach ($binding in @{
+    VECTOR_LAKE_MEMORY_DIR = $MemoryDir
+    VECTOR_LAKE_PAYLOAD_ROOT = $PayloadRoot
+}.GetEnumerator()) {
+    if ($binding.Value) {
+        $directory = Get-Item -LiteralPath $binding.Value -ErrorAction Stop
+        if (-not $directory.PSIsContainer) { throw "$($binding.Key) must name a directory" }
+        [Environment]::SetEnvironmentVariable($binding.Key, $directory.FullName, 'Process')
+    }
+}
+if ($PSBoundParameters.ContainsKey('RunnerAutostart')) {
+    $env:VECTOR_LAKE_RUNNER_AUTOSTART = $RunnerAutostart
+}
+if ($PSBoundParameters.ContainsKey('CatchupIntervalSeconds')) {
+    $env:VECTOR_LAKE_CATCHUP_INTERVAL_SECONDS = [string]$CatchupIntervalSeconds
+}
 
 # Interactive latency trigger for the memory n-gram index.
 #

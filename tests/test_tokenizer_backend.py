@@ -17,6 +17,7 @@ contract that matters now:
 * ``add_word`` reports the lack of a dictionary API instead of pretending success.
 """
 import importlib
+import importlib.abc
 import importlib.machinery
 import sys
 import types
@@ -48,14 +49,14 @@ def _install(monkeypatch, name, module):
 
 
 def _hide(monkeypatch, name):
-    """Make ``import name`` raise ImportError, as a missing wheel does."""
+    """Simulate exact top-level absence, not a broken installed wheel."""
 
-    class _RaisingLoader:
+    class _RaisingLoader(importlib.abc.Loader):
         def create_module(self, spec):
-            raise ImportError(f"no {name} for this platform")
+            raise ModuleNotFoundError(f"no {name} for this platform", name=name)
 
         def exec_module(self, module):
-            raise ImportError(f"no {name} for this platform")
+            raise ModuleNotFoundError(f"no {name} for this platform", name=name)
 
     class _RaisingFinder:
         def find_spec(self, fullname, path=None, target=None):
@@ -82,7 +83,9 @@ def test_prefers_rjieba_when_importable(monkeypatch):
 def test_rjieba_version_reports_the_crate_in_force(monkeypatch):
     _install(monkeypatch, "rjieba", _RustBackend("rjieba"))
 
+    monkeypatch.setattr(tokenizer.metadata, "version", lambda name: "0.2.1")
     assert tokenizer.JIEBA_RS_PINNED in tokenizer.backend_version()
+    assert "tested-distribution-mapping" in tokenizer.backend_version()
     assert "rjieba" in tokenizer.backend_version()
 
 
@@ -242,7 +245,7 @@ def test_no_module_imports_a_tokenizer_directly():
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
             for name in forbidden:
-                if stripped.startswith(f"import {name}") or stripped.startswith(f"from {name} "):
+                if stripped.startswith((f"import {name}", f"from {name} ")):
                     offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, f"import the tokenizer module instead: {offenders}"
 
@@ -250,9 +253,6 @@ def test_no_module_imports_a_tokenizer_directly():
 # --- real backend smoke (only when installed) -----------------------------
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("rjieba") is None, reason="rjieba is not installed"
-)
 def test_real_rjieba_backend_is_usable():
     import os
     import subprocess
@@ -262,16 +262,21 @@ def test_real_rjieba_backend_is_usable():
         [
             sys.executable,
             "-c",
-            "from vector_lake import tokenizer;"
+            "import rjieba; from vector_lake import tokenizer;"
+            "text='医疗数据平台与电子病历系统';"
+            "assert tokenizer.cut(text)==list(rjieba.cut(text));"
+            "assert tokenizer.split(text)==list(rjieba.cut(text));"
+            "assert tokenizer.tokenize_joined(text)== ' '.join(rjieba.cut(text));"
             "print(tokenizer.backend_name());"
-            "print(' '.join(tokenizer.cut('医疗数据平台与电子病历系统')))",
+            "print(' '.join(tokenizer.cut(text)))",
         ],
         capture_output=True,
         text=True,
         encoding="utf-8",
-        errors="replace",
+        errors="strict",
         env=env,
         check=True,
+        timeout=20,
     )
     out = result.stdout.splitlines()
     assert out[0] == "rjieba"

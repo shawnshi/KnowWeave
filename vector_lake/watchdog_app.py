@@ -439,6 +439,26 @@ def heal_page_index_projection(force: bool = False) -> dict:
     return report
 
 
+def process_tantivy_mirror_step() -> dict:
+    """One lexical step on the existing worker; never drain the whole backlog."""
+    from vector_lake import db_store, tantivy_index
+
+    db_store.init_db()
+    stats = tantivy_index.replay_pending(max_rows=100, max_bytes=4 * 1024 * 1024, max_attempts=3)
+    blocked = stats["blocked"] or (
+        stats["phase"] == "needs_clear" and stats["attempt_count"] >= 3
+    )
+    state = "error" if blocked else "processing" if stats["status"] == "pending" else "idle"
+    write_status(
+        state, stats["pending"], index_queue.qsize(),
+        f"Tantivy {stats['status']}: phase={stats['phase']}, pending={stats['pending']}, "
+        f"blocked={stats['blocked']}, control_attempts={stats['attempt_count']}",
+        stats["last_error"] or ("mirror intents blocked; explicit repair required" if blocked else ""),
+        component="tantivy",
+    )
+    return stats
+
+
 def index_worker_loop():
     log.info("Outbox Consumer Thread started.")
     consecutive_failures = 0
@@ -449,6 +469,15 @@ def index_worker_loop():
 
     while True:
         try:
+            # Independent of Markdown's cooldown and failures; cleanup below owns the connection.
+            try:
+                process_tantivy_mirror_step()
+            except Exception as exc:  # noqa: BLE001 - lexical failure cannot stop Markdown work
+                log.error("Tantivy worker error: %s: %s", type(exc).__name__, exc)
+                write_status(
+                    "error", 0, index_queue.qsize(), "Tantivy replay exception",
+                    f"{type(exc).__name__}: {exc}"[:2000], component="tantivy",
+                )
             if consecutive_failures >= max_failures:
                 # ``recovering``, not ``halted``: this is a cooldown that retries, and the
                 # aggregate takes the worst component, so the old word pinned the whole
