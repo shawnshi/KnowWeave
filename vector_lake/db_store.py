@@ -3561,10 +3561,10 @@ def validate_ingest_job_finalization(job_id: str, processed_data: dict, *, check
     validate_marker(payload, task_type=row["task_type"], check_source_version=check_source_version)
     if processed_data.get("controlled_recompile") != payload.get("controlled_recompile"):
         raise ValueError(f"Job {job_id} recompile marker does not match its queued payload")
-    if row["task_type"] == "ingest_recompile":
-        for key in ("integration_candidates", "source_projection_hash", "ingest_contract_version", "source_read_path"):
-            if processed_data.get(key) != payload.get(key):
-                raise ValueError(f"Job {job_id} {key} differs from its controlled dispatch")
+    for key in ("integration_candidates", "source_projection_hash", "ingest_contract_version", "source_read_path"):
+        supplied, expected = processed_data.get(key), payload.get(key)
+        if type(supplied) is not type(expected) or supplied != expected:
+            raise ValueError(f"Job {job_id} {key} differs from its durable dispatch")
     for key in ("filepath", "hash"):
         if str(processed_data.get(key) or "") != str(payload.get(key) or ""):
             raise ValueError(f"Job {job_id} {key} does not match its queued payload")

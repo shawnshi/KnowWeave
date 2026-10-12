@@ -142,7 +142,7 @@ def test_shared_output_gate_preserves_rejection_semantics():
     invalid = {"files_written": [], "integration": {"disposition": "rejected", "reason": "missing candidate manifest"}}
     assert extract_result(json.dumps(invalid))[0] is None
     invalid["integration"]["reason"] = "Privacy: publication authorization is absent, candidate manifest is present."
-    assert extract_result(json.dumps(invalid))[0] == invalid
+    assert extract_result(json.dumps(invalid))[0] is None
     assert extract_result("```json\n{}\n```")[0] is None
     assert result_schema()["additionalProperties"] is False
 

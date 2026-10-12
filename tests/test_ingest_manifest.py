@@ -305,7 +305,7 @@ def test_legacy_output_prompt_rebuilt_without_resetting_queued_attempts(isolated
     assert row["task_packet_path"] is None and removed == ["legacy-packet.json"]
     rebuilt = json.loads(row["payload"])
     assert row["status"] == status and row["retries"] == 2
-    assert rebuilt["ingest_contract_version"] == tool_ingest.INGEST_CONTRACT_VERSION == 9
+    assert rebuilt["ingest_contract_version"] == tool_ingest.INGEST_CONTRACT_VERSION == 10
     assert "Return one JSON object" in rebuilt["instructions"]
     assert rebuilt["integration_candidates"]
     assert tool_ingest.requeue_legacy_ingest_jobs() == 0

@@ -411,8 +411,9 @@ def _declared_raw_sources() -> dict[str, dict]:
             if "raw/" not in text:
                 continue
             key = _raw_key(text)
-            if key:
-                declared.setdefault(key, record)
+            if key and (key not in declared or (entry.name.startswith("Source_")
+                    and not declared[key]["page"].startswith("Source_"))):
+                declared[key] = record
     return declared
 
 
@@ -513,12 +514,88 @@ def raw_is_published(filepath: str, index: dict | None = None) -> bool:
     return _already_published(filepath, index["name_keys"], index["declared_keys"])
 
 
-def _stamp_source_hash(content: str, raw_hash: str) -> str:
+def current_source_publication_evidence(filepath: str, expected_hash: str, index: dict | None = None) -> dict:
+    """Bind actual canonical state, its complete projection, and exact raw ownership/bytes."""
+    from vector_lake.wiki_utils import canonical_source_name, resolve_ingest_source_path
+
+    raw = resolve_ingest_source_path(filepath)
+    if raw is None or not expected_hash or not raw.is_file():
+        return {}
+    before = raw.stat()
+    hashers = {"md5": hashlib.md5(), "sha256": hashlib.sha256()}
+    with raw.open("rb") as handle:
+        for block in iter(lambda: handle.read(65536), b""):
+            for hasher in hashers.values():
+                hasher.update(block)
+    after = raw.stat()
+    if (before.st_mtime_ns, before.st_size, before.st_ino) != (after.st_mtime_ns, after.st_size, after.st_ino):
+        raise ValueError("raw source changed while verifying publication")
+    expected_algorithm = "sha256" if expected_hash.startswith("sha256:") or len(expected_hash) == 64 else "md5"
+    if hashers[expected_algorithm].hexdigest() != expected_hash.removeprefix(expected_algorithm + ":"):
+        return {}
+    if index is None:
+        index = {}
+    declared = index.get("declared_pages", {}).get(_raw_key(filepath), {})
+    candidates = {canonical_source_name(filepath), str(declared.get("page") or "")}
+    from vector_lake.db_store import get_connection
+
+    rows = get_connection().execute(
+        "SELECT json_extract(payload, '$.canonical_name') AS name FROM jobs "
+        "WHERE task_type IN ('ingest', 'ingest_recompile') "
+        "AND json_extract(payload, '$.filepath') IN (?, ?)", (filepath, str(raw))
+    ).fetchall()
+    candidates.update(str(row["name"] or "") for row in rows)
+    for name in candidates:
+        if not name.startswith("Source_") or os.path.basename(name) != name:
+            continue
+        page = get_wiki_dir() / name
+        if not page.is_file():
+            continue
+        content = page.read_text(encoding="utf-8")
+        frontmatter, body = split_frontmatter(content)
+        if not body.strip():
+            continue
+        key = name[:-3]
+        version = governance_store.canonical_page_versions({key}).get(key)
+        if not version or governance_store.canonical_page_version_from_content(name, content) != version:
+            continue
+        if str(frontmatter.get("type") or "").lower() != "source":
+            continue
+        refs = frontmatter.get("sources") or []
+        if isinstance(refs, str):
+            refs = [refs]
+        if not any(resolve_ingest_source_path(str(ref)) == raw for ref in refs):
+            continue
+        rows = governance_store.get_connection().execute(
+            "SELECT data_json FROM entities WHERE f_page_key = ?", (key,)
+        ).fetchall()
+        records = [json.loads(row["data_json"]) for row in rows]
+        canonical_sources = [record for record in records
+                             if str(record.get("type") or "").lower() == "source"]
+        if len(canonical_sources) != 1:
+            continue
+        canonical_source = canonical_sources[0]
+        stamp = str(canonical_source.get("source_hash") or "")
+        if not stamp or not isinstance(canonical_source.get("source_frontmatter"), dict):
+            continue
+        algorithm = "sha256" if stamp.startswith("sha256:") or len(stamp) == 64 else "md5"
+        digest = stamp.removeprefix(algorithm + ":")
+        if digest and hashers[algorithm].hexdigest() == digest:
+            return {"filename": name, "canonical_version": version, "projection_hash": projection_hash(content)}
+    return {}
+
+
+def current_source_publication_proven(filepath: str, expected_hash: str, index: dict | None = None) -> bool:
+    """A ledger or a disk-only Source fragment is never evidence of canonical publication."""
+    return bool(current_source_publication_evidence(filepath, expected_hash, index))
+
+
+def _stamp_source_hash(content: str, raw_hash: str, raw_ref: str = "") -> str:
     """Record the raw content hash in the Source page's frontmatter.
 
-    This is the durable form of "which content was this page compiled from".  Nothing else
-    records it: the page carries ``sources: [raw/…]`` and a creation date, so the reconciliation
-    in :func:`_published_source_verdict` has to *infer* whether the raw file changed since.
+    This records which raw bytes the Source was compiled from. Canonical Source
+    extraction persists both this stamp and the complete admission frontmatter;
+    publication proof must bind them to canonical state, not trust the disk stamp.
     Stamping the hash at finalize -- where the packet already carries it -- turns that inference
     into a comparison.
 
@@ -532,9 +609,13 @@ def _stamp_source_hash(content: str, raw_hash: str) -> str:
         frontmatter, body = split_frontmatter(content)
     except Exception:  # noqa: BLE001 - a page whose frontmatter will not parse is not ours to fix
         return content
-    if not frontmatter or frontmatter.get("source_hash") == raw_hash:
+    if not frontmatter:
+        return content
+    if frontmatter.get("source_hash") == raw_hash and not raw_ref:
         return content
     frontmatter["source_hash"] = raw_hash
+    if raw_ref:
+        frontmatter["sources"] = [raw_ref]
     try:
         rendered = yaml.safe_dump(
             frontmatter, allow_unicode=True, default_flow_style=False, sort_keys=False
@@ -607,9 +688,9 @@ def _read_purpose() -> str:
 
 # Bumped when the task-packet manifest or model-output protocol changes. The version forces
 # queued/awaiting packets to rebuild their rendered prompt before the host claims model work.
-INGEST_CONTRACT_VERSION = 9
+INGEST_CONTRACT_VERSION = 10
 
-INTEGRATION_DISPOSITIONS = {"integrated", "standalone", "rejected"}
+INTEGRATION_DISPOSITIONS = {"integrated", "standalone"}
 #: The narrower vocabulary an integration relation may use.  Owned by ``schema_validator`` next to
 #: ``VALID_PREDICATES`` so the page-link list and this one cannot drift apart.
 INTEGRATION_PREDICATES = INGEST_INTEGRATION_PREDICATES
@@ -1072,14 +1153,16 @@ def _verify_source_projection(processed_data: dict) -> None:
     manifest carries no baseline and is tolerated while the migration runs.
     """
     declared = str(processed_data.get("source_projection_hash") or "")
+    filepath = str(processed_data.get("filepath") or "")
+    if int(processed_data.get("ingest_contract_version") or 0) >= 10:
+        from vector_lake.wiki_utils import validate_raw_ingest_source_path
+
+        raw = validate_raw_ingest_source_path(filepath)
+        if not declared or calculate_hash(str(raw)) != str(processed_data.get("hash") or ""):
+            raise ValueError("current ingest requires its actual raw hash and source projection baseline")
     if not declared:
         return
-    filepath = str(processed_data.get("filepath") or "")
-    text = read_ingest_item_content({"filepath": filepath})
-    if not text:
-        raise ValueError(
-            f"could not re-read the raw source to verify its projection baseline: {filepath}"
-        )
+    text = read_ingest_item_content({"filepath": filepath}, required=True)
     actual = projection_hash(text)
     if actual != declared:
         raise ValueError(
@@ -1094,6 +1177,13 @@ def _apply_integration_disposition(files_written: list, processed_data: dict) ->
     if not isinstance(integration, dict):
         raise ValueError("finalize_ingest requires an integration disposition")
     disposition = str(integration.get("disposition") or "").strip().lower()
+    if disposition == "duplicate":
+        if files_written or not current_source_publication_proven(
+            str(processed_data.get("filepath") or ""), str(processed_data.get("hash") or "")
+        ):
+            raise ValueError("duplicate completion requires a matching current Source publication")
+        _verify_source_projection(processed_data)
+        return [], disposition
     if disposition not in INTEGRATION_DISPOSITIONS:
         raise ValueError(f"integration disposition must be one of {sorted(INTEGRATION_DISPOSITIONS)}")
 
@@ -1105,15 +1195,6 @@ def _apply_integration_disposition(files_written: list, processed_data: dict) ->
         files.append(record)
 
     reason = str(integration.get("reason") or "").strip()
-    if disposition == "rejected":
-        if files:
-            raise ValueError("rejected ingest disposition must not include wiki files")
-        if len(reason) < 12:
-            raise ValueError("rejected ingest disposition requires an auditable reason")
-        return [], disposition
-
-    # Not for ``rejected``: nothing is published from it, so a source that changed underneath
-    # cannot produce a page describing text that no longer exists.
     _verify_source_projection(processed_data)
 
     canonical_name = str(processed_data.get("canonical_name") or "").strip()
@@ -1121,6 +1202,9 @@ def _apply_integration_disposition(files_written: list, processed_data: dict) ->
     if len(source_items) != 1:
         raise ValueError(f"{disposition} ingest disposition requires exactly one canonical source page: {canonical_name}")
     source_item = source_items[0]
+    source_frontmatter, _ = split_frontmatter(str(source_item.get("content") or ""))
+    if str(source_frontmatter.get("type") or "").lower() != "source":
+        raise ValueError("canonical Source page must declare type: source")
     source_item["expected_version"] = str(processed_data.get("source_hash") or "")
     for item in files:
         if item is source_item:
@@ -1160,7 +1244,7 @@ def _apply_integration_disposition(files_written: list, processed_data: dict) ->
         # M1, fail-closed.  A packet with no manifest is one built before the contract existed,
         # and the manifest is what bounds which pages a relation may name -- accepting it would
         # restore the "any existing page" behaviour the manifest was introduced to remove.
-        # ``standalone`` and ``rejected`` are unaffected: they declare no relations at all.
+        # ``standalone`` is unaffected: it declares no relations at all.
         # ``requeue_legacy_ingest_jobs`` rebuilds such a packet and re-dispatches it.
         raise ValueError(
             "integrated ingest requires the packet's dispatch manifest; this packet predates "
@@ -1340,7 +1424,7 @@ def refresh_ingest_dispatch_payload(payload: dict) -> dict:
     source_text = read_ingest_item_content({"filepath": filepath})
     refreshed.update(
         source_hash=governance_store.canonical_page_versions({canonical_name[:-3]}).get(canonical_name[:-3], ""),
-        source_projection_hash=projection_hash(source_text) if source_text else "",
+        source_projection_hash=projection_hash(source_text),
         ingest_contract_version=INGEST_CONTRACT_VERSION,
         integration_candidates=candidates,
         instructions=_build_ingest_instructions(filepath, payload["hash"], canonical_name,
@@ -1390,7 +1474,7 @@ def requeue_legacy_ingest_jobs() -> int:
         )
         source_text = read_ingest_item_content({"filepath": filepath})
         payload["ingest_contract_version"] = INGEST_CONTRACT_VERSION
-        payload["source_projection_hash"] = projection_hash(source_text) if source_text else ""
+        payload["source_projection_hash"] = projection_hash(source_text)
         payload["integration_candidates"] = candidates
         migrations.append((str(row["job_id"]), payload, str(row["task_packet_path"] or ""), row["status"]))
 
@@ -1778,7 +1862,7 @@ def prepare_ingest_batch(batch_size: int = 5) -> str:
                     "source_hash": source_hash,
                     "instructions": instructions,
                     "ingest_contract_version": INGEST_CONTRACT_VERSION,
-                    "source_projection_hash": projection_hash(source_text) if source_text else "",
+                    "source_projection_hash": projection_hash(source_text),
                     "integration_candidates": candidates,
                 }
 
@@ -1956,6 +2040,13 @@ def finalize_ingest(files_written: list, processed_data: dict) -> str:
         lease_owner = str(processed_data.get("lease_owner") or "")
         lease_token = str(processed_data.get("lease_token") or "")
         lease_generation = int(processed_data.get("lease_generation"))
+        duplicate_evidence = None
+        if str((processed_data.get("integration") or {}).get("disposition") or "").lower() == "duplicate":
+            duplicate_evidence = current_source_publication_evidence(
+                str(processed_data.get("filepath") or ""), str(processed_data.get("hash") or "")
+            )
+            if not duplicate_evidence:
+                raise ValueError("duplicate completion requires current canonical Source publication")
         files, integration_disposition = _apply_integration_disposition(files, processed_data)
         recompile = (job_row.get("parsed_payload") or {}).get("controlled_recompile")
         contract = load_purpose_contract()
@@ -1975,7 +2066,13 @@ def finalize_ingest(files_written: list, processed_data: dict) -> str:
             if item is not None:
                 content = read_ingest_item_content(item)
                 if content:
-                    item["content"] = _stamp_source_hash(content, raw_hash)
+                    from vector_lake.wiki_utils import get_memory_dir
+
+                    raw_path = resolve_ingest_source_path(str(processed_data.get("filepath") or ""))
+                    if raw_path is None:
+                        raise ValueError("canonical Source provenance escaped the raw root")
+                    raw_ref = raw_path.relative_to(get_memory_dir().resolve()).as_posix()
+                    item["content"] = _stamp_source_hash(content, raw_hash, raw_ref)
                 if deviation:
                     # Reported, not corrected: renaming a published page would break every link and
                     # ``sources:`` reference pointing at it, and the reconciliation is keyed on the
@@ -2023,10 +2120,10 @@ def finalize_ingest(files_written: list, processed_data: dict) -> str:
             from vector_lake.mutation_coordinator import execute_mutation_batch
 
             def mark_ingest_processed():
-                if recompile:
-                    # Own Source mutation has now changed its version; the precondition
-                    # checked the old version under this same write transaction.
-                    validate_ingest_job_finalization(str(job_id), processed_data, check_source_version=False)
+                # Own Source mutation changed its version; recheck the lease/dispatch and raw
+                # bytes without comparing that new Source against its pre-write version.
+                validate_ingest_job_finalization(str(job_id), processed_data, check_source_version=False)
+                _verify_source_projection(processed_data)
                 mark_file_processed(filepath, file_hash, **snapshot)
                 finalize_ingest_job(
                     str(job_id),
@@ -2037,25 +2134,32 @@ def finalize_ingest(files_written: list, processed_data: dict) -> str:
                                  **({"controlled_recompile": recompile} if recompile else {})},
                 )
 
+            def verify_commit_boundary():
+                validate_ingest_job_finalization(str(job_id), processed_data)
+                _verify_source_projection(processed_data)
+
             execute_mutation_batch(
                 mutations,
                 canonical_callback=mark_ingest_processed,
-                **({"canonical_precondition": lambda: validate_ingest_job_finalization(str(job_id), processed_data)} if recompile else {}),
+                canonical_precondition=verify_commit_boundary,
             )
         else:
             from vector_lake.db_store import transaction
+            from vector_lake.mutation_coordinator import projection_locks
 
-            with transaction():
-                if recompile:
-                    validate_ingest_job_finalization(str(job_id), processed_data)
+            if integration_disposition != "duplicate" or not duplicate_evidence:
+                raise ValueError("successful ingest requires a canonical Source mutation")
+            with projection_locks([duplicate_evidence["filename"]]), transaction():
+                validate_ingest_job_finalization(str(job_id), processed_data)
+                _verify_source_projection(processed_data)
+                current = current_source_publication_evidence(filepath, file_hash)
+                if current != duplicate_evidence:
+                    raise ValueError("Canonical Source version conflict during duplicate completion")
                 mark_file_processed(filepath, file_hash, **snapshot)
                 finalize_ingest_job(
-                    str(job_id),
-                    lease_owner,
-                    lease_token,
-                    lease_generation,
+                    str(job_id), lease_owner, lease_token, lease_generation,
                     result_data={"integration": processed_data.get("integration"),
-                                 **({"controlled_recompile": recompile} if recompile else {})},
+                                 "publication": duplicate_evidence},
                 )
 
         if recompile:

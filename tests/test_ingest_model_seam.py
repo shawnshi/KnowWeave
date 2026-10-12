@@ -179,7 +179,7 @@ def test_runtime_blocker_cannot_be_accepted_as_rejected_content(seam, reason):
     value = json.dumps({"files_written": [], "integration": {"disposition": "rejected", "reason": reason}})
     payload, error = seam._extract_result(value)
     assert payload is None
-    assert "runtime/dispatch contract blocker" in error
+    assert "rejected output is not completion" in error
 
 
 @pytest.mark.parametrize("reason", [
@@ -198,10 +198,10 @@ def test_runtime_blocker_cannot_be_accepted_as_rejected_content(seam, reason):
     "子代理返回纯 JSON，未出现格式错误；该材料因隐私原因拒收。",
     "No authorized candidate manifest is missing; only user publication consent is absent.",
 ])
-def test_genuine_source_rejections_still_pass(seam, reason):
+def test_source_rejections_are_not_successful_completion(seam, reason):
     value = {"files_written": [], "integration": {"disposition": "rejected", "reason": reason}}
     payload, error = seam._extract_result(json.dumps(value))
-    assert payload == value and not error
+    assert payload is None and "rejected output is not completion" in error
 
 
 def test_child_is_one_shot_but_still_has_a_session_root(seam):
@@ -282,9 +282,10 @@ def test_seam_rejects_old_or_untrusted_output(seam, payload):
 
 
 @pytest.mark.parametrize("disposition", ["rejected", "Rejected", " rejected "])
-def test_seam_accepts_explicit_rejection(seam, disposition):
+def test_seam_refuses_explicit_rejection(seam, disposition):
     payload = {"files_written": [], "integration": {"disposition": disposition, "reason": "The source is out of scope."}}
-    assert seam._extract_result(json.dumps(payload)) == (payload, "")
+    value, error = seam._extract_result(json.dumps(payload))
+    assert value is None and "rejected output is not completion" in error
 
 
 @pytest.mark.parametrize("disposition,files", [
@@ -313,6 +314,10 @@ def test_runner_passes_model_decision_without_replacing_host_versions(monkeypatc
 
     stats, error = runner._process_task(task, False, "fake-model", {})
 
+    if disposition.strip().lower() == "rejected":
+        assert error and stats["finalized"] == 0 and submitted == []
+        assert processed["lease_token"] == "host-lease"
+        return
     assert not error and stats["finalized"] == 1
     assert submitted == [(files, {**processed, "integration": integration})]
     assert submitted[0][1]["lease_token"] == "host-lease"
@@ -415,7 +420,7 @@ def test_explicit_agent_override_keeps_user_and_project_discovery(monkeypatch):
 
 
 def test_pi_starts_in_repository_for_project_agent_discovery(seam, monkeypatch):
-    answer = {"files_written": [], "integration": {"disposition": "rejected", "reason": "Synthetic source is outside scope"}}
+    answer = {"files_written": [{"filename": "Source_Fixture.md", "content": "Synthetic source summary"}], "integration": {"disposition": "standalone", "reason": "No supported existing relation was found."}}
     run = _run(seam, monkeypatch, result=subprocess.CompletedProcess(["pi"], 0, json.dumps(answer), ""))
     assert seam.main() == 0
     assert run.kwargs["cwd"] == str(REPO)

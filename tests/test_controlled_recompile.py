@@ -123,7 +123,7 @@ def test_dedicated_jobs_preserve_ledger_history_and_rejections(scope_files):
 def test_controlled_force_is_not_an_ordinary_duplicate_exception(scope_files, monkeypatch):
     _dispatch(scope_files)
     _, processed = _claim()
-    monkeypatch.setattr(runner, "raw_is_published", lambda *_: True)
+    monkeypatch.setattr(runner, "current_source_publication_proven", lambda *_: True)
     assert runner.classify(processed, {}) == "needs-model"
     plain = {"filepath": processed["filepath"]}
     assert runner.classify(plain, {}) == "duplicate"
@@ -158,24 +158,22 @@ def test_lease_request_bytes_and_context_are_fenced(scope_files, damage):
         db_store.validate_ingest_job_finalization(p["job_id"], p)
 
 
-def test_model_rejection_has_real_current_version_receipt(scope_files, monkeypatch):
+def test_model_rejection_does_not_finalize_or_update_ledger(scope_files, monkeypatch):
     result = _dispatch(scope_files)
     task, p = _claim()
-    monkeypatch.setattr(runner, "raw_is_published", lambda *_: True)
+    monkeypatch.setattr(runner, "current_source_publication_proven", lambda *_: True)
     calls = []
     def model(*_):
         calls.append(1)
         return {"files_written": [], "integration": {"disposition": "rejected", "reason": "This synthetic source offers no supported insight relevant to the strategy.", "relations": []}}, ""
     monkeypatch.setattr(runner, "run_model", model)
     counts, error = runner._process_task(task, False, "fixture-only", {})
-    assert not error, error
-    assert calls == [1] and counts["content-rejected"] == 1 and counts["finalized"] == 1
+    assert error
+    assert len(calls) == 1
+    assert counts["content-rejected"] == 0 and counts["finalized"] == 0
     row = db_store.get_connection().execute("SELECT * FROM jobs WHERE job_id = ?", (p["job_id"],)).fetchone()
-    assert row["status"] == "finalized"
-    receipt = json.loads(row["result_json"])
-    assert receipt["controlled_recompile"]["sha256"] == scope_files["rows"][0]["current_sha256"]
-    assert receipt["integration"]["disposition"] == "rejected"
-    assert db_store.get_processed_files()[p["filepath"]] == p["hash"]
+    assert row["status"] == "failed" and row["retries"] == 0 and row["result_json"] is None
+    assert db_store.get_processed_files()[p["filepath"]] == scope_files["rows"][0]["old_ledger"]["file_hash"]
     assert result["request_job_id"] != p["job_id"]
 
 
@@ -233,8 +231,19 @@ def test_active_normal_source_and_ledger_drift_block_and_rollback_request(scope_
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE task_type = 'ingest_recompile_request'").fetchone()[0] == 0
 
 
+def _publish_current(filepath, file_hash):
+    from tests.test_mutation_coordinator import _source_content
+    from vector_lake.mutation_coordinator import execute_mutation_plan
+    from vector_lake.wiki_utils import canonical_source_name
+
+    content = tool_ingest._stamp_source_hash(_source_content(), file_hash, filepath)
+    ok, message = execute_mutation_plan(canonical_source_name(filepath), content=content)
+    assert ok, message
+
+
 def test_current_publication_receipt_stops_new_handoff(scope_files):
     r = scope_files["rows"][0]
+    _publish_current(r["filepath"], r["current_md5"])
     conn = db_store.get_connection()
     job = db_store.enqueue_job("ingest", {"filepath": r["filepath"], "hash": r["current_md5"]})
     conn.execute("UPDATE jobs SET status = 'finalized', result_json = ? WHERE job_id = ?", (json.dumps({"integration": {"disposition": "rejected", "reason": "A real current-version rejection."}}), job))
@@ -275,7 +284,7 @@ def test_real_host_standalone_publish_has_current_receipt(scope_files, monkeypat
     task, p = _claim()
     content = _source_content().replace("sources: [raw/test.pdf]", "sources: " + json.dumps([p["filepath"]]))
     response = {"files_written": [{"filename": p["canonical_name"], "content": content}], "integration": {"disposition": "standalone", "reason": "No authorized existing target candidates; this test source stands alone.", "relations": []}}
-    monkeypatch.setattr(runner, "raw_is_published", lambda *_: True)
+    monkeypatch.setattr(runner, "current_source_publication_proven", lambda *_: True)
     monkeypatch.setattr(runner, "run_model", lambda *_: (response, ""))
     counts, error = runner._process_task(task, False, "fixture-only", {})
     assert not error, error

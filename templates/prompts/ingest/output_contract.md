@@ -3,8 +3,8 @@ OUTPUT CONTRACT -- validated field by field; ONE violation rejects the whole ing
 {
   "files_written": [ {"filename": "<basename.md>", "content": "<complete Markdown incl. YAML frontmatter>"} ],
   "integration": {
-    "disposition": "integrated" | "standalone" | "rejected",
-    "reason": "<required for standalone and rejected>",
+    "disposition": "integrated" | "standalone",
+    "reason": "<required for standalone>",
     "relations": [
       {
         "target": "<copy VERBATIM from integration_candidates[].target -- .md included>",

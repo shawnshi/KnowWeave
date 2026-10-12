@@ -1,6 +1,6 @@
 # Canonical Source Page Skeleton
 
-The filename is exactly `{{canonical_name}}`; exactly one such page is required for a non-rejected ingest.
+The filename is exactly `{{canonical_name}}`; exactly one such page is required for every successful ingest.
 Angle-bracket values below must be grounded in the source or trusted dispatch metadata, never copied as facts.
 Use the validator's current frontmatter vocabulary supplied with this task.
 
@@ -16,8 +16,8 @@ epistemic-status: seed
 categories: [<one allowed category>]
 tags: []
 sources: []
-strategic_scope: <core or edge>
-evidence_tier: <tier justified by the source>
+strategic_scope: <core, edge, or other>
+evidence_tier: <include this field only when a permitted tier is justified; otherwise omit>
 created: '<actual creation date>'
 updated: '<actual update date>'
 ---

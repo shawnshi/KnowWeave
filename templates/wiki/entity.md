@@ -16,8 +16,8 @@ epistemic-status: seed
 categories: [<one allowed category>]
 tags: []
 sources: [<source provenance>]
-strategic_scope: <core or edge>
-evidence_tier: <tier justified by the source>
+strategic_scope: <core, edge, or other>
+evidence_tier: <include this field only when a permitted tier is justified; otherwise omit>
 created: '<actual creation date>'
 updated: '<actual update date>'
 ---

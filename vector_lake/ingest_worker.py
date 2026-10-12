@@ -20,7 +20,11 @@ def _ingest_finalization_proven(filepath: str, file_hash: str) -> bool:
         "SELECT file_hash FROM processed_files WHERE filepath = ?",
         (filepath,),
     ).fetchone()
-    return bool(row and row["file_hash"] == file_hash)
+    if not row or row["file_hash"] != file_hash:
+        return False
+    from vector_lake.tool_ingest import current_source_publication_proven
+
+    return current_source_publication_proven(filepath, file_hash)
 
 
 def _subagent_ingest_prompt(instructions: str) -> str:

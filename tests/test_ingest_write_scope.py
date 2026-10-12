@@ -34,7 +34,7 @@ def _standalone(files, canonical_name="Source_X.md", source_hash="packet-hash"):
 
 def test_submitted_items_are_create_only_even_when_the_payload_names_a_version():
     files = [
-        {"filename": "Source_X.md", "content": "source"},
+        {"filename": "Source_X.md", "content": "---\ntype: source\n---\nsource"},
         {"filename": "Other_Page.md", "content": "other", "expected_version": "a-real-version"},
     ]
     out, disposition = _standalone(files)
@@ -46,7 +46,7 @@ def test_submitted_items_are_create_only_even_when_the_payload_names_a_version()
 def test_the_canonical_source_page_keeps_the_version_the_packet_supplied(isolated_memory):
     """The one submitted page that *may* name a version keeps the packet's value, not the payload's."""
     files = [
-        {"filename": "Source_X.md", "content": "source", "expected_version": "payload-value"},
+        {"filename": "Source_X.md", "content": "---\ntype: source\n---\nsource", "expected_version": "payload-value"},
         {"filename": "Other_Page.md", "content": "other"},
     ]
     out, _ = _standalone(files, source_hash="packet-hash")

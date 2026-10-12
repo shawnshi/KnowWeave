@@ -531,6 +531,11 @@ def extract_page_objects(
         "updated_at": _jsonable(frontmatter.get("updated", now)),
         "source_page": page_name,
     })
+    if page_type == "source" and "source_hash" in frontmatter:
+        # Persist admission facts in the canonical CAS state, including otherwise
+        # unparsed metadata. Never backfill an old record from a disk-only stamp.
+        entity_records[-1]["source_hash"] = _jsonable(frontmatter["source_hash"])
+        entity_records[-1]["source_frontmatter"] = _jsonable(frontmatter)
 
     source_ids = []
     for raw_ref in sources:

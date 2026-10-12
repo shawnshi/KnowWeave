@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 from vector_lake.template_loader import render_template
 from vector_lake.path_safety import is_link_or_junction
@@ -26,22 +25,11 @@ def extract_result(text: str):
         return None, "child files_written must contain filename/content objects only"
     if not isinstance(integration, dict) or not str(integration.get("disposition") or "").strip():
         return None, "child requires an explicit integration disposition"
-    if not files and str(integration["disposition"]).strip().lower() != "rejected":
-        return None, "child returned no files for a non-rejected disposition"
-    if str(integration["disposition"]).strip().lower() == "rejected":
-        reason = str(integration.get("reason") or "").casefold()
-        manifest = r"(?:integration_candidates|dispatch manifest|candidate manifest|授权清单|调度清单)"
-        # Absence must describe the manifest itself, not publication permission in
-        # another clause. Explicit negation is not an affirmative absence diagnostic.
-        english_prefix = rf"(?<!not )(?<!no )\b(?:missing|without|lacks?|absent|unavailable)\s+(?:(?:the|an?|required|authorized|explicit)\s+)*{manifest}"
-        english_suffix = rf"(?:^|[.;\n])\s*(?:the\s+)?{manifest}(?:\s+(?:manifest|whitelist))?\s+(?:(?:is|was|has been)\s+)?(?:missing|absent|unavailable|not provided)\b"
-        chinese_prefix = rf"(?<!不)(?<!没有)(?<!并非)(?<!不是)(?<!未发现)(?:缺少|缺失|缺乏|没有|未提供|未包含|未携带|未下发)(?:\s*(?:授权|明确|完整|必要|必需|有效|的)\s*)*{manifest}"
-        child_json = r"\b(?:subagent|child(?:\s+output)?)\s+(?:(?:returned|produced|provided|is|was)\s+)?(?:invalid|malformed)\s+(?:output\s+)?json\b"
-        chinese_child_json = r"(?:子代理未按(?:契约|合同|约定)返回(?:纯|有效)?\s*json|子代理(?:返回|输出)(?:的)?(?:纯)?\s*json\s*(?:的)?(?:输出)?(?:格式)?(?:校验失败|格式错误))"
-        if any(re.search(pattern, reason) for pattern in (
-            english_prefix, english_suffix, chinese_prefix, child_json, chinese_child_json
-        )):
-            return None, "runtime/dispatch contract blocker is not a strategic content rejection"
+    disposition = str(integration["disposition"]).strip().lower()
+    if disposition not in {"integrated", "standalone"}:
+        return None, "child disposition must be integrated or standalone; rejected output is not completion"
+    if not files:
+        return None, "child returned no files for a successful disposition"
     return payload, ""
 
 
@@ -83,7 +71,7 @@ def read_evidence_tiers_only() -> dict[str, str]:
 
 def build_cli_prompt(packet: dict) -> str:
     """Hydrate only the dispatched raw source; CLI workers need no filesystem tools."""
-    from vector_lake.wiki_utils import resolve_ingest_source_path
+    from vector_lake.wiki_utils import validate_raw_ingest_source_path
 
     if not isinstance(packet, dict) or not isinstance(packet.get("metadata"), dict):
         raise ValueError("task packet requires metadata")
@@ -106,7 +94,7 @@ def build_cli_prompt(packet: dict) -> str:
             raise ValueError("Controlled prompt bytes differ from the approved SHA-256")
     else:
         filepath = str(processed.get("filepath") or "")
-        source_path = resolve_ingest_source_path(filepath)
+        source_path = validate_raw_ingest_source_path(filepath)
         if source_path is None or not expected:
             raise ValueError("source escaped the raw root or omitted its dispatch fingerprint")
         raw = source_path.read_bytes()
@@ -129,7 +117,7 @@ def build_cli_prompt(packet: dict) -> str:
         context["evidence_tier_policy"] = {
             "evidence_tiers": tiers,
             "sha256": hashlib.sha256(json.dumps(tiers, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
-            "instruction": "These are the current canonical evidence-tier names and definitions. Assign each authored node a justified tier from this mapping based only on the supplied source evidence. Do not promote a secondary source or invent a tier. Private purpose prose and other policy fields are not supplied or authorized to read.",
+            "instruction": "These are the current canonical evidence-tier names and definitions. Assign an evidence tier only when justified by the supplied source; otherwise omit evidence_tier and explicitly describe the limitation. All eligible sources must produce a Source page, including unrelated, secondary, speculative, or empty sources. Classify outside-focus material as strategic_scope: other. Do not promote a secondary source or invent a tier. Private purpose prose and other policy fields are not supplied or authorized to read.",
         }
     repair = metadata.get("repair")
     if repair is not None:
@@ -148,7 +136,7 @@ def result_schema() -> dict:
         "target", "target_hash", "target_projection_hash", "predicate", "evidence", "event_date", "event_tag"
     )}
     relation["confidence"] = {"type": "number"}
-    integration = {"disposition": {"type": "string", "enum": ["integrated", "standalone", "rejected"]},
+    integration = {"disposition": {"type": "string", "enum": ["integrated", "standalone"]},
                    "reason": {"type": "string"},
                    "relations": {"type": "array", "items": {"type": "object", "properties": relation,
                                  "required": list(relation), "additionalProperties": False}}}

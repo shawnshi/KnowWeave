@@ -112,7 +112,7 @@ def test_content_failure_branches_have_bounded_budget_recorders(branch_reason):
     assert f'f"{branch_reason}' in source, branch_reason
     # Packet/explicit dispatch validation, source drift and finalizer rejection;
     # OS/backend/host runtime faults do not spend this budget.
-    assert source.count("record_ingest_failure(") == 5
+    assert source.count("record_ingest_failure(") == 6
 
 
 def test_a_transient_failure_does_not_spend_the_attempt_budget(isolated_memory):

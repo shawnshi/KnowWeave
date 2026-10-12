@@ -62,6 +62,15 @@ def _finalize(files, processed_data):
             relation.setdefault("target_projection_hash", record["target_projection_hash"])
             manifest.append(record)
         processed_data = {**processed_data, "integration_candidates": manifest}
+        # These legacy fixtures synthesize the authorized packet from their declared targets;
+        # bind that same fixture allowlist durably. Real tampering tests never use this helper.
+        conn = db_store.get_connection()
+        row = conn.execute("SELECT payload FROM jobs WHERE job_id = ?", (processed_data["job_id"],)).fetchone()
+        queued = json.loads(row["payload"])
+        queued["integration_candidates"] = manifest
+        with db_store.transaction():
+            conn.execute("UPDATE jobs SET payload = ? WHERE job_id = ?",
+                         (json.dumps(queued), processed_data["job_id"]))
     return mcp_server.tools.finalize_ingest(files, processed_data)
 
 
@@ -139,7 +148,7 @@ def test_ingest_finalization_requires_matching_processed_file(isolated_memory):
     db_store.mark_file_processed("raw/test.pdf", "different")
     assert _ingest_finalization_proven("raw/test.pdf", "abc123") is False
     db_store.mark_file_processed("raw/test.pdf", "abc123")
-    assert _ingest_finalization_proven("raw/test.pdf", "abc123") is True
+    assert _ingest_finalization_proven("raw/test.pdf", "abc123") is False
 
 
 def test_job_claim_uses_a_lease(isolated_memory):
@@ -354,7 +363,11 @@ def test_finalize_ingest_rejects_source_hash_not_bound_to_job_payload(isolated_m
 
 
 def test_finalize_ingest_marks_subagent_job_finalized(isolated_memory, monkeypatch):
+    _write_purpose_contract(isolated_memory)
     db_store.init_db()
+    raw = isolated_memory / "raw" / "finalize.md"
+    raw.write_text("Synthetic finalize source.", encoding="utf-8")
+    file_hash = tool_ingest.calculate_hash(str(raw))
     monkeypatch.setenv("VECTOR_LAKE_SUBAGENT_RUN_ID", "pytest-finalize")
     monkeypatch.setattr("vector_lake.tool_ingest.load_purpose_contract", lambda: {})
     monkeypatch.setattr("vector_lake.tool_ingest.validate_ingest_payload", lambda files, contract: [])
@@ -362,7 +375,7 @@ def test_finalize_ingest_marks_subagent_job_finalized(isolated_memory, monkeypat
         "ingest",
         {
             "filepath": "raw/finalize.md",
-            "hash": "finalize-hash",
+            "hash": file_hash,
             "canonical_name": "Source_Finalize.md",
             "instructions": "compile this source",
         },
@@ -374,14 +387,14 @@ def test_finalize_ingest_marks_subagent_job_finalized(isolated_memory, monkeypat
     claim = json.loads(claim_ingest_tasks(limit=1, lease_seconds=60))[0]
 
     result = _finalize(
-        [],
+        [{"filename": "Source_Finalize.md", "content": _source_content()}],
         {
             "filepath": "raw/finalize.md",
-            "hash": "finalize-hash",
+            "hash": file_hash,
             "canonical_name": "Source_Finalize.md",
             "integration": {
-                "disposition": "rejected",
-                "reason": "Source is outside the active strategic purpose contract.",
+                "disposition": "standalone",
+                "reason": "No supported relation to existing Wiki nodes was found.",
             },
             "job_id": job_id,
             "lease_owner": claim["lease_owner"],
@@ -396,7 +409,7 @@ def test_finalize_ingest_marks_subagent_job_finalized(isolated_memory, monkeypat
     ).fetchone()
     assert result.startswith("Successfully finalized ingestion")
     assert row["status"] == "finalized"
-    assert _ingest_finalization_proven("raw/finalize.md", "finalize-hash") is True
+    assert _ingest_finalization_proven("raw/finalize.md", file_hash) is True
     assert task_path.exists() is False
 
 
@@ -462,6 +475,7 @@ def test_stale_subagent_lease_cannot_finalize_after_reclaim(isolated_memory, mon
 
 
 def test_final_cas_rolls_back_processed_marker_if_lease_changes_after_validation(isolated_memory, monkeypatch):
+    _write_purpose_contract(isolated_memory)
     db_store.init_db()
     monkeypatch.setattr("vector_lake.tool_ingest.load_purpose_contract", lambda: {})
     job_id = db_store.enqueue_job(
@@ -486,14 +500,14 @@ def test_final_cas_rolls_back_processed_marker_if_lease_changes_after_validation
 
     monkeypatch.setattr("vector_lake.tool_ingest.validate_ingest_payload", reclaim_during_payload_validation)
     result = _finalize(
-        [],
+        [{"filename": "Source_Race.md", "content": _source_content()}],
         {
             "filepath": "raw/race.md",
             "hash": "race-hash",
             "canonical_name": "Source_Race.md",
             "integration": {
-                "disposition": "rejected",
-                "reason": "Source is outside the active strategic purpose contract.",
+                "disposition": "standalone",
+                "reason": "No supported relation to existing Wiki nodes was found.",
             },
             "job_id": job_id,
             "lease_owner": stale["lease_owner"],
@@ -503,7 +517,7 @@ def test_final_cas_rolls_back_processed_marker_if_lease_changes_after_validation
     )
 
     assert result.startswith("Error finalizing ingestion")
-    assert "no longer finalizable" in result
+    assert "lease_token does not match the current lease" in result
     assert _ingest_finalization_proven("raw/race.md", "race-hash") is False
     row = db_store.get_connection().execute(
         "SELECT status, lease_generation FROM jobs WHERE job_id = ?",

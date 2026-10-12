@@ -51,6 +51,7 @@ PLACEHOLDER_SOURCES = frozenset({"source_auto_fixed"})
 
 VALID_CATEGORIES = {
     "Uncategorized",
+    "General_Knowledge",
     "Artificial_Intelligence",
     "Healthcare_IT",
     "Strategy_and_Business",

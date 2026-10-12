@@ -10,6 +10,6 @@ Rules that are not negotiable:
   No prose, markdown fence, or extra fields such as processed_data. Do not call finalize_ingest.
 - If the subagent returns invalid JSON or omits the semantic decision, report the failure;
   never invent a standalone disposition to make a malformed output pass.
-- Keep the output compact: one canonical Source page is mandatory unless rejected. Aim for a
+- Keep the output compact: one canonical Source page is always mandatory. Aim for a
   3-5 sentence summary plus 4-6 short bullets with inline (Source: [[...]]) anchors, and do
   not restate the source document.

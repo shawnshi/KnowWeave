@@ -17,7 +17,7 @@ class PurposeContractError(ValueError):
     """Raised when the strategic-purpose control plane is malformed."""
 
 
-ALLOWED_SCOPES = {"core", "edge"}
+ALLOWED_SCOPES = {"core", "edge", "other"}
 
 
 def _as_string_list(value: Any, field: str) -> list[str]:

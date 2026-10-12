@@ -314,6 +314,22 @@ def resolve_ingest_source_path(raw) -> Path | None:
     return resolved if resolved.is_relative_to(root) else None
 
 
+def validate_raw_ingest_source_path(value: str) -> Path:
+    """Apply the existing raw-root, directory/privacy and format boundary before source reads."""
+    path = resolve_ingest_source_path(value)
+    if path is None:
+        raise ValueError("source escaped the raw root")
+    config = load_config()
+    if is_private_raw_source(str(path)) or any(
+        str(excluded).casefold() in path.as_posix().casefold()
+        for excluded in config.get("exclude_paths", [])
+    ):
+        raise ValueError("ingest source is in an excluded directory")
+    if path.suffix.lower() not in config.get("supported_extensions", [".md", ".txt"]):
+        raise ValueError("ingest source format is excluded")
+    return path
+
+
 def read_ingest_item_content(item: dict, *, required: bool = False) -> str:
     """The item's content, read once from its ``filepath`` and cached on the item.
 

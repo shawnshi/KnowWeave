@@ -202,7 +202,11 @@ def test_model_outcomes_do_not_conflate_rejection_and_publication(monkeypatch, d
     }, ""))
     monkeypatch.setattr(runner, "finalize_ingest", lambda *_: "Successfully finalized ingestion")
     task = {"job_id": "synthetic", "task_packet": {"metadata": {"processed_data": {"job_id": "synthetic"}}}}
+    monkeypatch.setattr(runner, "record_ingest_failure", lambda *_args, **_kwargs: None)
     counts, error = runner._process_task(task, False, "fake", {})
+    if disposition == "rejected":
+        assert error and counts["finalized"] == counts["published"] == counts["content-rejected"] == 0
+        return
     assert not error
     assert counts["finalized"] == counts[counter] == 1
     assert sum(counts[key] for key in ("published", "content-rejected", "duplicate-closed", "missing-source-closed")) == 1
@@ -214,14 +218,18 @@ def test_nonmodel_closures_have_their_own_counts(monkeypatch, verdict):
     monkeypatch.setattr(runner, "run_model", lambda *_: pytest.fail("unnecessary model call"))
     monkeypatch.setattr(runner, "finalize_ingest", lambda *_: "Successfully finalized ingestion")
     task = {"job_id": "synthetic", "task_packet": {"metadata": {"processed_data": {"job_id": "synthetic"}}}}
+    monkeypatch.setattr(runner, "record_ingest_failure", lambda *_args, **_kwargs: None)
     counts, error = runner._process_task(task, False, "fake", {})
+    if verdict == "missing-source":
+        assert error and counts["errors"] == 1 and counts["finalized"] == counts["missing-source-closed"] == 0
+        return
     assert not error and counts["finalized"] == counts[f"{verdict}-closed"] == 1
     assert counts["published"] == counts["content-rejected"] == 0
 
 
 def test_repaired_outcome_uses_the_accepted_disposition(monkeypatch):
     monkeypatch.setattr(runner, "classify", lambda *_: "needs-model")
-    outputs = iter(["standalone", "rejected"])
+    outputs = iter(["standalone", "integrated"])
     monkeypatch.setattr(runner, "run_model", lambda *_: ({
         "files_written": [], "integration": {"disposition": next(outputs)},
     }, ""))
@@ -230,8 +238,8 @@ def test_repaired_outcome_uses_the_accepted_disposition(monkeypatch):
     monkeypatch.setattr(runner, "REPAIR_ATTEMPTS", 1)
     task = {"job_id": "synthetic", "task_packet": {"metadata": {"processed_data": {"job_id": "synthetic"}}}}
     counts, error = runner._process_task(task, False, "fake", {})
-    assert not error and counts["content-rejected"] == counts["finalized"] == 1
-    assert counts["published"] == 0
+    assert not error and counts["published"] == counts["finalized"] == 1
+    assert counts["content-rejected"] == 0
 
 
 @pytest.mark.parametrize("totals", [{"finalized": 10}, {"finalized": 3, "published": 2, "content-rejected": 1}])

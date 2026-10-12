@@ -20,7 +20,7 @@ from vector_lake.path_safety import is_link_or_junction
 
 TASK_TYPE = "ingest_recompile"
 REQUEST_TYPE = "ingest_recompile_request"
-VERSION = 1
+VERSION = 2
 COUNT = 60
 MAX_BYTES = 32 * 1024 * 1024
 PRIVATE = {"privacy", "diary", "garmin", "stocks", "personal-insights"}
@@ -94,7 +94,7 @@ def load_scope(plan_path: str, plan_sha256: str, approval_path: str, approval_sh
     plan = _json_file(plan_path, plan_sha256)
     approval = _json_file(approval_path, approval_sha256)
     request_id = approval.get("request_id")
-    if approval.get("version") != VERSION or type(approval.get("version")) is not int:
+    if approval.get("version") not in {1, VERSION} or type(approval.get("version")) is not int:
         raise ValueError("Unsupported recompile approval version")
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", request_id):
         raise ValueError("Recompile approval requires a bounded request_id")
@@ -102,19 +102,24 @@ def load_scope(plan_path: str, plan_sha256: str, approval_path: str, approval_sh
         raise ValueError("Recompile approval must bind the plan and a public-only read boundary")
     rows = plan.get("rows")
     entries = approval.get("entries")
-    if not isinstance(rows, list) or len(rows) != 78 or not isinstance(entries, list) or len(entries) != COUNT:
-        raise ValueError("Recompile scope requires the frozen 78-case plan and exactly 60 approvals")
-    if not all(isinstance(row, dict) for row in rows) or not all(isinstance(row, dict) for row in entries):
-        raise ValueError("Invalid recompile scope entries")
+    version = approval["version"]
+    if (not isinstance(rows, list) or not isinstance(entries, list)
+            or not 1 <= len(entries) <= COUNT
+            or not all(isinstance(row, dict) for row in rows + entries)):
+        raise ValueError("Recompile scope requires a bounded nonempty approval whitelist")
     all_paths = [str(raw_path(str(row.get("filepath") or ""))) for row in rows]
     selected = [row for row in rows if row.get("state") in STATES]
-    if (len(set(all_paths)) != 78 or len(selected) != COUNT
+    if len(set(all_paths)) != len(rows) or len(selected) != len(entries):
+        raise ValueError("Recompile selection differs from the approved scope")
+    if version == 1 and (len(rows) != 78 or len(entries) != COUNT
             or sum(row.get("state") == "no_proven_current_publication" for row in rows) != 39
             or sum(row.get("state") == "quarantine_without_current_version_proof" for row in rows) != 21
             or sum(row.get("state") == "preserve_rejection" for row in rows) != 18):
-        raise ValueError("Recompile selection must preserve the 18 valid rejections")
+        raise ValueError("Legacy recompile scope must preserve its frozen 78/60/18 boundary")
+    if version == VERSION and len(selected) != len(rows):
+        raise ValueError("Every new plan row must belong to the exact approved scope")
     from vector_lake.wiki_utils import canonical_source_name
-    if len({canonical_source_name(row["filepath"]).casefold() for row in selected}) != COUNT:
+    if len({canonical_source_name(row["filepath"]).casefold() for row in selected}) != len(selected):
         raise ValueError("Selected sources collide on canonical Source filenames")
     expected = {}
     for row in selected:
@@ -132,7 +137,7 @@ def load_scope(plan_path: str, plan_sha256: str, approval_path: str, approval_sh
             raise ValueError("Every source needs an explicit, evidenced public-data classification; unknown/private is blocked")
         approved[str(p)] = entry
     if set(expected) != set(approved):
-        raise ValueError("Approval whitelist differs from the exact 60 selected sources")
+        raise ValueError("Approval whitelist differs from the exact selected sources")
     started, total, sources = time.monotonic(), 0, []
     for p, row in expected.items():
         current = fingerprint(p)
@@ -145,7 +150,7 @@ def load_scope(plan_path: str, plan_sha256: str, approval_path: str, approval_sh
         if total > MAX_BYTES or time.monotonic() - started > 80:
             raise ValueError("Recompile verification exceeded its bounded budget")
         sources.append({**current, "old_ledger": row.get("old_ledger")})
-    return {"version": VERSION, "request_id": request_id, "plan_sha256": plan_sha256,
+    return {"version": version, "request_id": request_id, "plan_sha256": plan_sha256,
             "approval_sha256": approval_sha256, "read_scope": "public_only", "sources": sources}
 
 
@@ -238,36 +243,17 @@ def remove_source_snapshot(value: str) -> None:
 
 
 def current_version_proven(filepath: str, sha256: str, md5: str) -> bool:
-    from vector_lake.db_store import get_connection
-    rows = get_connection().execute(
-        "SELECT payload, result_json FROM jobs WHERE task_type IN ('ingest','ingest_recompile') "
-        "AND status = 'finalized' AND json_extract(payload, '$.filepath') = ?",
-        (filepath,),
-    ).fetchall()
-    for row in rows:
-        payload = _decode_json(row["payload"], "prior finalization payload")
-        result = _decode_json(row["result_json"] or "{}", "prior finalization receipt")
-        if not isinstance(payload, dict) or payload.get("hash") not in {md5, "sha256:" + sha256}:
-            continue
-        disposition = result.get("integration") if isinstance(result, dict) else None
-        if not isinstance(disposition, dict):
-            continue
-        if disposition.get("disposition") in {"standalone", "integrated"}:
-            return True
-        from vector_lake.ingest_errors import MECHANICAL_REJECTION_REASONS
-        reason = disposition.get("reason")
-        if (disposition.get("disposition") == "rejected" and isinstance(reason, str)
-                and len(reason.strip()) >= 12 and reason.strip() not in MECHANICAL_REJECTION_REASONS):
-            return True
-    return False
+    from vector_lake.tool_ingest import current_source_publication_proven
+
+    return current_source_publication_proven(filepath, md5)
 
 
-def _check_source_state(source: dict) -> None:
+def _check_source_state(source: dict, *, check_current_publication: bool = True) -> None:
     from vector_lake.db_store import get_connection
     ledger = get_connection().execute("SELECT * FROM processed_files WHERE filepath = ?", (source["filepath"],)).fetchone()
     if (dict(ledger) if ledger else None) != source["old_ledger"]:
         raise ValueError("Selected source ledger drifted before completion")
-    if current_version_proven(source["filepath"], source["sha256"], source["md5"]):
+    if check_current_publication and current_version_proven(source["filepath"], source["sha256"], source["md5"]):
         raise ValueError("Selected source now has a current-version finalization; reassess the frozen scope")
 
 
@@ -287,22 +273,24 @@ def validate_marker(payload: dict, *, task_type: str, require_snapshot: bool = T
         raise ValueError("Recompile request is missing or revoked")
     request = _decode_json(row["payload"], "durable recompile request")
     if (not isinstance(request, dict) or not isinstance(request.get("sources"), list)
-            or len(request["sources"]) != COUNT
+            or not 1 <= len(request["sources"]) <= COUNT
             or not all(isinstance(source, dict) and {"filepath", "sha256", "md5", "mtime_ns", "size"} <= set(source) for source in request["sources"])):
         raise ValueError("Invalid durable recompile request")
     for key in ("version", "request_id", "plan_sha256", "approval_sha256"):
         if marker.get(key) != request.get(key):
             raise ValueError("Recompile request binding mismatch")
-    if type(marker["version"]) is not int or marker["version"] != VERSION or request.get("read_scope") != "public_only":
+    if type(marker["version"]) is not int or marker["version"] not in {1, VERSION} or request.get("read_scope") != "public_only":
         raise ValueError("Recompile request boundary mismatch")
     p = raw_path(str(payload.get("filepath") or ""))
     matches = [s for s in request["sources"] if s["filepath"] == str(p)]
-    if len(matches) != 1 or len(request["sources"]) != COUNT:
+    if len(matches) != 1 or (marker["version"] == 1 and len(request["sources"]) != COUNT):
         raise ValueError("Recompile target is outside its approved whitelist")
     approved = matches[0]
     if str(p) in _deferred_sources(get_connection(), row["job_id"], request):
         raise ValueError("Controlled source is explicitly deferred, not authorized for model reading")
-    _check_source_state(approved)
+    # Post-write callback sees our own publication. Keep raw, authorization and
+    # ledger checks, but fence competing publication before mutation only.
+    _check_source_state(approved, check_current_publication=check_source_version)
     if marker["sha256"] != approved["sha256"] or payload.get("hash") != approved["md5"]:
         raise ValueError("Recompile content binding mismatch")
     current = fingerprint(str(p))
@@ -356,7 +344,7 @@ def _deferred_sources(conn, request_job: str, scope: dict) -> set[str]:
     if not isinstance(value, dict) or set(value) != expected_fields:
         raise ValueError("Invalid controlled deferral binding")
     members = [s for s in scope["sources"] if s["filepath"] == value["filepath"]]
-    if (type(value["version"]) is not int or value["version"] != VERSION
+    if (type(value["version"]) is not int or value["version"] != scope["version"]
             or value["request_job_id"] != request_job
             or value["request_id"] != scope["request_id"]
             or value["plan_sha256"] != scope["plan_sha256"]
@@ -477,7 +465,7 @@ def dispatch_scope(scope: dict, *, batch_size: int = 1,
                 payload["source_projection_hash"] = projection_hash(text)
                 instructions = _build_ingest_instructions(
                     p, source["md5"], name,
-                    index_context="No Wiki candidate context is authorized for this current-version recompilation. Return standalone or an honest source rejection; never invent integration targets.",
+                    index_context="No Wiki candidate context is authorized for this current-version recompilation. Return standalone with a canonical Source page for every eligible source, even empty or outside-focus material; never invent integration targets.",
                     purpose_context="Focus on medical digital transformation, AI-native hospitals, and AI mechanisms with a supported connection to those goals. Use only the supplied source evidence; do not infer private user history.",
                     source_read_path=payload["source_read_path"],
                 )
@@ -497,7 +485,7 @@ def dispatch_scope(scope: dict, *, batch_size: int = 1,
                 made.append(task_path)
                 db_store.mark_job_awaiting_subagent(job_id, str(task_path))
                 job_ids.append(job_id)
-        return {"request_job_id": request_job, "selected": COUNT, "deferred": len(deferred), "enqueued": len(job_ids), "job_ids": job_ids, "state": "DISPATCHED_NOT_COMPLETE" if job_ids else "NO_NEW_HANDOFF"}
+        return {"request_job_id": request_job, "selected": len(scope["sources"]), "deferred": len(deferred), "enqueued": len(job_ids), "job_ids": job_ids, "state": "DISPATCHED_NOT_COMPLETE" if job_ids else "NO_NEW_HANDOFF"}
     except BaseException:
         for path in made:
             remove_subagent_task(path)
@@ -512,7 +500,7 @@ def controlled_recompile(plan_path: str, plan_sha256: str, approval_path: str, a
     scope = load_scope(plan_path, plan_sha256, approval_path, approval_sha256)
     _defer_target(scope, defer_filepath, defer_sha256)
     if not apply:
-        return {"selected": COUNT, "preserved_rejections": 18, "request_id": scope["request_id"],
+        return {"selected": len(scope["sources"]), "preserved_rejections": 18 if scope["version"] == 1 else 0, "request_id": scope["request_id"],
                 "plan_sha256": plan_sha256, "approval_sha256": approval_sha256,
                 "state": "VALIDATED_NOT_DISPATCHED", "production_writes": False}
     return dispatch_scope(scope, batch_size=batch_size, defer_filepath=defer_filepath, defer_sha256=defer_sha256)

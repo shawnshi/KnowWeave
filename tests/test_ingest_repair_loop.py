@@ -54,7 +54,7 @@ def _claimed_task(isolated_memory, raw, candidate):
     source_text = raw.read_text(encoding="utf-8")
     shared = {
         "filepath": str(raw),
-        "hash": "test-hash",
+        "hash": tool_ingest.calculate_hash(str(raw)),
         "canonical_name": _SOURCE_PAGE,
         # Empty is what the dispatcher records while the Source page is not yet published,
         # and ``finalize_ingest`` compares it against the canonical page version.
@@ -76,7 +76,7 @@ def _claimed_task(isolated_memory, raw, candidate):
     packet_file = isolated_memory / "packet.json"
     packet_file.write_text(json.dumps(packet), encoding="utf-8")
 
-    job_id = db_store.enqueue_job("ingest", dict(shared))
+    job_id = db_store.enqueue_job("ingest", dict(processed))
     db_store.mark_job_awaiting_subagent(job_id, str(packet_file))
     claimed = json.loads(tool_ingest.claim_ingest_tasks(limit=1))
     assert claimed, "the runner must be able to claim the packet it just published"

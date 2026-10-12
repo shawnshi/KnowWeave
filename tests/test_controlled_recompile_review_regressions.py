@@ -36,7 +36,7 @@ def test_CR001_actual_claim_not_packet_marker_controls_read_gate(scope_files, mo
     if damage == "marker-path-and-id":
         p["job_id"] = db_store.enqueue_job("ingest", {"filepath": p["filepath"], "hash": p["hash"]})
     calls = []
-    monkeypatch.setattr(runner, "raw_is_published", lambda *_: False)
+    monkeypatch.setattr(runner, "current_source_publication_proven", lambda *_: False)
     monkeypatch.setattr(runner, "run_model", lambda *_: calls.append(1))
     counts, error = runner._process_task(task, False, "fixture", {})
     assert calls == [] and counts["errors"] == 1 and "dispatch validation failed" in error
@@ -80,6 +80,8 @@ def test_CR003_same_request_retry_revalidates_ledger_and_receipt(scope_files, dr
     if drift == "ledger":
         conn.execute("UPDATE processed_files SET processed_at = 'new owner state' WHERE filepath = ?", (p["filepath"],)); conn.commit()
     else:
+        from tests.test_controlled_recompile import _publish_current
+        _publish_current(p["filepath"], p["hash"])
         later = db_store.enqueue_job("ingest", {"filepath": p["filepath"], "hash": p["hash"]})
         conn.execute("UPDATE jobs SET status = 'finalized', result_json = ? WHERE job_id = ?", (json.dumps({"integration": {"disposition": "rejected", "reason": "A valid later current-byte rejection."}}), later)); conn.commit()
     before = _ledger(p["filepath"])
@@ -106,7 +108,8 @@ def test_CR003_post_handoff_ledger_change_prevents_model(scope_files, monkeypatc
 def test_CR003_commit_transaction_rechecks_ledger(scope_files, monkeypatch):
     _dispatch(scope_files)
     _, p = _claim()
-    p["integration"] = {"disposition": "rejected", "reason": "Synthetic strategy rejection with no new insight.", "relations": []}
+    from tests.test_mutation_coordinator import _source_content
+    p["integration"] = {"disposition": "standalone", "reason": "No authorized target relations for this source.", "relations": []}
     real = db_store.validate_ingest_job_finalization
     calls = []
     def race(*args, **kwargs):
@@ -116,7 +119,7 @@ def test_CR003_commit_transaction_rechecks_ledger(scope_files, monkeypatch):
             conn.execute("UPDATE processed_files SET processed_at = 'competing state' WHERE filepath = ?", (p["filepath"],))
         return real(*args, **kwargs)
     monkeypatch.setattr(db_store, "validate_ingest_job_finalization", race)
-    result = tool_ingest.finalize_ingest([], p)
+    result = tool_ingest.finalize_ingest([{"filename": p["canonical_name"], "content": _source_content()}], p)
     assert "ledger drifted" in result
     assert _ledger(p["filepath"])["file_hash"] == scope_files["rows"][0]["old_ledger"]["file_hash"]
     _assert_no_receipt(p["job_id"])
@@ -152,9 +155,12 @@ def test_CR005_historical_ledger_cannot_close_controlled_terminal_failure(scope_
     assert p["job_id"] in result["kept"] and p["job_id"] not in result["closed"]
     row = conn.execute("SELECT status, error_msg FROM jobs WHERE job_id = ?", (p["job_id"],)).fetchone()
     assert row["status"] == "failed" and "source was ingested" not in str(row["error_msg"])
-    # A real bound current-version receipt is sufficient, never mere path existence.
+    # A rejection is not publication; a real current Source is required.
     later = db_store.enqueue_job("ingest", {"filepath": p["filepath"], "hash": p["hash"]})
     conn.execute("UPDATE jobs SET status = 'finalized', result_json = ? WHERE job_id = ?", (json.dumps({"integration": {"disposition": "rejected", "reason": "Valid current-version source rejection."}}), later)); conn.commit()
+    assert p["job_id"] in db_store.close_terminal_failed_jobs()["kept"]
+    from tests.test_controlled_recompile import _publish_current
+    _publish_current(p["filepath"], p["hash"])
     assert p["job_id"] in db_store.close_terminal_failed_jobs()["closed"]
 
 
@@ -190,7 +196,7 @@ def test_CR005_real_mechanical_receipt_cannot_close_controlled_failure(scope_fil
     _, normal_data = _claim()
     normal_data["integration"] = {"disposition": "rejected", "reason": reason, "relations": []}
     result = tool_ingest.finalize_ingest([], normal_data)
-    assert "Successfully" in result, result
+    assert "Successfully" not in result and "disposition" in result
     assert not current_version_proven(p["filepath"], p["controlled_recompile"]["sha256"], p["hash"])
     kept = db_store.close_terminal_failed_jobs(source_ingested_only=source_ingested_only)
     assert p["job_id"] in kept["kept"] and p["job_id"] not in kept["closed"]

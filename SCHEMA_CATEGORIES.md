@@ -4,11 +4,12 @@ This document explains the code-owned ontology for the `categories` field in Vec
 `vector_lake/schema_validator.py` is the executable vocabulary owner; `vector_lake/runtime_contract.py` supplies its current values to model tasks. This catalogue is checked against those values, not parsed by the write gate.
 All entities, concepts, and synthesis logic nodes must carry exactly one of these category values.
 
-Two axes each hold nine values and they are **not** the same list, so the wording below is kept strict: `categories` is the controlled axis of nine **category values** (the list directly under this paragraph); `domain` is the topic/industry facet whose first tier is nine **macro domains**, plus registered **verticals** and **aliases**. "Macro domain" therefore always means the `domain` axis -- the write gate's own error text uses it (`neither a macro domain nor a registered vertical`). 
+The two axes have different vocabularies and counts: `categories` is the controlled axis of ten **category values** (listed below); `domain` is the topic/industry facet whose first tier is nine **macro domains**, plus registered **verticals** and **aliases**. "Macro domain" always means the `domain` axis -- the write gate\'s own error text uses it (`neither a macro domain nor a registered vertical`).
 Folksonomy and fine-grained labels should go into the `tags` field instead.
 
 ## Allowed Categories
 - `Uncategorized`: Default category for imported legacy nodes ONLY. **Do not use for new nodes.**
+- `General_Knowledge`: Eligible general knowledge or Source content not faithfully described by a specialist category. Retain its actual topic and source attribution; do not force a healthcare or strategic classification.
 - `Artificial_Intelligence`: AI models, architectures, AI/Agent methodology, training algorithms (e.g. LLM, RAG, RL, Agent Architecture).
 - `Healthcare_IT`: Digital health systems, hospital implementations, electronic health records (e.g. EHR, HIS, Epic).
 - `Strategy_and_Business`: Market analysis, corporate strategy, go-to-market, market intelligence, business strategy.
@@ -24,7 +25,7 @@ The proposal helper `propose_schema_mutation` (`vector_lake/mcp_server.py`) is m
 
 ## Domain Facet (主题/行业 facet，两层登记制)
 
-`categories` 是分类受控轴（9 个分类值）；`domain` 是**主题/行业 facet**，它**开放但需登记**——因为它被使用的方式就是"这条记录讲的是哪个主题/行业"，而不是第二个分类轴。2026-09-28 实测：7376 个带 `domain` 的页面里，7327 页是一个宏观域值，36 页落在 18 个已登记纵向上（18 个纵向全部在用：`Sociology` 7 页、`Media` 5 页、`Academic_Sociology` 3 页、`Neuroscience` 3 页……），13 页仍是未登记的 `Uncategorized`（历史遗留，新节点禁用），0 页使用别名。这些页面的 `categories` 早已写明了分类归属，而纵向信息在 tags 里没有任何留存——36 页里 0 页把纵向名写进 tags。**把它们抹平进 9 个宏观域等于删掉唯一记录该主题的字段。**
+`categories` 是分类受控轴（10 个分类值）；`domain` 是**主题/行业 facet**，它**开放但需登记**——因为它被使用的方式就是"这条记录讲的是哪个主题/行业"，而不是第二个分类轴。2026-09-28 实测：7376 个带 `domain` 的页面里，7327 页是一个宏观域值，36 页落在 18 个已登记纵向上（18 个纵向全部在用：`Sociology` 7 页、`Media` 5 页、`Academic_Sociology` 3 页、`Neuroscience` 3 页……），13 页仍是未登记的 `Uncategorized`（历史遗留，新节点禁用），0 页使用别名。这些页面的 `categories` 早已写明了分类归属，而纵向信息在 tags 里没有任何留存——36 页里 0 页把纵向名写进 tags。**把它们抹平进 9 个宏观域等于删掉唯一记录该主题的字段。**
 
 ### 第一层：宏观域（9 个，语料主体在用）
 
@@ -67,4 +68,4 @@ The proposal helper `propose_schema_mutation` (`vector_lake/mcp_server.py`) is m
 
 
 **【强制】入湖收容协议 (Ingest Protocol):** 
-在任何执行知识入湖 (Ingest) 或合并的环节，**绝对禁止使用 `Uncategorized`** 以及任何自创分类。如果遇到边缘概念，必须向上面 9 个分类值进行降维对齐；确需新分类时，把候选写进交接说明，由人用 CLI 助手 `propose_schema_mutation` 提请登记（见上节 Enforcement）。
+在任何执行知识入湖 (Ingest) 或合并的环节，**绝对禁止使用 `Uncategorized`** 以及任何自创分类。在上面 10 个受控分类值中选择忠实表达内容的类别；没有适配的专门类别时使用 `General_Knowledge`，不把内容强行归入医疗或战略类别。确需新分类时，把候选写进交接说明，由人用 CLI 助手 `propose_schema_mutation` 提请登记（见上节 Enforcement）。

@@ -8,7 +8,7 @@ Vector Lake 是一个本地文件优先的知识编译器。它不是传统向�
 * `MEMORY/wiki`：人类可读的 Markdown 发布层，用于审计、浏览、复盘和长期资产沉淀。
 * `MEMORY/wiki/index.json` 与 `MEMORY/wiki/claim_topology.json`：从 canonical 写出的投影（页面节点 + 加权边；断言拓扑）。检索实际读的是它们的 SQLite 投影（`page_index_*` + FTS5），投影落后时回退读 `index.json`，并在输出头部标记 `[DEGRADED]`。
 * `MEMORY/wiki/.meta/vector_lake.db`：统一的 SQLite 底层引擎，不仅保存实体 (Entities)、断言 (Claims)、证据 (Evidence)、信源 (Sources)、图拓扑、变更集和治理队列，还将 `Claim` 编译为 `fact / preference / decision / task_state`，存入 Agent 运行态的 `operational_memory` 表。
-* `MEMORY/purpose.md`：版本化战略控制面。YAML 契约驱动摄取范围、证据等级、意图权重、SIR 复审和张力合成阈值；营销噪音与范围外资料不进入主图谱，但保留最小丢弃审计。`purpose_vectors.json` 仅保留为旧版回退，不再是权重主源。
+* `MEMORY/purpose.md`：版本化目的与证据控制面。YAML 契约驱动 `core / edge / other` 分类、证据使用、意图权重、SIR 复审和张力合成阈值。摄取资格由原文目录、格式、隐私与授权决定；主题偏离、证据弱、营销表述、空正文或缺少关系都不是拒收理由。合格来源保留 canonical Source，未核实主张仍归属于来源，不升级为已证实事实。`purpose_vectors.json` 仅保留为旧版回退，不再是权重主源。
 
 如果 `MEMORY/wiki/.meta` 不可写，运行时会回退到仓库内 `data/v8_meta/`。
 
@@ -34,7 +34,7 @@ python -B scripts/business_acceptance.py --backend fallback --output /path/to/ne
 |约束|事实|规避|
 |-|-|-|
 |必须常驻守护进程|outbox 消费、增量索引、定时 lint、**到期时的 gram 索引重建**、WAL checkpoint、备份保留、兜底扫描与 Loop 线程监督均在 `watchdog_sync.py` 内，**它同时拉起并看护摄取 Runner**；摄取任务包的**模型调用**在宿主侧 `scripts/ingest_runner.py`（自动启动默认写入页面；shadow 跳过模型调用，但仍认领任务并记录状态），由 `scripts/ingest_runner_service.py` 负责重启，后者自身持有单实例锁|只读检索才可省略守护进程。**没有守护进程时没有任何定时维护会触发**（写入也会在 5 分钟后进入 outbox 积压告警），gram 索引需人工按 `doctor` 的 `due=` 执行 `python cli.py gram-index --if-due --apply`。常驻形态用计划任务 `VectorLake-Watchdog`（见“日常运行入口”），不依赖临时 shell 保持常驻。实例锁可拒绝重复启动，但不能代替进程托管或证明子进程已退出|
-|摄取是一条中继流水线，各段职责不重叠|`ingest_worker`（守护进程内）只认领 `queued` / `failed`（预算未用尽）/ 租约过期的 `dispatched`，产出任务包并转入 `awaiting_subagent`；宿主侧 `ingest_runner.py` 只认领 `awaiting_subagent` 与租约过期的 `subagent_processing`，因此两段不会争抢同一作业。作业租约、`lease_token` 与 `lease_generation` 保证同一个作业不会被并发提交；被顶替或终态失败的作业不会再被派发（前者的状态被标为 `superseded`）|想让某个源重跑时用 `ingest-tasks --clear-abandoned` 或改源文件（废弃键按内容哈希）；**不要**为“多跑一点”而绕开租约手工改 `jobs`|
+|摄取是一条中继流水线，各段职责不重叠|`ingest_worker`（守护进程内）只认领 `queued` / `failed`（预算未用尽）/ 租约过期的 `dispatched`，产出任务包并转入 `awaiting_subagent`；宿主侧 `ingest_runner.py` 只认领 `awaiting_subagent` 与租约过期的 `subagent_processing`，因此两段不会争抢同一作业。作业租约、`lease_token` 与 `lease_generation` 保证同一个作业不会被并发提交；被顶替或终态失败的作业不会再被派发（前者的状态被标为 `superseded`）|先区分来源预算、后端暂停与历史缺页；缺页按当前字节和明确清单走受控重编。**不要**为“多跑一点”而改原文伪造变更、清空队列、改台账哈希或绕开租约手工改 `jobs`|
 |Runner 健康默认只告警|`runner_absent` / `runner_stalled` / `runner_failing` 默认进 `warnings`，不翻转 `ok`；“从未跑过”与“跑挂了”由 `.meta/runtime/runner_supervisor.json` 区分|需要把这几项并入 `degraded` 列表（依然不阻断写入）时设 `VECTOR_LAKE_RUNNER_STRICT=1`|
 |文本编译需要模型执行后端|`cli.py sync` 只准备任务包；统一 Runner 选择 Pi / Gemini / Codex 执行模型调用，`native_llm.generate_text` 仍抛 `SubagentTaskRequired`|在 Runner 主机安装并认证所选 CLI；通过 `config.json` 的 `ingest.backend` 选择后端，Pi 才要求 subagent 能力|
 |向量投影需要维护|页面变更会使对应向量失效；常驻守护进程的周期兜底会按批次补齐缺失或过时向量，受嵌入模型与凭据可用性约束|未启用兜底或需立即恢复时执行 `python cli.py embedding-backfill --apply`；缺少嵌入凭据时检索降级，不以向量缺失冒充库中无资料|
@@ -106,7 +106,7 @@ Runner 只在执行槽位空闲时认领任务：串行逐项认领，并发最�
 
 修复和重试共用 `ingest_errors` 分类：候选 canonical/投影版本过期不让模型修补旧令牌，重新派发且不消耗来源失败预算；缺字段、命名或 Schema 错误允许有界修复。默认每个作业 3 次失败预算，每次最多 1 次初始执行加 2 轮修复，即确定性校验持续失败时最多 9 次适配器调用。版本冲突不消耗预算，此数不是所有故障的全局调用上限，也不是 Pi 父会话和子代理的底层模型请求数。
 
-Runner 状态中的 `finalized` 保留为成功关闭作业总数；另有 `published`、`content-rejected`、`duplicate-closed`、`missing-source-closed` 四项互斥结果。`duplicate` / `missing-source` 旧字段仍是检测次数，不保证关闭成功；执行失败看 `errors` 与 `model-failed`。这些都是当前 Runner 进程的计数，不是数据库历史总量。Health 的 `runner.outcomes` 对旧快照缺失字段返回 `null`，不把未知补成零。`projection_outbox_pending` / `projection_outbox_failed` 单独展示全库 outbox 工作，不是某个作业的投影完成回执；outbox 清空也不证明向量全部更新。
+摄取合同 v10 仅允许模型返回 `standalone` 或 `integrated`，两者均须实际提交 canonical Source 页。范围外材料用 `strategic_scope: other`；无法归级时省略 `evidence_tier` 并说明限制。没有专属类别时使用 `General_Knowledge`。空正文和零入选简报也保留 Source，不编造知识。Runner 的 `finalized` 表示出版或已有当前 Source 的去重关闭；新作业的 `content-rejected`、`missing-source-closed` 保留为兼容计数字段但不再增长。原文消失属于错误，不能关闭为成功。`duplicate` / `missing-source` 旧字段仍是检测次数，不保证关闭成功；执行失败看 `errors` 与 `model-failed`。这些都是当前 Runner 进程的计数，不是数据库历史总量。Health 的 `runner.outcomes` 对旧快照缺失字段返回 `null`，不把未知补成零。`projection_outbox_pending` / `projection_outbox_failed` 单独展示全库 outbox 工作，不是某个作业的投影完成回执；outbox 清空也不证明向量全部更新。
 
 ### 模型后端的权限与留存边界
 
@@ -154,7 +154,7 @@ Gemini/Codex 实际执行可复用安全能力探针；显式 `--check` 仍做�
 * **`Event_*`**：重要会议、行业突发事件。
 * **`Concept_*`**：抽象架构、理论、业务机制。域总览页沿用 `Concept_Overview_<domain>.md` 形式（由 `scripts/compile_domain_overviews.py` 生成）。
 * **`Policy_*` / `Standard_*`**：政策法规、行业标准。
-* **`Source_*`**：`raw/` 原始信源的一对一摘要节点。新页面名由 `wiki_utils.canonical_source_name` 生成（`Source_<消毒后的 stem>.md`）；与 raw 的对应关系靠 frontmatter 的 `sources:` 声明，不靠页名。旧格式 `Source_<目录>-<stem>-<hash8>` 的页面仍有效，不要批量重命名打断已有链接。
+* **`Source_*`**：`raw/` 原始信源的出处与摘要节点，新页须声明 `type: source`。页面名由 `wiki_utils.canonical_source_name` 生成（`Source_<消毒后的 stem>.md`）；`sources:` 声明原文路径，但当前版完成还须核验 canonical 存储中的 `source_hash` / `source_frontmatter`、版本及完整 Source 投影，不能仅凭磁盘 frontmatter 或相似页名认定完成。不同目录的同名 stem 可能撞同一目标，须保留原文和旧页、分流确认，不能自动覆盖或改绑。旧格式 `Source_<目录>-<stem>-<hash8>` 仍可读，不要批量重命名打断已有链接。
 * **`Synthesis_*`**：推演、跨界比较与调研长文。
 * **`System_*`**：系统投影页（社区页、总览等）。前缀校验直接放行，且不参与 purpose 契约门。
 
@@ -222,7 +222,7 @@ cp config.example.json config.json
 * `memory_dir`：自定义 `MEMORY` 根目录；优先级为 `VECTOR_LAKE_MEMORY_DIR`、此字段、宿主历史默认路径。新部署建议显式设置绝对路径，避免误用宿主目录。
 * `target_directories`：摄入扫描目录；留空时扫描当前 `MEMORY/raw`，非空时替代默认目录（相对路径基于项目根目录）。
 * `exclude_paths`：默认排除 `stocks/`、`garmin/`、`personal-insights/`；配置会覆盖默认列表。另有代码级规则拒绝 `privacy/.../Diary/...` 来源，不能通过配置解除。
-* `supported_extensions`：允许编译的原始资料后缀（默认 `[".md", ".txt"]`）。
+* `supported_extensions`：扫描允许的原始资料后缀（默认 `[".md", ".txt"]`）；修改配置不会新增解析器，摄取路径仍须满足格式校验。PDF / JSON 不是当前默认编译入口，需要另行授权的格式转换与文本核验，不能把未解析原文件当作摄取成功。
 
 将以下配置合并到 `config.json`；使用 Gemini 或 Codex 时，将 `pi` 改为 `gemini` 或 `codex`，保留其他字段：
 
@@ -361,17 +361,17 @@ Windows 常驻入口为计划任务 **`VectorLake-Watchdog`**，执行 `scripts/
 **更新常驻代码时先安排空闲窗口**：确认摄取作业和 outbox 无在途处理，保留代码与数据库恢复点；控制计划任务的重复触发，再按已核验的 PID、创建时间和父子关系停止受影响的守护/Runner 进程树。`Stop-ScheduledTask` 不会取消后续触发，也不能单独证明 Python 子进程已退出。新守护可能接管已有 Runner，但接管不等于加载新代码。恢复后核对新 PID、心跳、队列与索引；MCP 连接须另行重连。不要按进程名批量终止其他宿主会话。
 2. **摄取 Runner（可选的手工形式）**：`python scripts/ingest_runner_service.py --limit 2 --interval 120`，不指定 `--model-cmd` 才会按环境变量 / `ingest.backend` 选择内置后端。手工监督器及直接 Runner 默认 shadow（报告 `needs-model`，仍有队列与状态副作用）；真实写入需 `--no-shadow`。自动启动则默认真实写页。Runner 用 `--concurrency / -c`（或 `VECTOR_LAKE_RUNNER_CONCURRENCY`）控制模型调用并发；root 所有权锁与消费者锁阻止不同入口并行认领，细节见 Config 节。
 
-   自定义 `--model-cmd` 保留 shell/stdin/stdout 协议，stdout 必须只返回 `{"files_written": [{"filename": "Source_*.md", "content": "..."}], "integration": {"disposition": "integrated|standalone|rejected", "relations": [...]}}`；standalone/rejected 用 `reason`，rejected 用空文件数组。纯数组或缺少集成判断会被拒绝；租约、源哈希和候选清单由宿主提供，不能由模型改写。内置后端共用结果验证、修复预算和 `finalize_ingest`，不另建发布路径。
+   自定义 `--model-cmd` 保留 shell/stdin/stdout 协议，stdout 必须只返回 `{"files_written": [{"filename": "Source_*.md", "content": "..."}], "integration": {"disposition": "integrated|standalone", "relations": [...]}}`；standalone 用 `reason`，每次成功都必须返回 canonical Source 页。纯数组或缺少集成判断会被拒绝；租约、源哈希和候选清单由宿主提供，不能由模型改写。内置后端共用结果验证、修复预算和 `finalize_ingest`，不另建发布路径。
 
-   当前摄取契约版本为 `9`（`tool_ingest.INGEST_CONTRACT_VERSION`），会在认领前重建旧版 queued / failed / awaiting\_subagent 提示词，保留 queued / failed 的原有尝试次数，不改动已领取的 subagent\_processing 作业。升级前先等待在途任务完成并保留恢复点；磁盘改动不会热更新驻留进程。
+   当前摄取契约版本为 `10`（`tool_ingest.INGEST_CONTRACT_VERSION`），会在认领前重建旧版 queued / failed / awaiting\_subagent 提示词，保留 queued / failed 的原有尝试次数，不改动已领取的 subagent\_processing 作业。升级前先等待在途任务完成并保留恢复点；磁盘改动不会热更新驻留进程。
 3. **检索**：`python cli.py search "<keyword>"`，或 `python cli.py query "<question>"` 走预算受控的上下文组装。
 4. **摄取队列**：`python cli.py ingest-tasks` 查看 queued / awaiting\_subagent 作业；模型或 subagent 只返回包含 `files_written` 和 `integration` 的对象，宿主控制器验证后调用 `finalize_ingest` 入湖。
-5. **被废弃的源**：同一份内容反复确定性失败（例如 `categories` 不是单元素列表、命名或 schema 违规）时，第 3 次尝试后该源会被记为「废弃」并停止派发，避免每轮固定烧掉 3 次模型调用。`python cli.py ingest-tasks --abandoned` 查看清单与原因，`--clear-abandoned [FILE]` 恢复派发。键是 `(路径, 内容哈希)`：**改好源文件即自动恢复**，无需人工清理。`--terminal-failed` 列出耗尽尝试预算的作业，`--close-terminal-failed` 把其中**源已入账**的标记为 superseded（源未入账的会保留，因为那才是真正未完成的工作）。
+5. **来源预算与历史缺页**：同一 `(路径, 内容哈希)` 反复确定性校验失败，来源预算耗尽后停止派发；模型进程退出、超时或无效交付属于后端故障，不是内容拒收，按后端暂停门处理。`python cli.py ingest-tasks --abandoned` / `--terminal-failed` 查看来源或作业预算，`--clear-abandoned [FILE]` / `--close-terminal-failed` 仅用于已授权的队列维护，不是出版凭据。已处理但缺少当前 Source 的来源，应使用 [受控重编](docs/controlled-recompile.md)：v2 每次批准 1–60 份精确公共来源，先冻结当前哈希、大小、mtime 与旧 ledger，再校验并小批派发；私人或归属不明材料不套用公共批准。保留历史拒收与失败记录，不修改原文或台账来绕过预算。
 6. **周期治理**：`python cli.py review` 处理冲突与候选队列，`python cli.py doctor` 检查运行健康度。
 
-### 显式当前版本重评（限定60份）
+### 显式当前版本重评（有界批准清单）
 
-`recompile-ingest` 面向固定冻结清单中的60份资料，不是通用重编或普通 `sync` 的替代入口。批准制品、公开性证明、租约、失败预算、延后与完成回执的完整约束见 [专用受控重编说明](docs/controlled-recompile.md)。仅校验、不登记或派发：
+`recompile-ingest` v2 接受 1–60 份当前指纹绑定的批准清单，复用原生租约与写入校验；v1 的历史 78/60/18 清单边界仍保留。它不是普通 `sync` 的替代入口。批准制品、公开性证明、租约、失败预算、延后与完成回执的完整约束见 [专用受控重编说明](docs/controlled-recompile.md)。仅校验、不登记或派发：
 
 ```bash
 python cli.py recompile-ingest --plan <frozen-plan.json> --plan-sha256 <digest> --approval <read-approval.json> --approval-sha256 <digest>
@@ -687,7 +687,7 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 
 切换时先让在途任务完成，协调停止当前 root 的 Runner/监督器及其自动看护，避免 watchdog 按旧启动计划重新拉起。修改配置后重新启动相应入口，核对新 PID、`effective_backend`、`selection_source` 与心跳；命令行或环境变量覆盖会优先于配置文件。更新 watchdog 的后端选择代码时，还需重启 watchdog；仅重启其子进程不会更新父进程已加载的代码。不会自动杀掉其他客户端的进程，生产切换/重启需独立授权。
 
-* 入账与去重：`processed_files` 记 `(路径, 内容哈希)`，表示来源已被处理，不保证存在 Source 页面。`finalized` 且 `integration.disposition=rejected` 是正常拒收，不出版 Wiki 文件；历史 `operator_trust_hash_baseline_upgrade` 的 `completed` 记录只证明操作者接受了哈希基线，不是模型摄入或出版回执。核查缺页时应绑定当前内容摘要及对应的完成 / 拒收回执；证据缺失保留为待核验，不直接清空账本或批量重摄入。
+* 入账与去重：`processed_files` 记 `(路径, 内容哈希)`，表示来源已被处理，不保证存在 Source 页面。契约升级不会重跑未改字节的历史来源；兜底扫描也不是历史缺页补齐。历史 `integration.disposition=rejected` 记录保留，但不能证明当前内容已经出版，也不能关闭失败重编；v10 不再产生成功拒收。去重要求实际 Source 页的精确原文路径和当前字节摘要，不能只依赖 ledger、名称相似或旧拒收理由；历史 `operator_trust_hash_baseline_upgrade` 的 `completed` 记录只证明操作者接受了哈希基线，不是模型摄入或出版回执。核查缺页时应绑定当前内容摘要及对应的完成 / 拒收回执；证据缺失保留为待核验，不直接清空账本或批量重摄入。
 * 出版溯源：实际出版时在**规范 Source 页面**的 frontmatter 写入 `source_hash`，记录编译所用内容。已发布但缺账目行的源由扫描按证据补齐；有 `source_hash` 则比对哈希，无则仅按页面 `created` 与文件 mtime 作历史日期推断，不能证明字节一致。证据显示文件已变时**不补行**，而是让它重新摄入，避免修改被静默丢弃。
 * `VECTOR_LAKE_DB_PATH`：覆盖 SQLite 数据库路径（默认 `<MEMORY>/wiki/.meta/vector_lake.db`）。
 * `VECTOR_LAKE_PAYLOAD_ROOT` / `VECTOR_LAKE_PAYLOAD_MAX_BYTES`：MCP `payload_file` 沙箱的可读根与单文件字节上限（默认 5 MiB）。
@@ -713,7 +713,7 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 * `VECTOR_LAKE_RUNNER_PI_BIN` / `VECTOR_LAKE_RUNNER_GEMINI_BIN` / `VECTOR_LAKE_RUNNER_CODEX_BIN`：对应 CLI 的可执行文件或 PATH 名称，默认 `pi` / `gemini` / `codex`。Pi 保留托管安装路径的后备解析；显式不可用的二进制不回退到其他安装或服务。`VECTOR_LAKE_RUNNER_SUBAGENT_AGENT` 仅适用于 Pi，默认项目级 `vector-lake-ingestor`（`.pi/agents/vector-lake-ingestor.md`，仅 `read` 工具、fresh 上下文，不继承全局/项目材料或技能）；默认 profile 缺失时拒绝替换为 reviewer。显式代理覆盖仍受所选代理自己的权限与输出契约约束。Pi 接缝从仓库根启动，原生任务包/模型结果验证与 `finalize_ingest` 不变。各接缝共用 `VECTOR_LAKE_RUNNER_MODEL_TIMEOUT`，Runner 另读 `VECTOR_LAKE_RUNNER_COOLDOWN`。
 * `VECTOR_LAKE_RUNNER_REPAIR_ATTEMPTS`：可修正的输出/格式错误在 `finalize_ingest` 拒绝后最多修正的轮数（默认 `2`；`0` 关闭）。各轮共享同一模型截止时间，不另领超时预算；源变化、过期版本或租约冲突不进入模型格式修正，须重新派发。缺失版本字段与真正的陈旧版本不同，仍可由模型修正。重试不能替代校验。
 * `VECTOR_LAKE_RUNNER_SHADOW=1`：让自动拉起的 Runner 不写 Wiki 页面，默认关闭。直接运行 `scripts/ingest_runner.py` 默认 shadow，使用 `--no-shadow` 才写页；shadow 跳过模型调用，但仍会认领任务、处理重复来源并记录运行状态，不是零副作用模式。
-* `VECTOR_LAKE_CATCHUP_INTERVAL_SECONDS`：守护进程的周期性兜底间隔，单位是**秒**，不是启用开关。部署示例采用 `600` 秒（10 分钟）；未设置时应用缺省为 `900` 秒，`0` 关闭，`1` 表示每轮结束后仅等待 1 秒。兜底做三件事：按扫描规则准备尚未处理或内容已变更的 raw、把超过时限的陈旧摄取任务作废、以及按批次重建缺失或输入已变的向量。它不把所有“缺少 Source 页面”的已处理记录自动重摄入；拒收、信任基线和历史校验隔离仍按各自规则保留。
+* `VECTOR_LAKE_CATCHUP_INTERVAL_SECONDS`：守护进程的周期性兜底间隔，单位是**秒**，不是启用开关。部署示例采用 `600` 秒（10 分钟）；未设置时应用缺省为 `900` 秒，`0` 关闭，`1` 表示每轮结束后仅等待 1 秒。兜底做三件事：按扫描规则准备尚未处理或内容已变更的 raw、把超过时限的陈旧摄取任务作废、以及按批次重建缺失或输入已变的向量。它不把所有“缺少 Source 页面”的已处理记录自动重摄入；历史拒收、信任基线和校验隔离不自动改写；恢复旧拒收使用显式受控重编清单，不清空队列或手改哈希。
 * `VECTOR_LAKE_CATCHUP_EMBEDDING_BATCH`：兜底每轮最多重新嵌入多少个节点（默认 `200`；`0` 关闭该半部）。增量索引在页面变更时会作废其向量且按契约不调用 embedding API，兜底是把这个失效补回来的自动对应物；批大小的上限保证循环不被长时间占用。
 * `VECTOR_LAKE_CATCHUP_EMBEDDING_BUDGET_SECONDS`：兜底单个 embedding 批次允许等待的上限（默认 `120` 秒，含限流窗口与重试）。超出被记为失败批并留给下一轮，而不是占住 900 秒的节拍——配额错误每次重试固定 sleep 60 秒，不设上限时两个批次就能吃掉整轮。
 * `VECTOR_LAKE_STALE_TASK_MAX_AGE_SECONDS`：兜底把多旧的摄取任务视为陈旧（默认 `86400` 秒）。
@@ -815,7 +815,7 @@ CJK 分词仅使用 `rjieba`（统一入口 `vector_lake/tokenizer.py`）。无�
 
 #### 原生性能加速 (Rust Native Acceleration)
 
-可选原生核心 `vector_lake_core` 当前版本为 **0.2.2**，位于 `crates/vector_lake_core`，采用 `cp38-abi3`。各调用路径是否有回退由自身契约决定，安装成功不等于正在运行的宿主已经加载新版本。
+可选原生核心 `vector_lake_core` 当前版本为 **0.2.3**，位于 `crates/vector_lake_core`，采用 `cp38-abi3`。各调用路径是否有回退由自身契约决定，安装成功不等于正在运行的宿主已经加载新版本。
 
 |模块|调用路径|当前职责|
 |-|-|-|
@@ -887,7 +887,7 @@ FTS5 更新使用 `fts_rowid` 定位并核对键，避免按页面键扫描虚�
 |`vector_lake/path_safety.py`|兼容 Python 3.10 的符号链接／Windows reparse-point 检查|
 |`vector_lake/schema_validator.py`|frontmatter 与正文结构的 schema 校验（含标签与实体命名空间的隔离门）|
 |`vector_lake/defense_hook.py`|写入前防御钩子（schema + purpose 契约统一入口）|
-|`vector_lake/purpose_contract.py`|战略目的解析、摄取门、SIR 复审与 Synthesis-Proposal 阈值|
+|`vector_lake/purpose_contract.py`|目的解析、scope / 证据校验、SIR 复审与 Synthesis-Proposal 阈值|
 |`vector_lake/yaml_utils.py`|YAML 存取封装|
 |`vector_lake/backup_retention.py`|目录锁、完成回执与成员 SHA-256 验证后的保守回收；保护最新验证副本及未知／变化集合|
 
@@ -968,4 +968,4 @@ $env:PYTHONUTF8='1'; python cli.py debt --top 1
 * Windows 控制台建议设置 `PYTHONUTF8=1`，避免中文路径或中文输出触发编码问题。
 * 长任务由 `filelock` 串行化（`index.json.lock`、`.meta/governance_queue.lock`、`.watchdog.instance.lock`、`<meta>/runtime/ingest_processing.json.lock`、`<meta>/runtime/.runner_service.lock`、`<meta>/runtime/.runner_consumer.lock`）。遇到占用时先确认没有残留的 watchdog / MCP / ingest Runner 进程，再重试，不要直接删锁文件。
 * `.gitignore` 排除任务包、临时文件、`scratch/`、构建产物和本机数据。发布前检查暂存清单，不提交数据库、模型 payload、wheel、原生二进制或凭据。
-* 摄取核验要区分未派发、排队、模型处理中、处理结论、最终发布和投影完成；入队成功、子代理返回或 `doctor` 的基础依赖通过均不能代替发布验收。`finalized` 也可能表示合法拒收：当前来源哈希一致、成功回执为 `integration.disposition=rejected` 时，不创建页面或关系是预期结果，应保留拒收记录，不因缺少发布关联而重复编译。`standalone` 表示仅发布 Source；页面与投影仍须单独核验。非空来源若记录空内容 MD5（`d41d8cd98f00b204e9800998ecf8427e`），先核验实际字节、UTF-8、来源路径和当前发布内容；无法证明对应当前内容时重新摄取，不直接改台账哈希冒充完成。保留历史失败记录，按当前来源版本去重，避免重置整库队列或重复模型调用。
+* 摄取核验要区分未派发、排队、模型处理中、处理结论、最终发布和投影完成；入队成功、子代理返回或 `doctor` 的基础依赖通过均不能代替发布验收。旧 `rejected` 回执只记录历史处理结论，保留原记录但不再当作出版或拒收合理性的证明。v10 的完成须核验实际 Source 及其原文绑定；模型返回 rejected、读取失败、格式错误和版本冲突均不属于成功。`standalone` 表示仅发布 Source；页面与投影仍须单独核验。非空来源若记录空内容 MD5（`d41d8cd98f00b204e9800998ecf8427e`），先核验实际字节、UTF-8、来源路径和当前发布内容；无法证明对应当前内容时重新摄取，不直接改台账哈希冒充完成。保留历史失败记录，按当前来源版本去重，避免重置整库队列或重复模型调用。

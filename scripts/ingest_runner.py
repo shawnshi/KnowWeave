@@ -48,7 +48,7 @@ from vector_lake.ingest_backend import (SELECTION_SOURCES, builtin_model_argv,
 from vector_lake.tool_ingest import (  # noqa: E402
     claim_ingest_tasks,
     finalize_ingest,
-    raw_is_published,
+    current_source_publication_proven,
     raw_publication_index,
     record_ingest_failure,
 )
@@ -73,6 +73,8 @@ def _merge_model_integration(processed: dict, integration: dict) -> dict:
     """Keep lease and source versions host-owned; accept only the model's semantic decision."""
     if not isinstance(integration, dict) or not str(integration.get("disposition") or "").strip():
         raise ValueError("model output requires an explicit integration disposition")
+    if str(integration["disposition"]).strip().lower() not in {"integrated", "standalone"}:
+        raise ValueError("model output disposition is not successful completion")
     return {**processed, "integration": integration}
 
 
@@ -146,7 +148,7 @@ def classify(processed: dict, index: dict) -> str:
     filepath = str(processed.get("filepath") or "")
     if not filepath or not Path(filepath).exists():
         return "missing-source"
-    if raw_is_published(filepath, index):
+    if current_source_publication_proven(filepath, str(processed.get("hash") or ""), index):
         return "duplicate"
     return "needs-model"
 
@@ -295,13 +297,18 @@ def _process_task(task: dict, shadow: bool, model_cmd: str, publication_index: d
             record_ingest_failure(job_id, last_err, claim=task)
         return res, last_err
     try:
-        if verdict in {"duplicate", "missing-source"}:
-            reason = REJECT_DUPLICATE if verdict == "duplicate" else REJECT_MISSING_SOURCE
-            result = submit([], {**processed, "integration": {"disposition": "rejected", "reason": reason}})
+        if verdict == "missing-source":
+            res["missing-source"] += 1
+            res["errors"] += 1
+            last_err = "raw source is missing; ingestion is not complete"
+            if job_id:
+                record_ingest_failure(job_id, last_err, claim=task)
+        elif verdict == "duplicate":
+            result = submit([], {**processed, "integration": {"disposition": "duplicate", "reason": REJECT_DUPLICATE}})
             res[verdict] += 1
             if "Successfully finalized" in result:
                 res["finalized"] += 1
-                res[f"{verdict}-closed"] += 1
+                res["duplicate-closed"] += 1
             else:
                 res["errors"] += 1
                 last_err = result
@@ -350,8 +357,7 @@ def _process_task(task: dict, shadow: bool, model_cmd: str, publication_index: d
                 result = f"{result} [after {rounds_used} repair round(s)]"
             if "Successfully finalized" in result:
                 res["finalized"] += 1
-                disposition = str(previous_output["integration"]["disposition"]).strip().lower()
-                res["content-rejected" if disposition == "rejected" else "published"] += 1
+                res["published"] += 1
             else:
                 res["errors"] += 1
                 last_err = result
