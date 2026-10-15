@@ -87,6 +87,27 @@ class _WindowsJob:
             self.close()
 
 
+def _bootstrap_interpreter(requested, env):
+    """Avoid CPython's Windows venv redirector without leaving the selected venv.
+
+    The redirector creates another PID before our gate. CPython's own launcher
+    passes __PYVENV_LAUNCHER__ to the base interpreter to retain venv discovery
+    (PC/venvlauncher.c, Modules/getpath.py). Use that same handoff only for the
+    current CPython venv; never substitute an explicitly different interpreter.
+    """
+    if (os.name == "nt" and sys.implementation.name == "cpython"
+            and sys.prefix != sys.base_prefix
+            and os.path.normcase(os.path.abspath(requested))
+            == os.path.normcase(os.path.abspath(sys.executable))):
+        base = getattr(sys, "_base_executable", None)
+        if not base or not Path(base).is_file():
+            raise RuntimeError("CPython venv base interpreter is unavailable")
+        child_env = dict(os.environ if env is None else env)
+        child_env["__PYVENV_LAUNCHER__"] = sys.executable
+        return base, child_env
+    return None, env
+
+
 def _spawn(*, python_entry=None, env=None, stdout=None, stderr=None, cwd=None, creationflags=0):
     """Launch a stdlib-only bootstrap that waits for a parent gate on stdin."""
     argv = [python_entry[0] if python_entry is not None else sys.executable,
@@ -94,8 +115,10 @@ def _spawn(*, python_entry=None, env=None, stdout=None, stderr=None, cwd=None, c
     if python_entry is not None:
         # Same process/PID as the Python entry point, preserving supervisor identity.
         argv += ["--python-entry", json.dumps(list(python_entry)[1:])]
+    executable, child_env = _bootstrap_interpreter(argv[0], env)
     process = subprocess.Popen(
-        argv, stdin=subprocess.PIPE, stdout=stdout, stderr=stderr, cwd=cwd, env=env,
+        argv, executable=executable, stdin=subprocess.PIPE, stdout=stdout,
+        stderr=stderr, cwd=cwd, env=child_env,
         text=True, encoding="utf-8", errors="replace",
         start_new_session=os.name != "nt",
         creationflags=(creationflags | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0,

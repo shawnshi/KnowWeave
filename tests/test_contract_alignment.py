@@ -76,11 +76,21 @@ def test_recovery_does_not_invent_missing_grade_and_preserves_explicit_grade():
 
 def test_one_runtime_snapshot_drives_main_handoff_output_and_relay(monkeypatch):
     import json
+    from datetime import datetime, timezone
+    from scripts import ingest_model_pi_subagents as relay
     from scripts.ingest_model_pi_subagents import _runtime_schema_contract
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz):
+            assert tz is timezone.utc
+            return cls(2030, 1, 2, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(relay, 'datetime', FixedDatetime)
     from vector_lake import tool_ingest, schema_validator as schema
-    from vector_lake.runtime_contract import schema_snapshot, render_schema_contract
+    from vector_lake.ingest_schema_contract import schema_snapshot, render_schema_contract
     from vector_lake.ingest_worker import _subagent_ingest_prompt
-    from vector_lake.output_contract import build_output_contract
+    from vector_lake.ingest_output_contract import build_output_contract
     monkeypatch.setattr(tool_ingest, '_read_purpose', lambda: '')
     monkeypatch.setattr(tool_ingest, 'parse_static_skeleton', lambda _: '')
     monkeypatch.setattr(schema, 'DOMAIN_VERTICALS', schema.DOMAIN_VERTICALS | {'Synthetic_Vertical'})
@@ -91,7 +101,12 @@ def test_one_runtime_snapshot_drives_main_handoff_output_and_relay(monkeypatch):
     encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
     main = tool_ingest._build_ingest_instructions('synthetic.md', 'hash', 'Source_synthetic.md', index_context='')
     assert encoded in main
-    assert _runtime_schema_contract() == render_schema_contract(snapshot)
+    assert _runtime_schema_contract() == render_schema_contract(snapshot) + (
+        '\n\nHOST NODE UPDATE DATE (UTC): 2030-01-02\n'
+        'A Source page must use literal type: source, not Source; updated must not be null. '
+        'Use the host node update date for updated. This is the compilation/edit date, '
+        "not the source's publication or event date; never invent an unknown event date."
+    )
     assert '[SyntheticEvent]' in _subagent_ingest_prompt(main)
     assert 'tags: at most 4' in _subagent_ingest_prompt(main)
     assert '**Tags (标签)**: At most 4' in main
@@ -143,7 +158,7 @@ def test_hydrated_cli_and_relay_keep_common_schema_and_complete_policy(isolated_
     import json
     from vector_lake import tool_ingest
     from vector_lake.ingest_model_contract import build_cli_prompt
-    from vector_lake.runtime_contract import schema_snapshot
+    from vector_lake.ingest_schema_contract import schema_snapshot
     from scripts.ingest_model_pi_subagents import _brief
     write_strict_purpose(isolated_memory)
     source = isolated_memory / 'raw/synthetic.md'
@@ -201,7 +216,7 @@ def test_schema_document_links_skeletons_without_pinning_user_strategy():
 
 def test_schema_snapshot_is_a_copy_of_real_rule_owners():
     from vector_lake import schema_validator as schema
-    from vector_lake.runtime_contract import schema_snapshot
+    from vector_lake.ingest_schema_contract import schema_snapshot
     from vector_lake.node_vocabulary import GENERATED_NODE_TYPES, NODE_PREFIXES, type_for_prefix
     snapshot = schema_snapshot()
     assert snapshot['required_frontmatter'] == list(schema.REQUIRED_FIELDS)

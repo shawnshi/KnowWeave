@@ -1,0 +1,102 @@
+name: target-platforms-manual
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only owner-provisioned disposable VMs, never shared/credential-bearing hosts.
+# A label or venv is not physical isolation. See docs/PLATFORM_SUPPORT.md.
+jobs:
+  target:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ${{ matrix.target.labels }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        backend: [native, fallback]
+        target:
+          - name: windows11
+            labels: [self-hosted, Windows, X64, vector-lake-ephemeral, vector-lake-windows11]
+            system: Windows
+            distro: ""
+            minimum: ""
+          - name: ubuntu26
+            labels: [self-hosted, Linux, X64, vector-lake-ephemeral, vector-lake-ubuntu26]
+            system: Linux
+            distro: ubuntu
+            minimum: "26.04"
+          - name: debian13
+            labels: [self-hosted, Linux, X64, vector-lake-ephemeral, vector-lake-debian13]
+            system: Linux
+            distro: debian
+            minimum: "13"
+          - name: fedora44
+            labels: [self-hosted, Linux, X64, vector-lake-ephemeral, vector-lake-fedora44]
+            system: Linux
+            distro: fedora
+            minimum: "44"
+          - name: fedora45
+            labels: [self-hosted, Linux, X64, vector-lake-ephemeral, vector-lake-fedora45]
+            system: Linux
+            distro: fedora
+            minimum: "45"
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      PYTHONIOENCODING: utf-8
+      EVIDENCE_SUFFIX: vl-platform-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target.name }}-${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Create a job-local environment (not a filesystem/network sandbox)
+        run: |
+          python - <<'PY'
+          import os, pathlib, venv
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / os.environ['EVIDENCE_SUFFIX']
+          root.mkdir(parents=True, exist_ok=False)
+          env = root / 'venv'
+          venv.EnvBuilder(with_pip=True).create(env)
+          with open(os.environ['GITHUB_PATH'], 'a', encoding='utf-8') as path:
+              path.write(str(env / ('Scripts' if os.name == 'nt' else 'bin')) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as values:
+              values.write('EVIDENCE_ROOT=' + str(root / 'evidence') + '\n')
+              values.write('CI_NATIVE_DIR=' + str(root / 'native') + '\n')
+          PY
+      - name: Verify actual requested target and kernel
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.target.system }}
+          EXPECTED_DISTRO: ${{ matrix.target.distro }}
+          EXPECTED_MINIMUM: ${{ matrix.target.minimum }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, sys
+          if sys.prefix == sys.base_prefix:
+              raise RuntimeError('Refuse global Python dependency installation')
+          args = [sys.executable, 'scripts/platform_check.py', '--require-target', '--expected-system', os.environ['EXPECTED_SYSTEM'], '--output', str(pathlib.Path(os.environ['EVIDENCE_ROOT']) / 'platform.json')]
+          if os.environ['EXPECTED_DISTRO']:
+              args += ['--expected-distro', os.environ['EXPECTED_DISTRO'], '--minimum-distro-version', os.environ['EXPECTED_MINIMUM']]
+          subprocess.run(args, check=True)
+          PY
+      - name: Install runtime and hash-verified test dependency
+        run: |
+          python -m pip install -r requirements.txt pytest
+          python -m pip install --index-url https://pypi.org/simple --only-binary=:all: --no-deps --require-hashes -r scripts/ci-test-requirements.txt
+      - name: Build checkout native extension
+        if: matrix.backend == 'native'
+        run: |
+          python -m pip install --index-url https://pypi.org/simple --only-binary=:all: --no-deps --require-hashes -r scripts/ci-build-requirements.txt
+          cargo --version
+          python scripts/ci_core.py build --output "$CI_NATIVE_DIR" --timeout 900
+      - name: Run actual target suite with backend attestation
+        run: python scripts/ci_core.py test --backend "${{ matrix.backend }}" --native-dir "$CI_NATIVE_DIR" --receipt "$EVIDENCE_ROOT/core.json" -- -q

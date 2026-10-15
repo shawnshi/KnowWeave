@@ -243,13 +243,13 @@ def test_deadline_is_shared_with_capability_probes(isolated_memory, monkeypatch)
 
 @pytest.mark.parametrize("backend", ["codex", "gemini"])
 def test_real_queue_claim_model_subprocess_and_finalizer(backend, isolated_memory, tmp_path, monkeypatch):
-    from vector_lake import db_store, ingest_worker, native_llm, tool_ingest
+    from vector_lake import db_store, ingest_worker, subagent_handoff, tool_ingest
     from tests.test_ingest_manifest import _raw_and_candidate, _relation
     from tests.test_mutation_coordinator import _source_content
 
     task_root = tmp_path / "task-packets"
     task_root.mkdir()
-    monkeypatch.setattr(native_llm, "_task_root", lambda: task_root)
+    monkeypatch.setattr(subagent_handoff, "_task_root", lambda: task_root)
     _raw_and_candidate(isolated_memory)
     assert "enqueued 1" in tool_ingest.prepare_ingest_batch(batch_size=5)
     ingest_worker.process_jobs()

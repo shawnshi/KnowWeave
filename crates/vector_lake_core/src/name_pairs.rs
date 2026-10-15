@@ -80,7 +80,7 @@ impl NamePairIndex {
         {
             return Err(PyValueError::new_err("name index capacity exceeded"));
         }
-        Ok(py.allow_threads(move || {
+        Ok(py.detach(move || {
             let features: Vec<Features> = names.into_iter().map(Features::new).collect();
             let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
             for (index, name) in features.iter().enumerate() {
@@ -110,7 +110,7 @@ impl NamePairIndex {
                 "pair/check budgets are outside supported bounds",
             ));
         }
-        Ok(py.allow_threads(|| self.chunk(max_pairs, max_checks)))
+        Ok(py.detach(|| self.chunk(max_pairs, max_checks)))
     }
 }
 

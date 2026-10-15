@@ -205,7 +205,7 @@ pub fn intersect_postings(py: Python<'_>, mut blobs: Vec<Vec<u8>>) -> PyResult<V
             "postings capacity exceeded",
         ));
     }
-    py.allow_threads(move || {
+    py.detach(move || {
         blobs.sort_by_key(Vec::len);
         let mut result: Option<Vec<u32>> = None;
         for blob in blobs {

@@ -328,6 +328,7 @@ def test_vector_health_is_green_when_complete(empty_lake):
 
 def test_reconcile_repairs_only_the_unhealthy_and_contains_failures(monkeypatch):
     called: list[str] = []
+    repaired = set()
 
     def healthy():
         return projection_registry.HEALTHY, "fine"
@@ -335,8 +336,12 @@ def test_reconcile_repairs_only_the_unhealthy_and_contains_failures(monkeypatch)
     def sick():
         return projection_registry.DEGRADED, "behind"
 
+    def good_health():
+        return healthy() if "good" in repaired else sick()
+
     def good_repair():
         called.append("good")
+        repaired.add("good")
         return "repaired"
 
     def bad_repair():
@@ -348,7 +353,7 @@ def test_reconcile_repairs_only_the_unhealthy_and_contains_failures(monkeypatch)
         "PILOTS",
         (
             projection_registry.Projection("ok", "a", "c", healthy, lambda: called.append("never"), "none"),
-            projection_registry.Projection("good", "a", "c", sick, good_repair, "something"),
+            projection_registry.Projection("good", "a", "c", good_health, good_repair, "something"),
             projection_registry.Projection("bad", "a", "c", sick, bad_repair, "something"),
         ),
     )

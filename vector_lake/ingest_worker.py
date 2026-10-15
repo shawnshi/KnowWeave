@@ -6,9 +6,9 @@ from vector_lake.db_store import (
     claim_pending_jobs, get_connection, mark_job_awaiting_subagent,
     update_job_status, DispatchClaimLost, fail_dispatch_claim,
 )
-from vector_lake.native_llm import create_subagent_task
-from vector_lake.output_contract import build_output_contract
-from vector_lake.runtime_contract import schema_snapshot
+from vector_lake.subagent_handoff import create_subagent_task
+from vector_lake.ingest_output_contract import build_output_contract
+from vector_lake.ingest_schema_contract import schema_snapshot
 from vector_lake.template_loader import render_template
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

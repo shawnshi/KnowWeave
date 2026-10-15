@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 PI_BIN = os.environ.get("VECTOR_LAKE_RUNNER_PI_BIN", "pi")
@@ -42,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from vector_lake.template_loader import read_template, render_template
-from vector_lake.runtime_contract import render_schema_contract
+from vector_lake.ingest_schema_contract import render_schema_contract
 from vector_lake.process_control import run_contained, model_timeout_seconds
 TIMEOUT = model_timeout_seconds()
 SCRATCH = ROOT / "scratch"
@@ -98,7 +99,12 @@ def _brief(packet: dict) -> str:
 
 def _runtime_schema_contract() -> str:
     """Use the validator's vocabulary, not legacy prose or the model's guesses."""
-    return render_schema_contract()
+    return render_schema_contract() + (
+        f"\n\nHOST NODE UPDATE DATE (UTC): {datetime.now(timezone.utc).date().isoformat()}\n"
+        "A Source page must use literal type: source, not Source; updated must not be null. "
+        "Use the host node update date for updated. This is the compilation/edit date, "
+        "not the source's publication or event date; never invent an unknown event date."
+    )
 
 
 def _packet_contract(packet: dict) -> str:
@@ -112,7 +118,7 @@ def _packet_contract(packet: dict) -> str:
         return stored
     # Pre-v9 packet.  This seam deliberately does not import ``vector_lake``: it runs as a bare
     # script whose ``sys.path[0]`` is ``scripts/``, and the contract's one owner is
-    # ``vector_lake.output_contract`` -- which the packet publisher has already used by the time
+    # ``vector_lake.ingest_output_contract`` -- which the packet publisher has already used by the time
     # any packet reaches here.
     return read_template("prompts/ingest/legacy_packet_contract.md")
 

@@ -365,9 +365,9 @@ def dispatch_scope(scope: dict, *, batch_size: int = 1,
     if type(batch_size) is not int or not 1 <= batch_size <= COUNT:
         raise ValueError("Recompile batch must be between 1 and 60")
     from vector_lake import db_store, governance_store
-    from vector_lake.output_contract import build_output_contract
+    from vector_lake.ingest_output_contract import build_output_contract
     from vector_lake.ingest_worker import _subagent_ingest_prompt
-    from vector_lake.native_llm import create_subagent_task, remove_subagent_task
+    from vector_lake.subagent_handoff import create_subagent_task, remove_subagent_task
     from vector_lake.tool_ingest import INGEST_CONTRACT_VERSION, _build_ingest_instructions
     from vector_lake.wiki_utils import canonical_source_name, projection_hash
 

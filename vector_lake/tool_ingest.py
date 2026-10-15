@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from vector_lake import get_extension_root
 from vector_lake.template_loader import read_template, render_template
-from vector_lake.runtime_contract import render_schema_contract, schema_snapshot
+from vector_lake.ingest_schema_contract import render_schema_contract, schema_snapshot
 from vector_lake.db_store import mark_file_processed
 from vector_lake import governance_store
 from vector_lake.skeleton_parser import parse_static_skeleton
@@ -1503,7 +1503,7 @@ def requeue_legacy_ingest_jobs() -> int:
                 )
             if cursor.rowcount == 1:
                 applied.append((packet_path, status))
-    from vector_lake.native_llm import remove_subagent_task
+    from vector_lake.subagent_handoff import remove_subagent_task
 
     for packet_path, _status in applied:
         if packet_path:
@@ -1615,8 +1615,10 @@ def _load_scan_config() -> dict:
     return load_config()
 
 
-def prepare_ingest_batch(batch_size: int = 5) -> str:
-    """Native Antigravity Agentic subagent orchestration."""
+def prepare_ingest_batch(batch_size: int = 5, *, _progress: dict | None = None) -> str:
+    """Prepare one batch; optional internal progress supports bounded event draining."""
+    if _progress is not None:
+        _progress.update(enqueued=0, remaining=0)
     from vector_lake.db_store import init_db
 
     config = _load_scan_config()
@@ -1827,7 +1829,10 @@ def prepare_ingest_batch(batch_size: int = 5) -> str:
             return "No new files to ingest. " + " ".join(notes)
         return "No new files to ingest. System is fully synced."
 
+    pending_count = len(pending_files)
     pending_files = pending_files[:batch_size]
+    if _progress is not None:
+        _progress["remaining"] = pending_count - len(pending_files)
     _mark_ingest_in_flight([filepath for filepath, _ in pending_files])
 
     from vector_lake.db_store import enqueue_job
@@ -1889,6 +1894,8 @@ def prepare_ingest_batch(batch_size: int = 5) -> str:
         for ref in unenqueued:
             _clear_ingest_in_flight(ref)
 
+    if _progress is not None:
+        _progress["enqueued"] = enqueued_count
     if batch_size == 1 and enqueued_count == 1:
         return json.dumps(last_payload)
 
@@ -2171,7 +2178,7 @@ def finalize_ingest(files_written: list, processed_data: dict) -> str:
         task_packet_path = job_row.get("task_packet_path") if job_row else None
         if task_packet_path:
             try:
-                from vector_lake.native_llm import remove_subagent_task
+                from vector_lake.subagent_handoff import remove_subagent_task
 
                 remove_subagent_task(task_packet_path)
             except Exception as exc:

@@ -23,6 +23,7 @@ writes.  The model seam is ``--model-cmd`` (receives the packet JSON on stdin, m
 """
 import argparse
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -117,6 +118,14 @@ def write_status(**fields) -> None:
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(temporary, path)
+    from vector_lake.operational_status import write_public_heartbeat
+
+    try:
+        write_public_heartbeat(path.parent.parent, "runner", state=payload.get("status", "unknown"),
+                               shadow=payload.get("shadow"))
+    except (OSError, ValueError) as exc:
+        # A missing public heartbeat must remain unknown; never copy legacy errors/commands.
+        logging.getLogger("vector-lake-runner").warning("Public runner heartbeat unavailable: %s", type(exc).__name__)
 
 
 def _validate_controlled_claim(processed: dict, claim: dict | None = None) -> bool:

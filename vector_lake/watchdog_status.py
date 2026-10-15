@@ -10,6 +10,16 @@ log = logging.getLogger("vector-lake-watchdog-status")
 
 _status_lock = threading.Lock()
 
+def _write_public_snapshot(status_file: Path, data: dict) -> None:
+    from vector_lake.operational_status import write_public_heartbeat
+
+    try:
+        write_public_heartbeat(status_file.parent, "watchdog", state=data["status"],
+                               task_queue_size=data["task_queue_size"], index_queue_size=data["index_queue_size"])
+    except (OSError, ValueError) as exc:
+        log.warning("Public watchdog heartbeat unavailable: %s", type(exc).__name__)
+
+
 def get_status_file() -> Path:
     return get_meta_dir() / ".watchdog_status.json"
 
@@ -47,6 +57,7 @@ def reset_components() -> None:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             temp_file.replace(status_file)
+            _write_public_snapshot(status_file, data)
         except Exception as exc:
             log.error("Could not reset the watchdog status file: %s: %s", type(exc).__name__, exc)
         finally:
@@ -108,6 +119,7 @@ def write_status(
                 with open(temp_file, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
                 temp_file.replace(status_file)
+                _write_public_snapshot(status_file, data)
                 break
             except PermissionError:
                 time.sleep(0.1)

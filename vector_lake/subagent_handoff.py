@@ -19,15 +19,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("vector-lake-native-llm")
+log = logging.getLogger("vector-lake-subagent-handoff")
 _DEFAULT_RUN_ID = f"runtime-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
-class NativeLLMUnavailable(RuntimeError):
+class InProcessTextGenerationUnavailable(RuntimeError):
     """Raised when in-process text generation is intentionally unavailable."""
 
 
-class SubagentTaskRequired(NativeLLMUnavailable):
+class SubagentTaskRequired(InProcessTextGenerationUnavailable):
     """Raised after a current-environment subagent task packet is created."""
 
     def __init__(self, task_path: Path, detail: str):
@@ -35,7 +35,7 @@ class SubagentTaskRequired(NativeLLMUnavailable):
         super().__init__(f"{detail}: {task_path}")
 
 
-def native_llm_ready() -> tuple[bool, str]:
+def in_process_text_generation_ready() -> tuple[bool, str]:
     return False, "text generation is delegated to current-environment subagent task packets"
 
 

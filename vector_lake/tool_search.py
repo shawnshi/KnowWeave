@@ -1766,6 +1766,7 @@ def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain:
         return error
 
     result = ""
+    page_notes = []
     if vector_notes:
         result += "[DEGRADED] Retrieval notes: " + "; ".join(vector_notes) + "\n\n"
     if not final_scored:
@@ -1776,10 +1777,12 @@ def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain:
         locator = "summary"
         if os.path.exists(filepath):
             try:
-                with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+                with open(filepath, "r", encoding="utf-8") as handle:
                     snippet, locator = _relevant_excerpt(handle.read(), query)
-            except OSError:
+            except (OSError, UnicodeDecodeError) as exc:
                 snippet = str(node.get("summary") or "")
+                locator = "index-summary"
+                page_notes.append(f"{node['_key']}.md: {type(exc).__name__}; original page text unavailable")
         else:
             snippet = str(node.get("summary") or "")
             
@@ -1797,6 +1800,8 @@ def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain:
                        f"{escape(tension_info + snippet)}\n</Evidence_Node>\n")
         else:
             result += f"- **{node.get('title', node['_key'])}** (score: {score:.3f}) [source: {node['_key']}.md:{locator}]\n{tension_info}  {snippet}...\n\n"
+    if page_notes:
+        result = "[DEGRADED] Source text notes: " + "; ".join(page_notes) + "\n\n" + result
     return result
 
 
@@ -1875,6 +1880,7 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
 
     wiki_dir = str(get_wiki_dir())
     wiki_blocks: list[str] = []
+    page_notes = []
     wiki_used = 0
     page_count = 0
     author_keys = author_facet.author_page_keys() if author_facet.annotate_enabled() else frozenset()
@@ -1884,8 +1890,12 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
         snippet = ""
         locator = "summary"
         try:
-            with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+            with open(filepath, "r", encoding="utf-8") as handle:
                 snippet, locator = _relevant_excerpt(handle.read(), query)
+        except UnicodeDecodeError as exc:
+            snippet = str(node.get("summary") or "")[:2500]
+            locator = "index-summary"
+            page_notes.append(f"{key}.md: {type(exc).__name__}; original page text unavailable")
         except OSError:
             snippet = str(node.get("summary") or "")[:2500]
         # An authorship marker, never a filter: the reader can tell the author's own writing from
@@ -1915,7 +1925,7 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
         "wiki_page_count": page_count,
         "index_summary": index_summary,
         "purpose": purpose,
-        "retrieval_notes": list(vector_notes or []) + ([retrieval_error] if retrieval_error else []),
+        "retrieval_notes": list(vector_notes or []) + page_notes + ([retrieval_error] if retrieval_error else []),
         "budget_used": budget_used,
         "budget_max": max_chars,
     }

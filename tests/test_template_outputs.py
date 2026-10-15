@@ -76,14 +76,15 @@ class FixedDatetime(datetime):
 
 def current_outputs(tmp_path, monkeypatch):
     from scripts import compile_domain_overviews as overview, ingest_model_pi_subagents as relay
-    from vector_lake import ingest_model_contract, ingest_worker, output_contract, purpose_contract
+    from vector_lake import ingest_model_contract, ingest_worker, ingest_output_contract, purpose_contract
     from vector_lake import skeleton_parser, stub_creator, tool_memory, tool_projection, wiki_utils
     source = tmp_path / 'fixture-cli-source.md'
     source.write_bytes(b'synthetic raw source')
     monkeypatch.setattr(wiki_utils, 'resolve_ingest_source_path', lambda _: source)
+    monkeypatch.setattr(relay, 'datetime', FixedDatetime)
     outputs = {}
     outputs['handoff'] = fingerprint(ingest_worker._subagent_ingest_prompt('BRIEF'), normalized=True)
-    outputs['output_contract'] = fingerprint(output_contract.build_output_contract())
+    outputs['output_contract'] = fingerprint(ingest_output_contract.build_output_contract())
     outputs['cli'] = fingerprint(ingest_model_contract.build_cli_prompt(sample_packet()))
     outputs['relay'] = fingerprint(relay._brief(sample_packet()))
     outputs['repair_empty'] = fingerprint(relay._repair_block({'validation_error': 'synthetic error'}))

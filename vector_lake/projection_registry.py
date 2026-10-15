@@ -104,24 +104,25 @@ def _vector_health() -> tuple[str, str]:
     conn = db_store.get_connection()
     row = conn.execute(
         "SELECT (SELECT COUNT(*) FROM page_index_nodes) AS nodes,"
-        " (SELECT COUNT(*) FROM vec_embeddings) AS vectors,"
+        " (SELECT COUNT(*) FROM page_index_nodes n WHERE NOT EXISTS ("
+        "     SELECT 1 FROM vec_embeddings e WHERE e.page_key = n.node_key)) AS missing,"
+        " (SELECT COUNT(*) FROM vec_embeddings e WHERE NOT EXISTS ("
+        "     SELECT 1 FROM page_index_nodes n WHERE n.node_key = e.page_key)) AS orphaned,"
         " (SELECT COUNT(*) FROM vec_embeddings e WHERE NOT EXISTS ("
         "     SELECT 1 FROM vec_embedding_inputs i WHERE i.node_key = e.page_key)) AS unstamped"
     ).fetchone()
-    nodes, vectors, unstamped = int(row["nodes"]), int(row["vectors"]), int(row["unstamped"])
-    missing = max(0, nodes - vectors)
-    if missing or unstamped:
-        return DEGRADED, (
-            f"{vectors}/{nodes} vectors, {missing} missing, {unstamped} unstamped "
-            "(the vector half of hybrid retrieval is short on those pages)"
-        )
-    return HEALTHY, f"{vectors}/{nodes} vectors, 0 missing, 0 unstamped"
+    nodes, missing = int(row["nodes"]), int(row["missing"])
+    orphaned, unstamped = int(row["orphaned"]), int(row["unstamped"])
+    detail = f"{nodes - missing}/{nodes} vectors, {missing} missing, {unstamped} unstamped"
+    if orphaned:
+        detail += f", {orphaned} orphaned"
+    return (DEGRADED if missing or unstamped or orphaned else HEALTHY), detail
 
 
 def _vector_repair() -> str:
-    from vector_lake.periodic_catch_up import embedding_catch_up
+    from vector_lake.periodic_catch_up import embedding_batch_size, embedding_catch_up
 
-    summary = embedding_catch_up()
+    summary = embedding_catch_up(embedding_batch_size())
     return (
         f"embedded {summary.get('embedded', 0)} of {summary.get('candidates', 0)} candidate(s)"
         + (f" (skipped: {summary['skipped']})" if summary.get("skipped") else "")
@@ -407,10 +408,15 @@ def reconcile(only: str | None = None, dry_run: bool = False) -> dict[str, dict]
             results[projection.name] = {"action": "would-repair", "state": state, "detail": detail}
             continue
         try:
+            repair_result = str(projection.repair())[:400]
+            post_state, post_detail = projection.health()
             results[projection.name] = {
-                "action": "repaired", "state": state, "detail": detail,
-                "result": str(projection.repair())[:400],
+                "action": "repaired" if post_state == HEALTHY else "failed",
+                "state": state, "detail": detail, "result": repair_result,
+                "post_state": post_state, "post_detail": post_detail,
             }
+            if post_state != HEALTHY:
+                results[projection.name]["error"] = f"repair did not restore health: {post_state}: {post_detail}"
         except Exception as exc:  # noqa: BLE001 - see the docstring
             log.warning("Repair of projection %s failed: %s: %s", projection.name, type(exc).__name__, exc)
             results[projection.name] = {

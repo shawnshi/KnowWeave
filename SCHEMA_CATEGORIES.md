@@ -1,7 +1,7 @@
 # Vector Lake Schema Categories (受控词表)
 
 This document explains the code-owned ontology for the `categories` field in Vector Lake V8.0 (Schema V8.0).
-`vector_lake/schema_validator.py` is the executable vocabulary owner; `vector_lake/runtime_contract.py` supplies its current values to model tasks. This catalogue is checked against those values, not parsed by the write gate.
+`vector_lake/schema_validator.py` is the executable vocabulary owner; `vector_lake/ingest_schema_contract.py` supplies its current values to model tasks. This catalogue is checked against those values, not parsed by the write gate.
 All entities, concepts, and synthesis logic nodes must carry exactly one of these category values.
 
 The two axes have different vocabularies and counts: `categories` is the controlled axis of ten **category values** (listed below); `domain` is the topic/industry facet whose first tier is nine **macro domains**, plus registered **verticals** and **aliases**. "Macro domain" always means the `domain` axis -- the write gate\'s own error text uses it (`neither a macro domain nor a registered vertical`).

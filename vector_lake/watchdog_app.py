@@ -206,9 +206,15 @@ class RawWatchdogHandler(FileSystemEventHandler):
     wiki is a privacy decision, not a side effect of removing a component.
     """
 
+    _MAX_DEBOUNCE_PATHS = 1024
+
     def __init__(self):
         self.last_triggered = {}
         self.lock = threading.Lock()
+        self._sync_dirty = False
+        self._sync_running = False
+        self._closing = False
+        self._drain_on_close = False
 
     def handle_event(self, event):
         if event.is_directory:
@@ -228,26 +234,53 @@ class RawWatchdogHandler(FileSystemEventHandler):
 
         now = time.time()
         with self.lock:
-            if len(self.last_triggered) > 1000:
-                self.last_triggered = {
-                    k: v for k, v in self.last_triggered.items()
-                    if (now - v) <= DEBOUNCE_SECONDS * 2
-                }
+            if self._closing:
+                return
             if filepath in self.last_triggered and (now - self.last_triggered[filepath]) < DEBOUNCE_SECONDS:
                 return
+            self.last_triggered.pop(filepath, None)
             self.last_triggered[filepath] = now
+            if len(self.last_triggered) > self._MAX_DEBOUNCE_PATHS:
+                self.last_triggered.pop(next(iter(self.last_triggered)))
+            # Each sync scans all eligible sources; a dirty bit preserves the final
+            # event batch without retaining one executor task per source (VL-ARCH-03).
+            self._sync_dirty = True
+            if self._sync_running:
+                return
+            self._sync_running = True
+            try:
+                if not hasattr(self, "executor"):
+                    import concurrent.futures
+                    self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                self.executor.submit(self._drain_sync)
+            except Exception:
+                self._sync_running = False
+                log.exception("Failed to schedule raw-source sync")
 
-        log.info(f"Raw source modified: {filename}. Triggering sync_vector_lake in worker pool...")
-        try:
-            from vector_lake.tool_sync import sync_vector_lake
-            # Run using ThreadPoolExecutor to prevent thread explosion
-            if not hasattr(self, "executor"):
-                import concurrent.futures
-                self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-            future = self.executor.submit(sync_vector_lake)
-            future.add_done_callback(lambda f: log.error(f"sync_vector_lake Failed: {f.exception()}") if f.exception() else None)
-        except Exception as e:
-            log.error(f"Failed to trigger sync_vector_lake: {e}")
+    def _drain_sync(self):
+        while True:
+            with self.lock:
+                if self._closing and not self._drain_on_close:
+                    if self._sync_dirty:
+                        log.warning("Raw-source sync stopped with pending work; resume sync if periodic catch-up is disabled")
+                    self._sync_running = False
+                    return
+                if not self._sync_dirty:
+                    self._sync_running = False
+                    return
+                self._sync_dirty = False
+            try:
+                from vector_lake.tool_sync import sync_vector_lake
+                progress = {}
+                sync_vector_lake(_progress=progress)
+                if progress.get("remaining", 0) > 0:
+                    if progress.get("enqueued", 0) > 0:
+                        with self.lock:
+                            self._sync_dirty = True
+                    else:
+                        log.warning("Raw-source batch made no progress; remaining=%s", progress["remaining"])
+            except Exception:
+                log.exception("sync_vector_lake failed")
 
     def on_created(self, event):
         self.handle_event(event)
@@ -261,11 +294,15 @@ class RawWatchdogHandler(FileSystemEventHandler):
     def shutdown(self, wait: bool = False):
         """Cleanly shut down the background worker pool on daemon exit."""
         with self.lock:
-            if hasattr(self, "executor"):
-                try:
-                    self.executor.shutdown(wait=wait)
-                except Exception as exc:
-                    log.warning("RawWatchdogHandler executor shutdown error: %s", exc)
+            self._closing = True
+            self._drain_on_close = self._drain_on_close or wait
+            executor = getattr(self, "executor", None)
+        # The worker needs the same lock to settle; joining under it deadlocks.
+        if executor is not None:
+            try:
+                executor.shutdown(wait=wait)
+            except Exception as exc:
+                log.warning("RawWatchdogHandler executor shutdown error: %s", exc)
 
 
 def process_mutation_outbox_batch(limit: int = 50, max_attempts: int = 3, backoff_base: float = 2.0):

@@ -28,7 +28,7 @@ from vector_lake.db_store import (
 )
 from vector_lake import get_extension_root
 from vector_lake import memory_gram_index
-from vector_lake.native_llm import native_llm_ready
+from vector_lake.subagent_handoff import in_process_text_generation_ready
 from vector_lake.runtime_health import assess_runtime_health
 
 def _check_ast(module_path: Path) -> tuple[bool, str]:
@@ -159,7 +159,7 @@ def doctor_vector_lake(deep_dependency_check: bool = False) -> str:
     except ImportError as exc:
         checks.append(("Clustering Backend", False, f"leidenalg/igraph missing: {exc}"))
 
-    llm_ok, llm_detail = native_llm_ready()
+    llm_ok, llm_detail = in_process_text_generation_ready()
     if not llm_ok:
         # Text generation is delegated to the host agent by design, so this is an
         # expected operating mode rather than a failure.

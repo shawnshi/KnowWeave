@@ -6,7 +6,7 @@ from vector_lake import db_store, tool_ingest
 from vector_lake.ingest_model_contract import extract_result
 from vector_lake.purpose_contract import load_purpose_contract, validate_ingest_payload
 from vector_lake.wiki_utils import projection_hash
-from vector_lake.native_llm import create_subagent_task
+from vector_lake.subagent_handoff import create_subagent_task
 from tests.test_mutation_coordinator import _source_content, _write_purpose_contract
 from tests.test_controlled_recompile import scope_files, _save
 

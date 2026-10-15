@@ -22,7 +22,7 @@ pub fn fast_backbone_indices(
             "backbone requires valid distinct endpoints and finite weights",
         ));
     }
-    Ok(py.allow_threads(move || select(node_count, edges, max_edges)))
+    Ok(py.detach(move || select(node_count, edges, max_edges)))
 }
 
 fn select(node_count: usize, mut edges: Vec<Edge>, max_edges: usize) -> Vec<usize> {

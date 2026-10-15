@@ -215,7 +215,7 @@ def test_stale_empty_runtime_dirs_are_pruned_but_task_packets_survive(tmp_path):
     import os
     import time
 
-    from vector_lake import native_llm
+    from vector_lake import subagent_handoff
 
     brain_root = tmp_path / "brain"
     keep = brain_root / "runtime-current"
@@ -230,11 +230,11 @@ def test_stale_empty_runtime_dirs_are_pruned_but_task_packets_survive(tmp_path):
     for path in (keep, stale_empty, fresh_empty, unrelated):
         path.mkdir(parents=True, exist_ok=True)
 
-    old = time.time() - native_llm._STALE_RUNTIME_TTL_SECONDS - 60
+    old = time.time() - subagent_handoff._STALE_RUNTIME_TTL_SECONDS - 60
     for path in (stale_empty, stale_with_packet, unrelated):
         os.utime(path, (old, old))
 
-    native_llm._prune_stale_runtime_dirs(brain_root, keep=keep)
+    subagent_handoff._prune_stale_runtime_dirs(brain_root, keep=keep)
 
     assert not stale_empty.exists(), "an empty stale runtime dir was not pruned"
     assert stale_with_packet.exists(), "a runtime dir holding a task packet was pruned"

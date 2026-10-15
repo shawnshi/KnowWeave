@@ -90,7 +90,7 @@ def test_deferral_tampering_fails_closed(scope_files):
 @pytest.mark.parametrize('damage', ['cancelled', 'queued', 'bad-task-type', 'bad-request-job', 'missing-request-job', 'bad-request-id'])
 @pytest.mark.parametrize('mode', ['default', 'repeat-flags', 'change-target'])
 def test_RC_DEFER_001_revoked_or_damaged_identity_never_disappears_or_revives(scope_files, damage, mode):
-    from vector_lake import native_llm
+    from vector_lake import subagent_handoff
     row,page = _unknown(scope_files,0)
     other,other_page = _unknown(scope_files,2)
     control.controlled_recompile(*scope_files['args'],apply=True,
@@ -112,7 +112,7 @@ def test_RC_DEFER_001_revoked_or_damaged_identity_never_disappears_or_revives(sc
     jobs_before=[dict(r) for r in conn.execute('SELECT * FROM jobs ORDER BY job_id')]
     ledger_before=[dict(r) for r in conn.execute('SELECT * FROM processed_files ORDER BY filepath')]
     entities_before=[dict(r) for r in conn.execute('SELECT * FROM entities ORDER BY entity_id')]
-    packets_before={str(p):p.read_bytes() for p in native_llm._task_root().glob('*.json')}
+    packets_before={str(p):p.read_bytes() for p in subagent_handoff._task_root().glob('*.json')}
     source_before=(page.read_bytes(),other_page.read_bytes())
     seen_before=list(scope_files['seen'])
     flags={}
@@ -124,6 +124,6 @@ def test_RC_DEFER_001_revoked_or_damaged_identity_never_disappears_or_revives(sc
     assert [dict(r) for r in conn.execute('SELECT * FROM jobs ORDER BY job_id')]==jobs_before
     assert [dict(r) for r in conn.execute('SELECT * FROM processed_files ORDER BY filepath')]==ledger_before
     assert [dict(r) for r in conn.execute('SELECT * FROM entities ORDER BY entity_id')]==entities_before
-    assert {str(p):p.read_bytes() for p in native_llm._task_root().glob('*.json')}==packets_before
+    assert {str(p):p.read_bytes() for p in subagent_handoff._task_root().glob('*.json')}==packets_before
     assert (page.read_bytes(),other_page.read_bytes())==source_before
     assert scope_files['seen']==seen_before

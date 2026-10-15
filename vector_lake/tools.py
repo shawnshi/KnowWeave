@@ -5,7 +5,7 @@ from vector_lake.tool_gc import gc_vector_lake
 from vector_lake.tool_graph import audit_graph, visualize_vector_lake
 from vector_lake.tool_lint import lint_vector_lake
 from vector_lake.tool_merge import merge_suggestions_vector_lake
-from vector_lake.tool_piea import check_duplicate_entity
+from vector_lake.tool_entity_dedup import check_duplicate_entity
 from vector_lake.tool_ingest import (
     claim_ingest_tasks,
     clear_abandoned_ingest_sources,

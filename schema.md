@@ -4,7 +4,7 @@
 
 This file documents the data contract and authoring conventions, not a second executable rule owner.
 `vector_lake/schema_validator.py` owns enforced structural rules and closed vocabularies;
-`vector_lake/runtime_contract.py` reflects those rules into every ingest backend.
+`vector_lake/ingest_schema_contract.py` reflects those rules into every ingest backend.
 `SCHEMA_CATEGORIES.md` explains classification; `MEMORY/purpose.md` YAML owns user strategy,
 evidence-tier definitions and synthesis thresholds. Its current version is supplied at runtime,
 not pinned to a minor release in this document. Page skeletons and generator instructions live

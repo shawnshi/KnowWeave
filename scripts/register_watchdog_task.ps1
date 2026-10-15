@@ -23,12 +23,12 @@ $ErrorActionPreference = 'Stop'
 if (-not $Script) { $Script = Join-Path $PSScriptRoot 'watchdog_service.ps1' }
 if (-not $WorkDir) { $WorkDir = Split-Path -Parent $PSScriptRoot }
 
-if (-not (Test-Path $Script)) { throw "wrapper not found: $Script" }
+if (-not (Test-Path $Script -PathType Leaf)) { throw "wrapper not found: $Script" }
+if (-not (Test-Path $WorkDir -PathType Container)) { throw "working directory not found: $WorkDir" }
 
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing) {
-    Write-Host "task already exists; replacing it (State=$($existing.State))"
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    Write-Host "task already exists; updating it after validation (State=$($existing.State))"
 }
 
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
@@ -62,7 +62,7 @@ foreach ($logonType in 'S4U', 'Interactive') {
     try {
         $candidate = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType $logonType -RunLevel Limited
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $atLogon, $atStartup, $repeat `
-            -Settings $settings -Principal $candidate -Description $description | Out-Null
+            -Settings $settings -Principal $candidate -Description $description -Force | Out-Null
         $principal = $candidate
         Write-Host "registered with LogonType=$logonType"
         break

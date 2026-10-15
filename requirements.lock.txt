@@ -52,7 +52,8 @@
 #   provider's components), so a lower floor silently empties doctor's tool count.
 #   4.0.4 verified on Windows/CPython 3.13. It resolves the MCP Python SDK
 #   (`mcp` 2.2.0) transitively, so `mcp` is no longer a direct pin.
-# * mistune must stay >=3.0.1 (3.0.0 breaks renderer='ast').
+# * mistune must stay >=3.3.3: 3.0.0 breaks renderer='ast' and 3.3.0-3.3.2 carry
+#   GHSA-6m44-fpc8-c3rq (RecursionError DoS via nested emphasis in mistune.html()).
 # * fastmcp 4 pulls 27 transitive distributions (fastmcp-slim[client,server]:
 #   cyclopts, griffelib, joserfc, authlib, keyring, py-key-value-aio, ...). All
 #   resolved versions queried against OSV on 2026-09-17: 0 records.
@@ -69,4 +70,4 @@ fastmcp==4.0.4
 sqlite-vec==0.1.9
 tantivy==0.26.2
 rjieba==0.2.1
-mistune==3.3.2
+mistune==3.3.3

@@ -85,14 +85,14 @@ def test_missing_wiki_skeleton_refuses_ingest(monkeypatch, tmp_path):
 
 
 def test_event_tags_are_injected_not_copied(monkeypatch):
-    from vector_lake import tool_ingest, ingest_worker, output_contract, schema_validator
+    from vector_lake import tool_ingest, ingest_worker, ingest_output_contract, schema_validator
     monkeypatch.setattr(tool_ingest, '_read_purpose', lambda: '')
     monkeypatch.setattr(tool_ingest, 'parse_static_skeleton', lambda _: '')
     monkeypatch.setattr(schema_validator, 'INGEST_EVENT_TAGS', ('SyntheticEvent',))
     prompt = tool_ingest._build_ingest_instructions('fixture.md', 'hash', 'Source_fixture.md', index_context='')
     assert '[SyntheticEvent]' in prompt
     assert '[SyntheticEvent]' in ingest_worker._subagent_ingest_prompt('brief')
-    assert 'SyntheticEvent' in output_contract.build_output_contract()
+    assert 'SyntheticEvent' in ingest_output_contract.build_output_contract()
 
 
 def test_every_text_template_has_valid_placeholder_syntax():
@@ -120,7 +120,7 @@ def test_template_references_are_present_and_no_orphan_text_templates():
 def test_migrated_callers_do_not_embed_page_or_task_instructions():
     callers = (
         'vector_lake/ingest_worker.py', 'vector_lake/ingest_model_contract.py',
-        'vector_lake/output_contract.py', 'scripts/ingest_model_pi_subagents.py',
+        'vector_lake/ingest_output_contract.py', 'scripts/ingest_model_pi_subagents.py',
         'vector_lake/stub_creator.py', 'vector_lake/tool_memory.py',
         'vector_lake/tool_projection.py', 'vector_lake/skeleton_parser.py',
         'scripts/community_clustering_daemon.py', 'scripts/compile_domain_overviews.py',

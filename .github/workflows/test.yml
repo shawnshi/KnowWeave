@@ -15,7 +15,8 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        # Windows Server is a regression lane, NOT Windows 11 attestation.
+        os: [windows-2025, ubuntu-26.04, macos-26, macos-26-intel]
         backend: [native, fallback]
         python: ["3.10", "3.13"]
     defaults:
@@ -37,6 +38,17 @@ jobs:
             requirements.txt
             scripts/ci-build-requirements.txt
             scripts/ci-test-requirements.txt
+      - name: Record actual OS and kernel (never infer from runner label)
+        env:
+          EXPECTED_SYSTEM: ${{ runner.os }}
+        run: |
+          if [ "$EXPECTED_SYSTEM" = "macOS" ]; then
+            python scripts/platform_check.py --require-target --expected-system Darwin --output "$RUNNER_TEMP/platform-check.json"
+          elif [ "$EXPECTED_SYSTEM" = "Linux" ]; then
+            python scripts/platform_check.py --require-target --expected-system Linux --expected-distro ubuntu --minimum-distro-version 26.04 --output "$RUNNER_TEMP/platform-check.json"
+          else
+            python scripts/platform_check.py --output "$RUNNER_TEMP/platform-check.json"
+          fi
       - name: Install existing runtime and test dependencies
         run: python -m pip install -r requirements.txt pytest
       - name: Install hash-verified existing test-only dependency

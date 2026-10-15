@@ -26,22 +26,28 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+from filelock import FileLock
 
 REPO = Path(__file__).resolve().parents[1]
 CRATE = REPO / "crates" / "vector_lake_core"
-DLL = CRATE / "target" / "release" / "vector_lake_core.dll"
+def extension_filename(platform_name: str) -> str:
+    return "vector_lake_core.pyd" if platform_name == "win32" else "vector_lake_core.so"
+
+
+NATIVE_FILENAME = extension_filename(sys.platform)
+DLL = CRATE / "target" / "release" / ("vector_lake_core.dll" if sys.platform == "win32" else "libvector_lake_core.so")
 PYPROJECT = CRATE / "pyproject.toml"
 POINTER = "_active_version.txt"
-
-try:  # the target this host needs; the default GNU toolchain cannot link here (no -lgcc/-lgcc_eh)
-    from vector_lake.wiki_utils import get_meta_dir  # noqa: F401  (import proves the package loads)
-except Exception:  # pragma: no cover - the script must also run standalone
-    pass
 
 SHIM = '''"""Active native-core build.  Written by ``scripts/install_core.py`` -- do not edit by hand.
 
@@ -113,7 +119,25 @@ def site_packages() -> Path:
 
 
 def build() -> Path:
-    """Build the cdylib with the toolchain that can link on this host."""
+    """Build the host extension without changing any installed version or pointer."""
+    if sys.platform != "win32":
+        # Maturin supplies macOS extension linking flags and the correct wheel ABI;
+        # a bare cargo cdylib is not a portable Python extension build.
+        with tempfile.TemporaryDirectory(prefix="vector-lake-core-build-") as directory:
+            output = Path(directory) / "build"
+            subprocess.run([sys.executable, str(REPO / "scripts" / "ci_core.py"), "build", "--output", str(output)], check=True, timeout=960)
+            receipt = json.loads((output / "build-receipt.json").read_text(encoding="utf-8"))
+            binaries = receipt["native_hashes"]
+            if len(binaries) != 1:
+                raise SystemExit("build receipt must identify one native extension")
+            name, digest = next(iter(binaries.items()))
+            root = (output / "python").resolve()
+            binary = (root / name).resolve()
+            if not binary.is_relative_to(root) or binary.suffix != ".so" or _file_digest(binary).hex() != digest:
+                raise SystemExit("build receipt native path/hash mismatch")
+            DLL.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_bytes(DLL, binary.read_bytes())
+        return DLL
     toolchain = "stable-x86_64-pc-windows-msvc" if sys.platform == "win32" else None
     argv = ["cargo"]
     if toolchain:
@@ -141,7 +165,7 @@ def installed_versions() -> list[str]:
     versions = [
         path.name.removeprefix("vector_lake_core_").replace("_", ".")
         for path in sorted(parent.glob("vector_lake_core_*"))
-        if (path / "vector_lake_core.pyd").exists()
+        if (path / NATIVE_FILENAME).is_file()
     ]
     return sorted(versions, key=lambda v: [int(part) for part in re.findall(r"\d+", v)] or [0])
 
@@ -156,38 +180,105 @@ def active_version() -> str | None:
     return None
 
 
+def _atomic_bytes(target: Path, data: bytes) -> None:
+    fd, name = tempfile.mkstemp(prefix=f".{target.name}-", dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _file_digest(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
+def _version_directory(parent: Path, version: str) -> Path:
+    if not re.fullmatch(r"\d+(?:\.\d+)*", version):
+        raise SystemExit(f"invalid native-core version: {version!r}")
+    return parent / f"vector_lake_core_{version.replace('.', '_')}"
+
+
 def write_shim(default: str) -> Path:
     target = site_packages() / "vector_lake_core" / "__init__.py"
     target.parent.mkdir(parents=True, exist_ok=True)
-    # newline="\n": the working copy of every repo file is LF, and Python's text mode would write
-    # CRLF on Windows (the same mistake was made twice on 2026-09-25 with source files).
-    with open(target, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(SHIM.format(default=default, pointer=POINTER))
+    _atomic_bytes(target, SHIM.format(default=default, pointer=POINTER).encode("utf-8"))
     return target
 
 
 def activate(version: str, *, check: bool = True) -> None:
-    if version not in installed_versions():
-        raise SystemExit(f"{version} is not installed; have: {installed_versions() or 'none'}")
-    pointer = site_packages() / "vector_lake_core" / POINTER
-    with open(pointer, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(version + "\n")
-    if check:
-        probe = subprocess.run(
-            [sys.executable, "-c",
-             "import vector_lake_core as c; print(c.core_version, c.version(),"
-             " getattr(c, 'blocks_contract', lambda: 'none')())"],
-            capture_output=True, text=True,
-        )
-        print(f"activated {version}: {probe.stdout.strip() or probe.stderr.strip()[-300:]}")
+    parent = site_packages()
+    candidate = _version_directory(parent, version) / NATIVE_FILENAME
+    with FileLock(str(parent / ".vector-lake-core-install.lock"), timeout=30):
+        if not candidate.is_file():
+            raise SystemExit(f"{version} is not installed; have: {installed_versions() or 'none'}")
+        if check:
+            module = f"vector_lake_core_{version.replace('.', '_')}.vector_lake_core"
+            code = (
+                "import importlib, pathlib, sys\n"
+                f"sys.path.insert(0, {str(parent)!r})\n"
+                f"c = importlib.import_module({module!r})\n"
+                f"if pathlib.Path(c.__file__).resolve() != pathlib.Path({str(candidate)!r}).resolve():\n"
+                "    raise RuntimeError('wrong candidate path')\n"
+                f"if c.version() != {version!r}:\n"
+                "    raise RuntimeError('candidate version mismatch')\n"
+                "print(c.version(), getattr(c, 'blocks_contract', lambda: 'none')())\n"
+            )
+            probe = subprocess.run(
+                [sys.executable, "-c", code], capture_output=True, text=True,
+                env=dict(os.environ, VECTOR_LAKE_CORE_VERSION=version), timeout=30,
+            )
+            if probe.returncode:
+                raise SystemExit(f"activation probe failed for {version}: {probe.stderr.strip()[-300:]}")
+        shim = parent / "vector_lake_core" / "__init__.py"
+        previous_shim = shim.read_bytes() if shim.exists() else None
+        # Keep the old default until the pointer publishes the checked candidate.
+        # Failed publication must not change fresh consumers (VL-ARCH-01).
+        try:
+            write_shim(active_version() or version)
+            _atomic_bytes(parent / "vector_lake_core" / POINTER, (version + "\n").encode("utf-8"))
+        except OSError:
+            if previous_shim is None:
+                shim.unlink(missing_ok=True)
+            else:
+                _atomic_bytes(shim, previous_shim)
+            raise
+        print(f"activated {version}" + (f": {probe.stdout.strip()}" if check else " (unchecked)"))
 
 
 def install(dll: Path, version: str) -> Path:
     """Copy the build into its own versioned directory -- a new file, never an overwrite."""
-    target_dir = site_packages() / f"vector_lake_core_{version.replace('.', '_')}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "vector_lake_core.pyd"
-    shutil.copy2(dll, target)
+    parent = site_packages()
+    target_dir = _version_directory(parent, version)
+    target = target_dir / NATIVE_FILENAME
+    with FileLock(str(parent / ".vector-lake-core-install.lock"), timeout=30):
+        digest = _file_digest(dll)
+        if target.exists():
+            if _file_digest(target) != digest:
+                raise SystemExit(f"{version} already has different bytes; use a new version")
+            return target
+        if target_dir.exists():
+            raise SystemExit(f"{target_dir} is incomplete; preserve it and use a new version")
+        staging = Path(tempfile.mkdtemp(prefix=".install-core-", dir=parent))
+        try:
+            staged = staging / NATIVE_FILENAME
+            shutil.copy2(dll, staged)
+            if _file_digest(staged) != digest:
+                raise OSError("native build changed during installation")
+            with staged.open("rb+") as handle:
+                os.fsync(handle.fileno())
+            staging.rename(target_dir)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
     return target
 
 
@@ -222,7 +313,6 @@ def main() -> int:
     if not dll.exists():
         raise SystemExit(f"{dll} does not exist; run without --no-build")
     target = install(dll, version)
-    write_shim(version)
     print(f"installed {version} -> {target}")
     activate(version)
     return 0

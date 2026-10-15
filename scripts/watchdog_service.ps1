@@ -20,7 +20,10 @@ param(
     [ValidateSet('0', '1')]
     [string]$RunnerAutostart,
     [ValidateRange(0, 2147483647)]
-    [Nullable[int]]$CatchupIntervalSeconds
+    [Nullable[int]]$CatchupIntervalSeconds,
+    # Foreground program to own; the default is the watchdog. Exposed so the containment
+    # contract below can be exercised with a sentinel instead of the daemon itself.
+    [string]$EntryScript = 'watchdog_sync.py'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,11 +98,78 @@ if (-not $env:VECTOR_LAKE_MEMORY_GRAM_LATENCY_SEARCHES) {
 
 Set-Location $root
 
-$process = Start-Process -FilePath $exe -ArgumentList 'watchdog_sync.py' `
+# Assign this wrapper before starting Python: every child inherits the Job at creation,
+# including Windows venv redirectors. The private handle is held only by this wrapper;
+# KILL_ON_JOB_CLOSE releases all descendants when the action exits or is terminated.
+# Fail closed BEFORE launching the payload if the kernel cannot establish containment.
+if (-not ('VL.Job' -as [type])) {
+    Add-Type -Namespace VL -Name Job -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct IO_COUNTERS {
+    public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; }
+[StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    public long PerProcessUserTimeLimit;
+    public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize;
+    public UIntPtr MaximumWorkingSetSize;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass;
+    public uint SchedulingClass; }
+[StructLayout(LayoutKind.Sequential)] public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation; public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; }
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length, out uint returned);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+'@
+}
+
+$job = [VL.Job]::CreateJobObject([IntPtr]::Zero, $null)
+if ($job -eq [IntPtr]::Zero) { throw 'CreateJobObject failed' }
+$info = New-Object 'VL.Job+JOBOBJECT_EXTENDED_LIMIT_INFORMATION'
+# BasicLimitInformation is a value type. Mutating a nested field alone changes a copy
+# in PowerShell; explicitly write the entire value back into the outer structure.
+$limits = $info.BasicLimitInformation
+$limits.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+$info.BasicLimitInformation = $limits
+$size = [Runtime.InteropServices.Marshal]::SizeOf($info)
+$buffer = [Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+try {
+    [Runtime.InteropServices.Marshal]::StructureToPtr($info, $buffer, $false)
+    if (-not [VL.Job]::SetInformationJobObject($job, 9, $buffer, [uint32]$size)) {
+        throw ('SetInformationJobObject failed: Win32={0}' -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    [uint32]$returned = 0
+    if (-not [VL.Job]::QueryInformationJobObject($job, 9, $buffer, [uint32]$size, [ref]$returned)) {
+        throw ('QueryInformationJobObject failed: Win32={0}' -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    # LimitFlags follows two LARGE_INTEGER fields (offset 16). Avoid PowerShell's
+    # ambiguous PtrToStructure(IntPtr, object)/(IntPtr, Type) overload binding.
+    $actualFlags = [Runtime.InteropServices.Marshal]::ReadInt32($buffer, 16)
+    if (($actualFlags -band 0x2000) -eq 0) {
+        throw 'Kernel Job does not have KILL_ON_JOB_CLOSE; refusing to launch'
+    }
+}
+finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer) }
+if (-not [VL.Job]::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) {
+    throw ('AssignProcessToJobObject(wrapper) failed before launch: Win32={0}' -f [Runtime.InteropServices.Marshal]::GetLastWin32Error())
+}
+
+$process = Start-Process -FilePath $exe -ArgumentList ('"{0}"' -f $EntryScript) `
     -WorkingDirectory $root `
     -WindowStyle Hidden `
     -RedirectStandardOutput $out `
     -RedirectStandardError $err `
-    -PassThru -Wait
+    -PassThru
 
-exit $process.ExitCode
+# Pin the handle before waiting: Windows PowerShell 5.1 Start-Process with stream
+# redirection otherwise releases it and reports a null ExitCode (which `exit` maps to 0).
+$null = $process.Handle
+# Do not close the Job explicitly: this wrapper itself is a member. Process exit closes
+# its private handle after the requested exit code has been set, killing leftover children.
+$process.WaitForExit()
+$exitCode = $process.ExitCode
+if ($null -eq $exitCode) { throw 'Child exit code unavailable' }
+exit $exitCode

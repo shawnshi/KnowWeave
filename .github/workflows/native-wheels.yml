@@ -1,0 +1,61 @@
+name: native-wheels
+
+"on":
+  push:
+    paths: ['crates/vector_lake_core/**', 'scripts/ci_core.py', 'scripts/native_bundle.py', 'scripts/ci-build-requirements.txt', '.github/workflows/native-wheels.yml']
+  pull_request:
+    paths: ['crates/vector_lake_core/**', 'scripts/ci_core.py', 'scripts/native_bundle.py', 'scripts/ci-build-requirements.txt', '.github/workflows/native-wheels.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        # Older Linux build userspace lowers the glibc floor. Actual wheel tags
+        # are maturin-audited; this is NOT target-kernel/distro acceptance.
+        os: [windows-2025, macos-26, macos-26-intel, ubuntu-22.04]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install existing hash-pinned build tool (CI only)
+        run: |
+          python -m pip install --index-url https://pypi.org/simple --only-binary=:all: --no-deps --require-hashes -r scripts/ci-build-requirements.txt
+      - name: Build once and export a checksum-bound wheel bundle
+        env:
+          NATIVE_WORK: ${{ runner.temp }}/native-wheel
+        run: |
+          python scripts/ci_core.py build --output "$NATIVE_WORK/build" --timeout 900
+          python scripts/native_bundle.py bundle --native-dir "$NATIVE_WORK/build" --output "$NATIVE_WORK/bundle"
+      - name: Prove user installation needs neither Rust nor maturin
+        env:
+          NATIVE_WORK: ${{ runner.temp }}/native-wheel
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, venv
+          root = pathlib.Path(os.environ['NATIVE_WORK'])
+          target = root / 'user-venv'
+          venv.EnvBuilder(with_pip=True).create(target)
+          python = target / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          env = dict(os.environ, PATH=str(python.parent))
+          subprocess.run([str(python), '-I', '-B', '-c', "import importlib.util,shutil; assert importlib.util.find_spec('maturin') is None; assert shutil.which('cargo') is None and shutil.which('rustc') is None"], env=env, check=True)
+          subprocess.run([str(python), '-I', '-B', 'scripts/native_bundle.py', 'install', '--bundle', str(root / 'bundle'), '--receipt', str(root / 'install-receipt.json')], env=env, check=True)
+          PY
+      # Bundles remain in this job's temporary directory. Export/publishing is
+      # deliberately not wired until a separately reviewed distribution path exists.

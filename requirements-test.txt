@@ -1,0 +1,14 @@
+# Test-only dependencies, kept out of the runtime manifests on purpose.
+#
+# Why this file exists: four test modules import numpy (tests/test_metadata_first_filter.py,
+# test_ram_candidate_index.py, test_two_stage_index.py and their neighbours) while no runtime
+# module imports it and neither requirements.txt nor requirements.lock.txt declares it. A clean
+# environment built from those manifests therefore cannot run the full suite: collection fails
+# with ModuleNotFoundError before any assertion runs.
+#
+# Install alongside the runtime pins, never instead of them:
+#     python -m pip install -r requirements.lock.txt -r requirements-test.txt
+# Exact direct versions verified in the isolated Python 3.13 environment. This is not
+# a transitive hash lock; runtime dependencies remain in requirements.lock.txt.
+numpy==2.5.4
+pytest==9.1.1

@@ -23,7 +23,7 @@ import json
 from scripts import ingest_runner
 from scripts.ingest_model_pi_subagents import _brief
 from vector_lake import db_store, tool_ingest
-from vector_lake.output_contract import build_output_contract
+from vector_lake.ingest_output_contract import build_output_contract
 from vector_lake.schema_validator import INGEST_EVENT_TAGS, INGEST_INTEGRATION_PREDICATES
 from vector_lake.wiki_utils import projection_hash
 

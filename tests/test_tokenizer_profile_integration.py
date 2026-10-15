@@ -1,8 +1,12 @@
 """Task-new-wheel mandatory contract; default selection is never replaced globally."""
 import hashlib
 import importlib
+import importlib.metadata
 import json
 import os
+from pathlib import Path
+import re
+import sys
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -23,7 +27,14 @@ except ModuleNotFoundError as exc:
 def test_real_new_binding_identity_and_immutable_surface():
     before = tokenizer.cache_identity()
     profile = tokenizer.build_profile_tokenizer()
-    assert profile.identity.binding_version == '0.2.3'
+    # A deployment may deliberately run a build other than the working tree's version
+    # (versioned installs and rollback both do), so this pins identity, not a literal:
+    # the binding must report a real version, and when it is the installed build it must
+    # agree with the installed distribution metadata.
+    assert re.fullmatch(r'\d+\.\d+\.\d+', profile.identity.binding_version), profile.identity.binding_version
+    implementation = Path(sys.modules['vector_lake_core'].__file__).resolve().parent
+    if 'site-packages' in implementation.parts:
+        assert profile.identity.binding_version == importlib.metadata.version('vector-lake-core')
     assert profile.identity.engine_version == '0.11.0'
     assert profile.identity.dictionary_hash == PUBLIC_QUERY_PROFILE.profile_hash
     assert profile.identity.profile_name == 'public-query-expansion-v1'

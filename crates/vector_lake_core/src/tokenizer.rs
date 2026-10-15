@@ -60,7 +60,7 @@ fn extract_terms(input: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
             return Err(PyValueError::new_err("terms exceed 256 input items"));
         }
         let term = item
-            .downcast::<PyString>()
+            .cast::<PyString>()
             .map_err(|_| PyTypeError::new_err("every term must be a string"))?;
         // The bound is a live PyString under the GIL. The C API bypasses subclass __len__
         // overrides and bounds UTF-8 materialization even on the abi3 Python 3.8 path.

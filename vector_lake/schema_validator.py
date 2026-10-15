@@ -401,7 +401,7 @@ VALID_PREDICATES = frozenset({
 #: The controlled event vocabulary.  One owner: the timeline check below writes it as ``[Tag]``
 #: and ``tool_ingest.INTEGRATION_EVENT_TAGS`` uses it bare, and both derive from this tuple, so a
 #: tag can never be legal in one place and unknown in the other.  It is also what
-#: ``vector_lake.output_contract`` publishes to the model, which is the point -- a vocabulary the
+#: ``vector_lake.ingest_output_contract`` publishes to the model, which is the point -- a vocabulary the
 #: validator enforces has to reach the prompt, or the model can only guess at it.
 INGEST_EVENT_TAGS = (
     "Release", "Pivot", "Conflict", "Validation",

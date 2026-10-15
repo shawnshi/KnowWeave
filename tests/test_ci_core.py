@@ -17,7 +17,7 @@ def test_workflow_runs_both_platforms_and_explicit_backends():
     workflow = yaml.safe_load((REPO / '.github/workflows/test.yml').read_text(encoding='utf-8'))
     jobs = list(workflow['jobs'].values())
     matrices = [job.get('strategy', {}).get('matrix', {}) for job in jobs]
-    assert any(set(matrix.get('os', [])) == {'windows-latest', 'ubuntu-latest'} and set(matrix.get('backend', [])) == {'native', 'fallback'} and set(matrix.get('python', [])) == {'3.10', '3.13'} for matrix in matrices)
+    assert any(set(matrix.get('os', [])) == {'windows-2025', 'ubuntu-26.04', 'macos-26', 'macos-26-intel'} and set(matrix.get('backend', [])) == {'native', 'fallback'} and set(matrix.get('python', [])) == {'3.10', '3.13'} for matrix in matrices)
     assert workflow['permissions'] == {'contents': 'read'}
     assert all(job['strategy']['max-parallel'] == 2 for job in jobs)
     commands = '\n'.join(step.get('run', '') for job in jobs for step in job['steps'])
@@ -127,7 +127,7 @@ def test_native_gate_rejects_well_formed_but_stale_or_unsafe_receipts(tmp_path, 
 
 def test_ci_declares_hash_pinned_numpy_test_dependency_for_all_lanes():
     text = (REPO / 'scripts' / 'ci-test-requirements.txt').read_text(encoding='utf-8')
-    assert 'numpy==2.2.6' in text and text.count('--hash=sha256:') == 4
+    assert 'numpy==2.2.6' in text and text.count('--hash=sha256:') == 12
     workflow = (REPO / '.github' / 'workflows' / 'test.yml').read_text(encoding='utf-8')
     assert '--no-deps --require-hashes -r scripts/ci-test-requirements.txt' in workflow
     assert workflow.index('-r scripts/ci-test-requirements.txt') < workflow.index('python scripts/ci_core.py test')
@@ -136,6 +136,6 @@ def test_ci_declares_hash_pinned_numpy_test_dependency_for_all_lanes():
 
 def test_fixed_ci_build_tool_does_not_add_runtime_dependencies():
     text = (REPO / 'scripts' / 'ci-build-requirements.txt').read_text(encoding='utf-8')
-    assert 'maturin==1.15.0' in text and text.count('--hash=sha256:') == 3
+    assert 'maturin==1.15.0' in text and text.count('--hash=sha256:') == 5
     assert 'tomli==2.3.0 ; python_version < "3.11"' in text
     assert 'patchelf' not in text and 'ziglang' not in text

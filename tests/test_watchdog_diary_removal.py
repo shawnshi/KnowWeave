@@ -8,6 +8,7 @@ the worst one, that single stale entry pinned the whole daemon to ``error``.
 """
 
 import json
+import threading
 
 from vector_lake import host_env, watchdog_app, watchdog_status
 from vector_lake.wiki_utils import get_meta_dir
@@ -33,15 +34,23 @@ def test_diary_text_is_still_kept_out_of_the_lake(isolated_memory, monkeypatch):
     from vector_lake import tool_sync
 
     calls = []
-    monkeypatch.setattr(tool_sync, "sync_vector_lake", lambda *a, **kw: calls.append(a))
+    finished = threading.Event()
 
+    def sync(*args, **kwargs):
+        calls.append(args)
+        finished.set()
+
+    monkeypatch.setattr(tool_sync, "sync_vector_lake", sync)
     handler = watchdog_app.RawWatchdogHandler()
-    handler.handle_event(_Event(str(isolated_memory / "raw" / "privacy" / "Diary" / "2026-Q3.md")))
-    assert calls == []
-
-    ordinary = str(isolated_memory / "raw" / "news" / "2026-Q3.md")
-    handler.handle_event(_Event(ordinary))
-    assert len(calls) == 1
+    try:
+        handler.handle_event(_Event(str(isolated_memory / "raw" / "privacy" / "Diary" / "2026-Q3.md")))
+        assert calls == [] and not hasattr(handler, "executor")
+        ordinary = str(isolated_memory / "raw" / "news" / "2026-Q3.md")
+        handler.handle_event(_Event(ordinary))
+        assert finished.wait(3), "ordinary source must complete an asynchronous scan"
+        assert len(calls) == 1
+    finally:
+        handler.shutdown(wait=True)
 
 
 def test_reset_components_drops_a_component_that_no_longer_reports(isolated_memory):

@@ -18,7 +18,7 @@ retyped, so this text cannot drift from the validators that enforce it.
 
 from __future__ import annotations
 
-from vector_lake.runtime_contract import schema_snapshot
+from vector_lake.ingest_schema_contract import schema_snapshot
 from vector_lake.template_loader import render_template
 
 

@@ -265,13 +265,13 @@ def test_the_legacy_requeue_rebuilds_a_packet_for_an_older_contract(isolated_mem
         "canonical_name": _SOURCE_PAGE,
         "instructions": "legacy",
     }
-    from vector_lake import native_llm
+    from vector_lake import subagent_handoff
 
     db_store.enqueue_job("ingest", payload)
     for row in db_store.get_connection().execute("SELECT job_id FROM jobs"):
         db_store.mark_job_awaiting_subagent(row["job_id"], "synthetic-packet.json")
     removed = []
-    monkeypatch.setattr(native_llm, "remove_subagent_task", lambda path: removed.append(path))
+    monkeypatch.setattr(subagent_handoff, "remove_subagent_task", lambda path: removed.append(path))
 
     assert tool_ingest.requeue_legacy_ingest_jobs() == 1
     row = db_store.get_connection().execute("SELECT payload, status, task_packet_path FROM jobs").fetchone()
@@ -285,7 +285,7 @@ def test_the_legacy_requeue_rebuilds_a_packet_for_an_older_contract(isolated_mem
 
 @pytest.mark.parametrize("status", ["queued", "failed"])
 def test_legacy_output_prompt_rebuilt_without_resetting_queued_attempts(isolated_memory, monkeypatch, status):
-    from vector_lake import native_llm
+    from vector_lake import subagent_handoff
 
     raw = _raw_and_candidate(isolated_memory)
     payload = {
@@ -298,7 +298,7 @@ def test_legacy_output_prompt_rebuilt_without_resetting_queued_attempts(isolated
         conn.execute("UPDATE jobs SET status = ?, retries = 2, task_packet_path = ? WHERE job_id = ?",
                      (status, "legacy-packet.json", job_id))
     removed = []
-    monkeypatch.setattr(native_llm, "remove_subagent_task", lambda path: removed.append(path))
+    monkeypatch.setattr(subagent_handoff, "remove_subagent_task", lambda path: removed.append(path))
 
     assert tool_ingest.requeue_legacy_ingest_jobs() == 1
     row = conn.execute("SELECT payload, status, retries, task_packet_path FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
@@ -312,7 +312,7 @@ def test_legacy_output_prompt_rebuilt_without_resetting_queued_attempts(isolated
 
 
 def test_legacy_requeue_does_not_delete_a_packet_claimed_during_rebuild(isolated_memory, monkeypatch):
-    from vector_lake import native_llm
+    from vector_lake import subagent_handoff
 
     raw = _raw_and_candidate(isolated_memory)
     payload = {
@@ -329,7 +329,7 @@ def test_legacy_requeue_does_not_delete_a_packet_claimed_during_rebuild(isolated
         return real_render(*args, **kwargs)
 
     monkeypatch.setattr(tool_ingest, "_build_ingest_instructions", claim_while_rebuilding)
-    monkeypatch.setattr(native_llm, "remove_subagent_task", lambda path: removed.append(path))
+    monkeypatch.setattr(subagent_handoff, "remove_subagent_task", lambda path: removed.append(path))
 
     assert tool_ingest.requeue_legacy_ingest_jobs() == 0
     row = db_store.get_connection().execute(

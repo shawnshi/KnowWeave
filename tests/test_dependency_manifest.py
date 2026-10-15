@@ -3,14 +3,17 @@
 Several floors are load-bearing facts discovered by running the packages, not
 preferences, so they are asserted here rather than only written in a comment:
 
-* ``mistune>=3.0.1`` - ``create_markdown(renderer='ast')`` raises
-  ``TypeError: 'str' object is not callable`` on 3.0.0.
+* ``mistune>=3.3.3`` - ``create_markdown(renderer='ast')`` raises
+  ``TypeError: 'str' object is not callable`` on 3.0.0, and 3.3.0-3.3.2 carry
+  GHSA-6m44-fpc8-c3rq (RecursionError DoS through ``mistune.html()``).
 * ``python-louvain`` is gone; clustering is Leiden via leidenalg + igraph.
 """
 import pathlib
 import re
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REQUIREMENTS = (ROOT / "requirements.txt").read_text(encoding="utf-8")
@@ -99,12 +102,31 @@ def test_fastmcp_floor_is_on_the_4x_line():
 
 
 def test_mistune_floor_is_above_the_broken_3_0_0():
-    """3.0.0 fails at import time for the renderer this project uses."""
+    """3.0.0 fails at import time, and 3.3.0-3.3.2 carry a recursion DoS."""
     line = _specifier("mistune")
     assert line is not None
-    assert ">=3.0.1" in line.replace(" ", ""), (
-        "mistune 3.0.0 breaks create_markdown(renderer='ast'); the floor must be 3.0.1"
+    spec = Requirement(line).specifier
+    assert not any(Version(value) in spec for value in ("3.0.0", "3.3.0", "3.3.1", "3.3.2")), (
+        f"The mistune requirement permits known insecure builds: {line}"
     )
+    pinned = [item.strip() for item in LOCK.splitlines() if item.strip().startswith("mistune==")]
+    assert pinned, "mistune must stay pinned in requirements.lock.txt"
+    version = tuple(int(part) for part in pinned[0].split("==", 1)[1].split(".")[:3])
+    assert version >= (3, 3, 3), f"the locked mistune build must exclude the advisory range: {pinned[0]}"
+    assert Version(pinned[0].split("==", 1)[1]) in spec
+
+
+def test_direct_test_dependencies_are_declared_and_exactly_pinned():
+    lines = (ROOT / "requirements-test.txt").read_text(encoding="utf-8").splitlines()
+    requirements = {r.name.lower(): r for raw in lines
+                    if (line := raw.strip()) and not line.startswith("#")
+                    for r in [Requirement(line)]}
+    assert set(requirements) == {"numpy", "pytest"}
+    for requirement in requirements.values():
+        specs = list(requirement.specifier)
+        assert len(specs) == 1 and specs[0].operator == "=="
+        assert "*" not in specs[0].version and not requirement.url
+    assert _specifier("numpy") is None, "Test-only numpy must not enter the runtime manifest"
 
 
 def test_watchdog_is_gone_and_watchfiles_is_imported():

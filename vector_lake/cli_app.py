@@ -8,7 +8,7 @@ try:
 except ImportError:
     dotenv = None
 
-from vector_lake import host_env, tools
+from vector_lake import host_env
 
 
 def _configure_stdout():
@@ -24,7 +24,16 @@ def _load_env():
         dotenv.load_dotenv(str(env_path))
 
 
+def _ops_arguments(parser):
+    parser.add_argument("--db", required=True, help="Explicit existing SQLite path; no writable configuration helpers.")
+    parser.add_argument("--meta-dir", help="Public heartbeat root; defaults to database parent.")
+    parser.add_argument("--budget-seconds", type=float, default=2.0, help="SQL observation budget, maximum 30 seconds.")
+    parser.add_argument("--json", action="store_true", help="Structured aggregate observations; no private identifiers or content.")
+
+
 def build_parser() -> argparse.ArgumentParser:
+    from vector_lake import tools
+
     parser = argparse.ArgumentParser(
         description="Vector Lake CLI Gateway",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -43,6 +52,9 @@ Usage Examples:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available wiki operations")
+
+    ops_parser = subparsers.add_parser("ops-status", help="[OBSERVE] Bounded read-only backlog, leases, projection and public heartbeat observations.")
+    _ops_arguments(ops_parser)
 
     subparsers.add_parser("sync", help="[INGEST] Generates MCP ingestion instructions for Native Subagents.")
     recompile_parser = subparsers.add_parser("recompile-ingest", help="[INGEST] Validate/hand off an explicitly approved 60-source current-version recompile.")
@@ -231,9 +243,19 @@ Usage Examples:
 
 def main() -> int:
     _configure_stdout()
-    _load_env()
+    if sys.argv[1:2] == ["ops-status"]:
+        parser = argparse.ArgumentParser(prog="cli.py ops-status", description="Bounded read-only aggregate observations")
+        _ops_arguments(parser)
+        args = parser.parse_args(sys.argv[2:])
+        from vector_lake.operational_status import collect_status, render_status
+
+        report = collect_status(args.db, meta_dir=args.meta_dir, budget_seconds=args.budget_seconds)
+        print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else render_status(report))
+        return 0 if report["database"]["state"] == "healthy" else 1
     parser = build_parser()
     args = parser.parse_args()
+    _load_env()
+    from vector_lake import tools
 
     try:
         if args.command == "sync":

@@ -441,6 +441,42 @@ def test_project_ingestor_profile_has_only_read_and_no_ambient_context():
     assert "never write it yourself" in parts[2]
 
 
+def test_relay_preserves_host_schema_validation_ownership(seam):
+    assert "relay, not a schema reviewer" in seam.SYSTEM_PROMPT
+    assert "YAML or frontmatter errors" in seam.SYSTEM_PROMPT
+    assert "forward its candidate JSON unchanged" in seam.SYSTEM_PROMPT
+    assert "Do not convert" in seam.SYSTEM_PROMPT
+
+
+def test_host_node_update_date_is_explicit_not_a_source_event_date(seam, monkeypatch):
+    from datetime import datetime, timezone
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 12, 15, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(seam, "datetime", Clock, raising=False)
+    text = seam._runtime_schema_contract()
+    assert "HOST NODE UPDATE DATE (UTC): 2026-10-12" in text
+    assert "type: source" in text and "not Source" in text
+    assert "updated must not be null" in text
+    assert "not the source's publication or event date" in text
+
+
+@pytest.mark.parametrize("content", [
+    "---\ntype: Source\nupdated: null\n---\nSynthetic public source.",
+    "---\ntype: source\nupdated: not-a-date\n---\nSynthetic public source.",
+])
+def test_schema_invalid_candidate_is_transported_unchanged_to_host(seam, monkeypatch, capsys, content):
+    candidate = {"files_written": [{"filename": "Source_x.md", "content": content}],
+                 "integration": {"disposition": "standalone", "reason": "Synthetic source."}}
+    _run(seam, monkeypatch, result=subprocess.CompletedProcess(["pi"], 0, json.dumps(candidate), ""))
+    assert seam.main() == 0
+    assert json.loads(capsys.readouterr().out) == candidate
+    assert not _logs(seam)
+
+
 def test_schema_contract_tracks_runtime_required_fields_and_vocabularies():
     from vector_lake import schema_validator as schema
     text = _load_seam()._runtime_schema_contract()

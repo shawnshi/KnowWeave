@@ -238,7 +238,7 @@ def test_ingest_worker_rebuilds_legacy_awaiting_packet_before_dispatch(isolated_
         "instructions": "legacy prompt without integration disposition",
     }
     job_id = db_store.enqueue_job("ingest", payload)
-    from vector_lake.native_llm import create_subagent_task
+    from vector_lake.subagent_handoff import create_subagent_task
 
     old_task = create_subagent_task("ingest", "legacy prompt", "legacy output", {"job_id": job_id})
     db_store.mark_job_awaiting_subagent(job_id, str(old_task))
@@ -380,7 +380,7 @@ def test_finalize_ingest_marks_subagent_job_finalized(isolated_memory, monkeypat
             "instructions": "compile this source",
         },
     )
-    from vector_lake.native_llm import create_subagent_task
+    from vector_lake.subagent_handoff import create_subagent_task
 
     task_path = create_subagent_task("ingest", "test", "JSON array", {"job_id": job_id})
     db_store.mark_job_awaiting_subagent(job_id, str(task_path))
@@ -1129,7 +1129,7 @@ def test_finalize_ingest_stamps_the_raw_hash_on_the_source_page(isolated_memory,
             "instructions": "compile this source",
         },
     )
-    from vector_lake.native_llm import create_subagent_task
+    from vector_lake.subagent_handoff import create_subagent_task
 
     task_path = create_subagent_task("ingest", "test", "JSON array", {"job_id": job_id})
     db_store.mark_job_awaiting_subagent(job_id, str(task_path))

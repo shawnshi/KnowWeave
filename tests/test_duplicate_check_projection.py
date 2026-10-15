@@ -17,7 +17,7 @@ from collections import Counter
 
 import pytest
 
-from vector_lake import db_store, tool_piea
+from vector_lake import db_store, tool_entity_dedup
 from vector_lake.wiki_utils import get_index_path
 
 NODES = {
@@ -76,7 +76,7 @@ def _plain_similarity(text1: str, text2: str) -> float:
 
 def test_the_token_vector_is_unchanged_by_being_cached():
     for text in ("HIS 集成平台 信创 选型", "医院 HIS 集成 平台", "", "纯中文标题", "Mixed 中文 123"):
-        assert tool_piea._token_vector(text) == _plain_tokens(text), text
+        assert tool_entity_dedup._token_vector(text) == _plain_tokens(text), text
 
 
 def test_the_similarity_matches_a_plain_recomputation():
@@ -88,19 +88,19 @@ def test_the_similarity_matches_a_plain_recomputation():
         ("完全无关", "another thing"),
     ]
     for left, right in pairs:
-        assert abs(tool_piea._calculate_cosine_similarity(left, right) - _plain_similarity(left, right)) < 1e-12
+        assert abs(tool_entity_dedup._calculate_cosine_similarity(left, right) - _plain_similarity(left, right)) < 1e-12
 
 
 def test_the_token_cache_is_bounded():
     """C-PERF-03: a cache keyed on corpus text must not grow with the corpus."""
-    assert tool_piea._token_vector.cache_info().maxsize == 20_000
-    assert tool_piea._vector_norm_squared.cache_info().maxsize == 20_000
+    assert tool_entity_dedup._token_vector.cache_info().maxsize == 20_000
+    assert tool_entity_dedup._vector_norm_squared.cache_info().maxsize == 20_000
 
 
 def test_the_projection_payloads_equal_the_file(indexed):
     """The premise of the swap, asserted rather than assumed."""
     file_nodes = json.loads(get_index_path().read_text(encoding="utf-8"))["nodes"]
-    projected = tool_piea._dedup_node_payloads()
+    projected = tool_entity_dedup._dedup_node_payloads()
 
     assert projected is not None, "the fixture did not build the projection"
     assert projected == file_nodes
@@ -108,9 +108,9 @@ def test_the_projection_payloads_equal_the_file(indexed):
 
 def test_the_check_falls_back_to_the_file_when_the_projection_is_unusable(indexed, monkeypatch):
     """A projection that cannot be read must not become "no duplicates"."""
-    monkeypatch.setattr(tool_piea, "_dedup_node_payloads", lambda: None)
+    monkeypatch.setattr(tool_entity_dedup, "_dedup_node_payloads", lambda: None)
 
-    result = json.loads(tool_piea.check_duplicate_entity("HIS", "concept", "HIS 集成平台"))
+    result = json.loads(tool_entity_dedup.check_duplicate_entity("HIS", "concept", "HIS 集成平台"))
 
     assert result["is_duplicate"] is True
     assert result["existing_key"] == "Concept_HIS"
@@ -119,13 +119,13 @@ def test_the_check_falls_back_to_the_file_when_the_projection_is_unusable(indexe
 def test_a_missing_index_is_still_reported(indexed):
     get_index_path().unlink()
 
-    result = json.loads(tool_piea.check_duplicate_entity("HIS", "concept"))
+    result = json.loads(tool_entity_dedup.check_duplicate_entity("HIS", "concept"))
 
     assert result == {"is_duplicate": False, "reason": "No index exists yet."}
 
 
 def test_an_unindexed_type_is_still_skipped(indexed):
-    result = json.loads(tool_piea.check_duplicate_entity("HIS", "unknown-type"))
+    result = json.loads(tool_entity_dedup.check_duplicate_entity("HIS", "unknown-type"))
 
     assert result["is_duplicate"] is False
     assert "does not require deduplication" in result["reason"]

@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::IntoPyObjectExt;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
@@ -42,7 +43,7 @@ pub fn fast_calculate_weighted_edges(
     overlap_weight: Option<f64>,
     min_relevance: Option<f64>,
     max_edges_per_node: Option<usize>,
-) -> PyResult<Vec<HashMap<String, PyObject>>> {
+) -> PyResult<Vec<HashMap<String, Py<PyAny>>>> {
     let py = nodes_payload.py();
     let overlap_w = overlap_weight.unwrap_or(2.0);
     let min_rel = min_relevance.unwrap_or(1.5);
@@ -53,7 +54,7 @@ pub fn fast_calculate_weighted_edges(
     let mut max_affinity: Option<f64> = Some(0.5); // Missing-type fallback remains conservative.
     for (type_a, inner_val) in type_affinity_table.iter() {
         let t_a: String = type_a.extract()?;
-        if let Ok(inner_dict) = inner_val.downcast::<PyDict>() {
+        if let Ok(inner_dict) = inner_val.cast::<PyDict>() {
             for (type_b, score_val) in inner_dict.iter() {
                 let t_b: String = type_b.extract()?;
                 let score: f64 = score_val.extract()?;
@@ -75,7 +76,7 @@ pub fn fast_calculate_weighted_edges(
 
     for (k, v) in nodes_payload.iter() {
         let key: String = k.extract()?;
-        if let Ok(dict) = v.downcast::<PyDict>() {
+        if let Ok(dict) = v.cast::<PyDict>() {
             let node_type: String = dict
                 .get_item("type")?
                 .and_then(|x| x.extract::<String>().ok())
@@ -94,7 +95,7 @@ pub fn fast_calculate_weighted_edges(
 
             let mut triples: HashMap<String, f64> = HashMap::new();
             if let Some(t_item) = dict.get_item("triples")? {
-                if let Ok(t_dict) = t_item.downcast::<PyDict>() {
+                if let Ok(t_dict) = t_item.cast::<PyDict>() {
                     for (tgt, w_val) in t_dict.iter() {
                         if let (Ok(t_str), Ok(w_num)) =
                             (tgt.extract::<String>(), w_val.extract::<f64>())
@@ -303,9 +304,9 @@ pub fn fast_calculate_weighted_edges(
         *incident_counts.entry(tgt.clone()).or_insert(0) += 1;
 
         let mut map = HashMap::new();
-        map.insert("source".to_string(), src.into_py(py));
-        map.insert("target".to_string(), tgt.into_py(py));
-        map.insert("weight".to_string(), w.into_py(py));
+        map.insert("source".to_string(), src.into_py_any(py)?);
+        map.insert("target".to_string(), tgt.into_py_any(py)?);
+        map.insert("weight".to_string(), w.into_py_any(py)?);
         pruned_edges.push(map);
     }
 

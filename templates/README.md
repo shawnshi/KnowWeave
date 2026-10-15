@@ -36,7 +36,7 @@ page templates. `.pi/agents/` and `skills/` remain framework discovery entries, 
   Structured inputs carry the exact host-supplied Static Skeleton H2 on the Source page as an explicit
   additional-heading exception; entity pages keep their closed two-H2 structure.
 - Angle-bracket examples in entity/source skeletons are instructions, not default facts.
-- `schema_validator` owns closed vocabularies; `runtime_contract.schema_snapshot()` reflects fields, categories,
+- `schema_validator` owns closed vocabularies; `ingest_schema_contract.schema_snapshot()` reflects fields, categories,
   domains/verticals/aliases, H3 slots, predicates, event tags and metric keys for all ingest backends.
   The main brief, handoff, output contract and relay no longer keep independent vocabulary renderers.
 - Purpose YAML stays in the user's MEMORY root. The validated strategy renderer supplies its current version,

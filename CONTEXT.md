@@ -55,6 +55,9 @@ Conflict rules:
 | `vector_lake/cli_app.py` | Argument parsing and command dispatch |
 | `vector_lake/tools.py` | Tool facade |
 | `vector_lake/tool_ingest.py` | Raw-source scan and Subagent instructions generation |
+| `vector_lake/subagent_handoff.py` | Host subagent task packets; no in-process text generation |
+| `vector_lake/ingest_schema_contract.py` | Model-facing reflection of the executable ingest schema |
+| `vector_lake/ingest_output_contract.py` | Ingest answer contract published with each task packet |
 | `vector_lake/indexer.py` | Page index, weighted edges, claim graph refresh, pure-Python BM25 inverted index |
 | `vector_lake/claim_extractor.py` | Page-to-entity/claim/evidence/source extraction |
 | `vector_lake/tool_memory.py` | Wiki-as-Database operational memory persistence via MCP |
@@ -70,19 +73,18 @@ Conflict rules:
 | `vector_lake/watchdog_app.py` | Real-time ingest watcher, background job orchestration, scheduled auto-lint |
 | `vector_lake/watchdog_status.py` | Status JSON telemetry broadcaster for the daemon |
 | `vector_lake/wiki_utils.py` | Path resolution, frontmatter, atomic writes, backups |
-| `vector_lake/db.py` | Legacy DB utils |
 | `vector_lake/db_store.py` | SQLite connection pooling, schema initialization, WAL settings, and the trigger-maintained `operational_memory_index` / `operational_memory_gram*` / `page_index_*` read projections |
 | `vector_lake/defense_hook.py` | Pre-flight constraints and guardrails |
 | `vector_lake/skeleton_parser.py` | Parsers for structural validation |
 | `vector_lake/provenance.py` | Tracing entities to raw sources |
-| `vector_lake/tool_piea.py` | PIEA entity schema interceptor |
+| `vector_lake/tool_entity_dedup.py` | Cross-type entity duplicate checks and name normalization |
 | `vector_lake/tool_bulk_reconciliation.py` | Graph reconciliation |
 | `vector_lake/yaml_utils.py` | YAML helpers |
 | `vector_lake/memory_gram_index.py` | Exact n-gram inverted index over operational memory (base postings + a dirty set that suppresses stale documents) that makes `search_operational_memory` sub-second without changing its ranking; it answers only while nothing is queued, and a rebuild is what clears the queue |
 | `vector_lake/page_index_projection.py` | SQLite projection of `index.json` (node table + ordered edge table + process-wide adjacency cache) so read paths never parse the whole file |
 | `scripts/community_clustering_daemon.py` | Optional operator-invoked Louvain analysis; not scheduled by watchdog |
 | `schema.md` | Wiki and runtime memory contract |
-| `agents/` | Ingestor and synthesizer contracts |
+| `.pi/agents/` | Host subagent contracts (`vector-lake-ingestor.md`) |
 
 ## 4. CLI Contract & MCP Interface
 
@@ -153,7 +155,7 @@ Last verified: 2026-07-08 (V11.5 Refactoring).
 ## 6. Operating Rules
 
 1. Preserve the split: Markdown is for humans; `.meta` is canonical state; `operational_memory` is for Agents.
-2. Keep `schema.md`, `README.md`, and `agents/` aligned when the runtime surface changes.
+2. Keep `schema.md`, `README.md`, and `.pi/agents/` aligned when the runtime surface changes.
 3. Do not hand-edit derived runtime files unless the task is explicitly data repair. Prefer rebuild paths.
 4. Use dry-run first for delete, gc, and any operation that removes assets.
 5. Treat lock contention as environmental state, not proof that a code patch failed. Note that `daemon-watchdog` and `sync` operations are protected by cross-process `filelock` to prevent meta and index corruption.
@@ -170,7 +172,7 @@ The Vector Lake system is designed for high-concurrency ingestion and graph main
 - **Strategic Intent Engine (V12.0)**: Parses `MEMORY/purpose.md` as the primary source for intent keywords and weighting. The same contract is injected into ingestion, retrieval, and research; it validates `strategic_scope` and `evidence_tier` during ingest, exposes SIR review proposals, and creates de-duplicated `Synthesis-Proposal` queue items only after the configured independent-source and tension thresholds are met.
 - **Strict Two-Step CoT Ingestion (V9.0)**: Forces ingestion subagents to output an intermediate `analysis_buffer.json` (parsing tensions, consensus, unknowns) before writing Markdown, eliminating extraction omissions.
 - **Strict 7-Type Enforcement (V9.1)**: The PIEA interceptor actively strips nested/invalid prefixes (e.g., `Concept_Synthesis_` or `Entity_`) and forces LLM agents to save files using exact, canonical 7-type filenames (`vendor`, `product`, `person`, `event`, `concept`, `synthesis`, `source`). All backend algorithms are strictly aligned to this matrix.
-- **Cross-Type PIEA Deduplication (V9.1)**: `tool_piea.py` no longer segregates similarity checks by type. If an agent proposes `Vendor_Accenture` when `Concept_Accenture` already exists, it triggers a hard block and forces a timeline append, eradicating "Same Name, Multi-Type" pollution.
+- **Cross-Type PIEA Deduplication (V9.1)**: `tool_entity_dedup.py` no longer segregates similarity checks by type. If an agent proposes `Vendor_Accenture` when `Concept_Accenture` already exists, it triggers a hard block and forces a timeline append, eradicating "Same Name, Multi-Type" pollution.
 - **Error Resilience**: Utilizes a global `global_task_lock` for thread safety and halts on consecutive failures to prevent cascading storms. The watchdog writes an immediate startup status and periodic heartbeat to `MEMORY/wiki/.meta/.watchdog_status.json`; subprocess errors are emitted to the same status surface.
 - **AST-Based Parsing (V11.5)**: Replaced brittle Regex and string splitting with `mistune` Abstract Syntax Tree (AST) parsing, making extraction immune to Markdown stylistic variations or Markdown linting format changes.
 - **Native Vector Engine (V11.5)**: Integrated `sqlite-vec` extension for FTS5 + Vector hybrid search. Eliminated the `embeddings.pkl` O(N) memory bottleneck, offloading similarity calculation directly into the SQLite C-backend.

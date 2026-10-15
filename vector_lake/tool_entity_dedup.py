@@ -9,7 +9,7 @@ from filelock import FileLock
 from vector_lake import get_extension_root
 from vector_lake.wiki_utils import get_index_path, normalize_memory_key
 
-log = logging.getLogger("vector-lake-piea")
+log = logging.getLogger("vector-lake-entity-dedup")
 
 
 #: Tokenisation is a pure function of one string, and the duplicate check tokenises every existing
