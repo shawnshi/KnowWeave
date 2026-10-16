@@ -119,7 +119,7 @@ def test_query_embedding_cache_isolated_by_model(monkeypatch):
 
     def embed(texts, **kwargs):
         calls.append(len(calls))
-        return [[float(len(calls))]]
+        return [[float(len(calls)), 1.0]]
 
     monkeypatch.setattr("vector_lake.embedding_scheduler.embed_texts", embed)
     monkeypatch.setenv("VECTOR_LAKE_EMBEDDING_MODEL", "model-a")
@@ -188,9 +188,9 @@ def test_context_preview_does_not_create_proposal_payload(tmp_path, monkeypatch)
 def test_mcp_exposes_inline_preview_separately_from_proposal(monkeypatch):
     from vector_lake import mcp_server
 
-    monkeypatch.setattr(mcp_server.tools, "preview_query_context", lambda query: f"inline:{query}", raising=False)
+    monkeypatch.setattr(mcp_server.tools, "preview_query_context", lambda query, **scope: f"inline:{query}:{scope['domain']}", raising=False)
     assert "preview_query_context" in mcp_server.registered_tool_names()
-    assert mcp_server.preview_query_context("q") == "inline:q"
+    assert mcp_server.preview_query_context("q", domain="Medical_IT") == "inline:q:Medical_IT"
 
 
 def test_filtered_recall_cap_is_explicit_when_eligible_page_lies_beyond_it(monkeypatch):

@@ -41,6 +41,9 @@ def test_search_vector_lake_forwards_advanced_filters():
             cluster="Architecture",
             include_history=True,
             mode="page",
+            allow_external_embedding=False,
+            profile="auto",
+            use_chunks=False,
         )
 
 

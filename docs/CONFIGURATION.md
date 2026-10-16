@@ -64,7 +64,7 @@ Watchdog 的 wiki/raw watcher 与后台循环统一接受线程监督，异常�
 |`PYTHONUTF8`|强制 Python 运行时使用 UTF-8 编码（Windows 强烈推荐）|`1`|
 |`GEMINI_API_KEY`|向量嵌入模型 API Key（Gemini Embedding）；代码从进程环境读取，不从 `config.json` 读取凭据|不在仓库填写|
 |`VECTOR_LAKE_MEMORY_DIR`|显式指定 MEMORY 根路径（优先级高于 `config.json`）|例如 `C:/path/to/MEMORY`|
-|`VECTOR_LAKE_PAYLOAD_ROOT`|额外允许的任务包 sandbox 根，不覆盖内置的仓库 `brain/` 与宿主根；独立代码部署时保留已有任务包原根，不放宽到整个仓库上级|例如 `C:/path/to/vector-lake/brain`|
+|`VECTOR_LAKE_PAYLOAD_ROOT`|额外允许的任务包 sandbox 根，不覆盖内置的仓库 `brain/` 与宿主根；独立代码部署时保留已有任务包原根，不放宽到整个仓库上级|例如 `C:/path/to/KnowWeave/brain`|
 |`VECTOR_LAKE_RUNNER_MODEL_CMD`|覆盖 `ingest.backend` 的模型接缝命令；使用配置文件选择后端时应取消此覆盖|通常不设置|
 |`VECTOR_LAKE_RUNNER_SHADOW`|Watchdog 拉起 Runner 时，设为 `1` 跳过模型调用和写页，但仍认领任务、处理重复来源并写运行状态；直接 Runner 默认 shadow，需 `--no-shadow` 才写页|默认 `0`（Watchdog 路径）|
 |`VECTOR_LAKE_RUNNER_CONCURRENCY`|摄取 Runner 并发模型调用线程数，也可由 `ingest_runner.py --concurrency` 覆盖|默认 `1`；按宿主容量调整|
@@ -139,12 +139,12 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 * `VECTOR_LAKE_STALE_TASK_MAX_AGE_SECONDS`：兜底把多旧的摄取任务视为陈旧（默认 `86400` 秒）。
 * `VECTOR_LAKE_RUNNER_STALE_SECONDS`：Runner / 监督器心跳过期阈值，默认 `2400` 秒。
 * `VECTOR_LAKE_RUNNER_STRICT=1`：把 Runner 告警从 `warnings` 升入 `degraded`（两者都不阻断写入）。
-* `VECTOR_LAKE_FTS`：词法检索后端，默认 `fts5`；`tantivy` 使用派生镜像。两者接收项目分词器的预切词串，每条查询内部采用 AND，并沿用负数 rank 约定。页面检索先保留原始查询命中；未填满召回深度时，最多执行 8 条保留其他限定词的词典替换查询，去重后补位（sum 模式的补充 BM25 贡献减半；RRF 中补充项排在原始命中之后）。不把全部扩展词拼成一个 AND。FTS5 仍是权威投影，dirty 或无效镜像回退 SQL。可用 `python cli.py projections --reconcile --only tantivy_mirror --apply` 请求有界重建；deferred 不代表完成，后续由现有 watchdog 续接。具体持久队列、读门禁、资源界限与回退见上文“Tantivy 写入约束”。切换后端前需验证相关性，不能仅凭吞吐量替换默认值。
+* `VECTOR_LAKE_FTS`：词法检索后端，默认 `fts5`；`tantivy` 使用派生镜像。两者接收项目分词器的预切词串，每条查询内部采用 AND，并沿用负数 rank 约定。页面检索先保留原始查询命中；未填满召回深度时，最多执行 8 条保留其他限定词的词典替换查询，去重后补位（sum 模式的补充 BM25 贡献减半；RRF 中补充项排在原始命中之后）。不把全部扩展词拼成一个 AND。FTS5 仍是权威投影，dirty 或无效镜像回退 SQL。可用 `python cli.py projections --reconcile --only tantivy_mirror --apply` 请求有界重建；deferred 不代表完成，后续由现有 watchdog 续接。具体持久队列、读门禁、资源界限与回退见[运维指南的 Tantivy 写入约束](OPERATIONS.md#tantivy-写入约束)。切换后端前需验证相关性，不能仅凭吞吐量替换默认值。
 * `VECTOR_LAKE_CLAIM_BLOCKS`：claim 块提取器，默认 `rust`（`vector_lake_core.fast_extract_blocks`）；`python` 使用 mistune。含 NUL 或 U+FFFD 的正文走 mistune，避免解析器差异改变 claim 文本与标识。
 * `VECTOR_LAKE_RERANK_WEIGHT`：同池重排权重，默认 `0.4`，混合上游归一化分与 Rust BM25 分；`0` 禁用重排。缺少 `fast_bm25_rerank` 时保留上游顺序并告警，没有 Python 重排回退。重排不增加候选，也不等于经过人工相关性验收。
 * `VECTOR_LAKE_ENTITY_NAME_PRIORITY`：是否优先提升被查询点名的实体页，默认 `0`；开启后按实体名在查询中的位置分层，层内按混合分排序。点名某实体不一定意味着想要它的主体页，故不默认开启。
 * `VECTOR_LAKE_FUSION`：FTS 与向量融合方式，默认 `sum`（词法分与按 `VECTOR_LAKE_VECTOR_SIM_SCALE` 缩放的向量分相加）；`rrf` 按名次融合，并使图扩展使用相同的名次量纲。切换会改变排序，不把代理回放或模型判定等同于人工质量验收。
-* `VECTOR_LAKE_VECTOR_INDEX`：默认 `auto`。影子表自检一致且已有 NumPy 时，优先 RAM float32 全扫描候选（普通臂至少64条）＋原 SQL L2 精排；`ram` 显式请求同一路径。NumPy 是可选加速器，不隐式安装；缺包、容量超限、并发预算耗尽或调用方已有事务时回退二值预筛。`two_stage` 明确保留原二值路径；影子不可用时仍回退 `vec_embeddings` 扫描并告警。`legacy` 同时跳过普通/过滤态影子臂；`VECTOR_LAKE_METADATA_FIRST=0` 也可恢复旧的先精排后过滤流程。RAM 缓存只在自有只读快照中建立：跨连接 `data_version`、本连接写入计数/Schema、模型/维度变化会重验，首次绑定其他连接必须完整读取有界投影，不跨连接比较版本号。已有同库同元数据矩阵时，逐 key 和 float32 原始字节比对；内容相同则复用矩阵，不重算 norms 或构造第二份矩阵，内容变化再按原规则加载和校验。仍保留所有代次检查，不以未覆盖直接 SQL 写入的 generation 标记跳过源内容验证；完整验证仍为 O(行数×维度)。候选、过滤及 SQL 精排共用一个读快照；借用事务/保存点不缓存未提交内容。最多缓存一份128MiB矩阵、8个小型连接绑定、4个活动视图；重建串行，活动视图可暂时保留旧不可变矩阵。近零点积消减误差按有界块直接L2复核；最终距离、阈值和融合仍用原SQL口径，不承诺所有浮点并列边界的全量同序。模型或维度变更使影子失效后，仍需显式重建影子投影。
+* `VECTOR_LAKE_VECTOR_INDEX`：默认 `auto`。影子自检一致且 NumPy 可用时优先 RAM float32 全扫描候选＋SQL L2 精排；`ram` 同一路径。缺包、容量/活动视图耗尽、旧代次仍被引用或借用事务时，`auto` / `ram` 回退精确 `vec_embeddings` SQL，不再自动切到二值近似。只有显式 `two_stage` 选择二值预筛；`legacy` 直接使用原始精确臂。并列边界仍不承诺所有实现完全同序。缓存最多一份活矩阵代次（矩阵 128 MiB，另有键/范数/复核缓冲开销）、8 个连接绑定和 4 个活动视图；旧租约继续有效，但旧代次引用释放前不分配新矩阵。未安装显式加速器时仍按源字节复核；安装 `retrieval-indexes` 后用覆盖 float 表原始 INSERT/UPDATE/DELETE 的事务内计数区分向量修改与无关写入。模型/维度或 Schema 变化仍失效，不把 tag、计数或缓存当作授权。
 * `VECTOR_LAKE_METADATA_FIRST`：过滤态默认 `1`，RAM/二值候选先过滤、通过者再精排；`0` 恢复先精排后过滤。普通选择器只读取 `domain` / `topic_cluster` / `status`，`filter_expr` 使用完整节点。首次扩容最多预取4096个候选，后续复用查询内前缀与过滤判定；精排仍走原SQL。RAM使用确定性的距离/page_key前缀，二值仅在已验证的 `sqlite-vec v0.1.9` 上预取；前缀不一致时逐轮读取。来源代次、Schema、请求模式或实际候选后端变化会清空复用；借用的事务每轮清空，避免保存点回滚复用未提交判定。当前前缀长度用于耗尽判断，预取池大小不冒充已检查量；触顶时仍报告结果可能不完整。该取值顺序可能与旧臂产生不同候选和排序。
 * `VECTOR_LAKE_NUMERIC_THREADS`：MCP、Watchdog 和 Runner 在导入数值库前应用的进程级线程预设，默认 `1`；`0` 关闭预设，允许值为 0–64。已有 `OPENBLAS_NUM_THREADS`、`OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`NUMEXPR_NUM_THREADS` 设置优先。不修改系统或用户环境变量。部署后仍须验证实际检索吞吐，不把提交内存下降等同于常驻 RAM 节省。
 * `VECTOR_LAKE_MEMORY_GRAM_MAX_BASE_AGE_SECONDS`：脏 gram 基线的最大年龄，默认 `3600` 秒；`0` 关闭年龄触发。基线存在脏文档且距上次重建达到此值时判为到期，干净索引不会按年龄重建。它是基线年龄上限，不是首个脏文档的精确计时；重建仍由后台维护执行，不在查询路径阻塞重建。
@@ -153,12 +153,29 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 * `VECTOR_LAKE_MEMORY_GRAM_LATENCY_SEARCHES`：脏 memory n-gram 索引按搜索次数触发重建的阈值。代码默认 `0`（关闭此触发）；N>0 时，索引存在脏文档且重建后搜索次数达到 N，`gram-index --if-due` 判为到期，不改变脏索引不能服务的精确性门。托管启动脚本 `scripts/watchdog_service.ps1` 在未设置时导出 `20`，显式 `0` 或其他值保留；普通 shell 不继承该脚本默认值。到期判定不等于重建已完成，需要守护进程或手工执行维护。
 * `VECTOR_LAKE_EXPANSION_QUOTA`：给图扩展预留候选池槽位。不设时只使用融合后剩余槽位；设 N 时预留最多 `min(N, expansion_limit)` 个槽位，`expansion_limit` 为 general 5 / entity 12。预留不保证图中存在足够的合格候选。
 * `VECTOR_LAKE_AUTHOR_SOURCES`：作者关联的 raw 路径前缀，逗号分隔，默认 `raw/article`。应按自己的资料目录约定配置；路径前缀不是作者实名证明。关联集合取最新成功摄入台账映射与页面 `sources` 溯源的并集，因此包含符合前缀的 Source 页及关联的 Concept / Event / Synthesis 等编译页。缓存随台账、前缀及 `page_index_state` 变化失效，不从标题或正文提及猜归属。
-* `VECTOR_LAKE_AUTHOR_FACET`：代码默认 `off`（不应用关联偏好）；`boost` 为关联页加上 `VECTOR_LAKE_AUTHOR_BOOST` × 池内最高分（系数默认 `0.25`），不是分数倍率；`filter` 只保留关联页。混合来源编译页只要有一个来源命中就会关联，不能据此认定整页原创或所有结论都是作者立场。`filter` 是服务器级设置，会影响普通查询。
+* `VECTOR_LAKE_AUTHOR_FACET`：代码默认 `off`（不应用关联偏好）；`boost` 为关联页加上 `VECTOR_LAKE_AUTHOR_BOOST` × 池内最高分（系数默认 `0.25`），不是分数倍率；`filter` 只保留关联页。混合来源编译页只要有一个来源命中就会关联，不能据此认定整页原创或所有结论都是作者立场。全局策略用于 `legacy`；非作者 profile 不继承默认作者抬升，显式 `author` profile 启用作者偏好。
 仓库的 `.mcp.json` 与 `mcp_config.json` 显式配置 `boost`；自建宿主使用代码默认值时为 `off`。宿主若缓存注册环境，修改文件或仅重连子进程未必生效，应重载宿主并核对实际进程环境。
 * `VECTOR_LAKE_AUTHOR_ANNOTATE`：默认 `1`；facet 启用时可在查询包页标题后标注 `[author]`。标注表示符合来源关联规则，不是整页作者认证，也不改变候选集合。
-* `VECTOR_LAKE_CANDIDATE_DEPTH`：每条召回路径进入融合的候选深度，默认 `25`，不随 `top_k` 变化；过滤召回可有界扩容至 4096。
-* `VECTOR_LAKE_CANDIDATE_POOL`：重排候选池规模，默认 `40`；池内来源类上限为 `int(pool * 0.6)`。它与候选深度均不随 `top_k` 缩放，`top_k` 只决定最终窗口大小；候选不足时可能返回少于请求数量。
-* `VECTOR_LAKE_SOURCE_RANK_PENALTY`：来源类页最终得分倍率，默认 `0.6`。这是排序偏好，不是过滤；`1.0` 关闭偏好，`0.0` 压至零分但仍保留候选。
+* `VECTOR_LAKE_CANDIDATE_DEPTH`：每条召回路径进入融合的候选深度，默认 `25`，不随 `top_k` 变化；过滤召回可有界扩容至 4096。触顶告警保留，列出 `raw_examined`（实际检查前缀）、`target_depth`、`selected` 及请求的过滤条件；元数据优先臂还列出 `metadata_passed`、`similarity_passed` 与相似度阈值。达到 `top_k` 不代表已达到召回目标，低相似度也可导致触顶，告警不等同于索引损坏。
+* 检索 `domain` 按主题精确过滤：医疗 IT 用 `Medical_IT`，政策治理用 `Policy_and_Governance`；`General` 仅是具体类别，不表示全库。`Healthcare_IT` 可映射至 `Medical_IT`，`HIT` / `Clinical` 不是当前别名。任务涉及多个域时分别在获准范围内查询，不通过清空域过滤读取无关私人资料。
+* 检索备注分级：作者关联 `boost` / `filter`、正常的过滤零匹配及请求主动关闭外部嵌入为 `[INFO]`；召回触顶、后端失败、投影降级及未分类备注仍保留 `[DEGRADED]`。FTS / 本地重排异常会返回阶段及异常类型，不回显可能含查询内容的异常参数。
+* 检索范围与出站：MCP `search_vector_lake`、`preview_query_context`、`query_logic_lake` 以及 CLI `search` / `query` 要求显式 `domain`。范围贯穿页面、记忆及上下文摘要；有域的聚合上下文不自动加载全局策略文本。`allow_external_embedding` 默认为 `False`（CLI：`--allow-external-embedding`），只有当前授权允许发送该查询时才开启。范围参数和许可标志不构成身份认证、ACL 或物理网络隔离。
+* 记忆检索：先按明确的域/主题簇过滤，再评分和截断；缺失记忆域时仅通过可解析的 Source 页元数据确定范围，不从路径子串猜测，也不在错误时回退全库。此路径使用有界任务范围内的精确扫描，不声明具有 gram 路径的延迟。记忆视图只在同次上下文组装内复用，作者关联缓存最多保留 8 个代次。
+* 向量与证据：查询向量在入缓存前归一化；提供方响应拒绝零向量与非有限值。优势/不足类问题可从同一已召回页面提取两个独立定位窗口，总长度仍受 2500 字符限制。页面嵌入仍为前 15000 字符；可选分块索引已提供，但不自动构建、不默认融合，也不自动重建历史向量。
+
+SQL-backed 词法节点在可选向量工作前完成物化。到期后上下文不再读取新正文，只能使用已取得且标明 `index-summary` 的有界摘要；UTF-8 序列化省略页面时，末态诊断和输出证据键同步缩减。
+
+同名但 DDL 不兼容的托管检索索引或触发器不报可用；显式维护拒绝覆盖并回滚。正常查询不创建或修复它们。
+* 检索台账：除查询摘要哈希外，记录选择器、主索引及分块侧库代次摘要、候选深度/池大小、外部嵌入许可与阶段耗时；策略仅记录名称、是否请求年份与改写数量，不记录实体锚点或原始年份。分块命中另记录源文 SHA-256。日志不新增查询原文或过滤表达式正文存储。
+* 请求边界：查询长度 1–4096 字符，公开 top_k 为 1–50，上下文上限保留 200000 字符。请求合作式预算为 15 秒，主库及分块 SQL 通过 progress handler 中断；文件系统、原生调用和客户端传输不是物理硬截止。正文单页最多读取 512 KiB、单请求累计 4 MiB，超过预算保留可用摘要/独立结果并标记降级，不把输出字符数当作 I/O 上界。
+* 完成状态：台账记录 `complete` / `partial` / `failed`，端点耗时在正文与上下文处理后记录（不含传输序列化及观察器自身追加耗时）。失败的空结果不再宣称 `No matching pages`。上下文字典附 `retrieval_status` / `retrieval_diagnostics`。异常只暴露类型及数值 SQLite 错误码，不转发 SDK/SQL 异常正文。台账按进程锁及跨进程文件锁串行化轮转/追加；锁预算超限仍 fail-open，`observation_status()` 报告跳过条数。
+* 显式加速器：CLI `retrieval-indexes --db <explicit-existing-db>` 只读预览，另加 `--apply` 才在事务内创建 scoped-memory 表达式索引与向量代次触发器；查询不创建、不迁移。维护预算默认 60 秒、最高 120 秒；失败回滚。应用前备份，生产应用需单独授权及审查。缺失时继续正确的精确扫描；scoped memory 最多物化 10000 条 / 16 MiB，超过时通道明确失败而不是截断后冒充完整排名。完整字节验证的旧路径仍为 O(行数×维度)。
+* `profile`：公开页面/上下文接口默认 `auto`。`legacy` 保留原排序；其他策略取消全局 Source 数量限制、降权与作者偏好，`author` 单独启用作者关联 boost，`source` 优先 Source 类型，`entity` 优先完整标题/别名。`analysis` 为同时含正反方面的问题增加有界实体补充查询。显式会议年份约束下推到候选与图节点查找；未知年份被标记，多年份不猜单个年份。所有这些都是检索偏好，不是事实或作者身份认证。
+* `use_chunks`：默认 `False`；只读取已有 `.meta/retrieval_chunks.sqlite3`。启用后以 RRF 融合主检索与分块路径，按当前源元数据重新验证选择器，并比对源文哈希；不自动创建或修复侧库。文件缺失、模型不符、过期源文均显式报告。原始页面 15000 字符嵌入不修改，分块是独立补充路径。
+* CLI `chunk-index`：必须给出一个域和 1–8 个显式页面。默认只预览元数据，`--apply` 才写侧库，`--allow-external-embedding` 单独许可正文外发。单页最多 512 KiB / 512 块，默认块长 2000 字符、重叠 150 字符，标题/层级上下文分别限制在 512/1024 字符；分块向量限 1–4096 维。每页替换事务原子，整批不原子；预算/后续页失败时早先完整提交保留。总预算默认 60 秒、最大 120 秒，为合作式检查，不是物理硬截止。WAL 仅用于该侧库，不改主数据库。
+* CLI `retrieval-eval`：离线读取显式标签和结果文件，单文件最多 8 MiB、数据集最多 1000 条。报告 judgment-relative Recall、MRR、nDCG、已判定比例、方面文档覆盖及有明确答案标记时的拒答正确率，并附输入摘要。随附 fixture 为合成标签；未审核的人工作业拒绝评测。功能测试及合成指标不替代人工相关性标注或生产并发/SLO 验收。
+* `VECTOR_LAKE_CANDIDATE_POOL`：重排候选池规模，默认 `40`；仅 `legacy` 的池内来源类上限为 `int(pool * 0.6)`。它与候选深度均不随 `top_k` 缩放，`top_k` 只决定最终窗口大小；候选不足时可能返回少于请求数量。
+* `VECTOR_LAKE_SOURCE_RANK_PENALTY`：`legacy` 的来源类页最终得分倍率，默认 `0.6`；其他 profile 不施加这项全局降权。这是排序偏好，不是过滤；`1.0` 关闭偏好，`0.0` 压至零分但仍保留候选。
 * `VECTOR_LAKE_LEIDEN_L1_RESOLUTION` / `VECTOR_LAKE_LEIDEN_L0_RESOLUTION`：Leiden 的 Micro / Global 分辨率，默认 `2.0` / `1.0`。分辨率越高社区越小。
 * `VECTOR_LAKE_LEIDEN_SEED`：Leiden 随机种子，默认 `42`。**必须固定**才能保证社区划分可复现。
 * 所有进程通过 SQLite 滚动窗口共享 RPM/TPM 预算；索引重建和增量索引不调用 embedding API，内容变更后的旧向量先作废、再由周期兜底（`VECTOR_LAKE_CATCHUP_EMBEDDING_BATCH`）按批重建，需要一次性全量重建时用显式 `embedding-backfill`。
@@ -180,7 +197,7 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 * `VECTOR_LAKE_MAX_AWAITING_SUBAGENT_AGE_SECONDS`：等待中 subagent 作业的年龄阈值，默认 `86400` 秒。
 * `VECTOR_LAKE_SUBAGENT_BACKLOG_BLOCKING=1`：把 subagent 积压从降级告警升级为阻断写入。默认关闭。
 * `VECTOR_LAKE_SUBAGENT_RUN_ID`：本进程作为 outbox / job 租约持有者的标识；不设置时用 `hostname:pid`。
-* `VECTOR_LAKE_SEARCH_LEDGER=0`：关闭检索台账，默认开启。台账保存查询哈希与字符数、返回页键、召回来源、耗时及降级说明，不保存查询原文。位于 `<meta>/runtime/search_ledger.jsonl`，达 2 MiB 时保留一代轮转；写入失败只记 debug，不阻断检索。
+* `VECTOR_LAKE_SEARCH_LEDGER=0`：关闭检索台账，默认开启。台账保存查询哈希与字符数、返回页键、召回来源、耗时及降级说明，不保存查询原文。位于 `<meta>/runtime/search_ledger.jsonl`，达 2 MiB 时保留一代轮转；并发 append/轮转串行化；写入失败不替代检索结果，跳过写入可通过 `observation_status()` 计数观察。末态在证据和上下文序列化完成后记录 `complete`、`partial` 或 `failed`，不包含传输序列化耗时。
 * `VECTOR_LAKE_CORE_VERSION`：指定本进程使用哪个已安装的原生核心构建（不设则用 `vector_lake_core/_active_version.txt`，即 `scripts/install_core.py` 最后激活的那个）。用于灰度/回滚：一个进程可以钉在旧构建上，而其他进程已用新构建。
 * `VECTOR_LAKE_OUTBOX_PAYLOAD_KEEP_DAYS`：已完成 outbox 载荷保留天数，默认 `30`，`0` 表示下次维护清理。只清 `payload_text`，不删除用于幂等去重与终态复用的业务行。
 * `VECTOR_LAKE_RECLAIM_FREE_SPACE=1`：允许维护执行 `VACUUM`，默认关闭、只报告。未启用自动回收的 SQLite 实例删行后只增加 freelist；`VACUUM` 要重写文件并占用写锁，启用前需预留磁盘空间、恢复点和维护窗口，不从旧实例的可回收字节数推断当前收益。
@@ -197,16 +214,16 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 {
   "mcpServers": {
     "mentat-mind-mcp": {
-      "command": "C:/path/to/vector-lake/.venv/Scripts/python.exe",
+      "command": "C:/path/to/KnowWeave/.venv/Scripts/python.exe",
       "args": [
         "-m",
         "vector_lake.mcp_server"
       ],
       "env": {
-        "PYTHONPATH": "C:/path/to/vector-lake",
+        "PYTHONPATH": "C:/path/to/KnowWeave",
         "PYTHONUTF8": "1",
         "VECTOR_LAKE_MEMORY_DIR": "C:/path/to/MEMORY",
-        "VECTOR_LAKE_PAYLOAD_ROOT": "C:/path/to/vector-lake/brain"
+        "VECTOR_LAKE_PAYLOAD_ROOT": "C:/path/to/KnowWeave/brain"
       }
     }
   }

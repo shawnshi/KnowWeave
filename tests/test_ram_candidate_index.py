@@ -112,7 +112,7 @@ def test_modes_and_missing_numpy_keep_rollback_arms(corpus, monkeypatch):
     monkeypatch.setenv("VECTOR_LAKE_VECTOR_INDEX", "ram")
     monkeypatch.setattr(ram, "_numpy", lambda: None)
     with stage.query_view(conn) as view:
-        assert view.backend == "two_stage"
+        assert view.backend == "legacy"
     assert _search(conn, vectors[0])
 
 
@@ -139,7 +139,7 @@ def test_matrix_capacity_falls_back_without_loading(corpus, monkeypatch):
 
     monkeypatch.setattr(ram, "_load", unexpected)
     with stage.query_view(conn) as view:
-        assert view.backend == "two_stage"
+        assert view.backend == "legacy"
 
 
 def test_parallel_admission_is_bounded(corpus):
@@ -150,7 +150,7 @@ def test_parallel_admission_is_bounded(corpus):
             assert ram._SLOTS.acquire(blocking=False)
             acquired.append(True)
         with stage.query_view(conn) as view:
-            assert view.backend == "two_stage"
+            assert view.backend == "legacy"
     finally:
         for _ in acquired:
             ram._SLOTS.release()
@@ -201,7 +201,9 @@ def test_unmanaged_raw_sql_vector_update_survives_byte_validation(corpus, positi
                 )
         actual = _search(conn, vector)
         assert dict(actual) == dict(_exact(conn, vector))
-        assert ram._CURRENT is not previous
+        assert ram._CURRENT is None  # Retaining the old snapshot must prevent a second matrix.
+        del previous
+        assert dict(_search(conn, vector)) == dict(_exact(conn, vector))
         assert ram._CURRENT.matrix[position].tobytes() == vector.tobytes()
     finally:
         other.close()
@@ -291,14 +293,14 @@ def test_borrowed_savepoint_never_caches_or_owns_rollback(corpus):
     )
     stage.mirror_write(conn, keys[8], vectors[0].tobytes())
     with stage.query_view(conn) as view:
-        assert not view.owned and view.backend == "two_stage"
+        assert not view.owned and view.backend == "legacy"
         assert dict(_search(conn, vectors[0]))[keys[8]] == 0
     assert conn.in_transaction
     total = conn.total_changes
     conn.execute("ROLLBACK TO pending")
     assert conn.total_changes == total
     with stage.query_view(conn) as view:
-        assert view.backend == "two_stage"
+        assert view.backend == "legacy"
     conn.rollback()
     assert keys[8] not in {k for k, d in _search(conn, vectors[0]) if d == 0}
 
@@ -493,7 +495,9 @@ def test_filtered_status_hint_reuses_only_owned_unchanged_generations(
         result, error, _ = tool_search._get_vector_search_results_filtered(
             q, depth, catalog, "Even", None, False, None, reuse=reuse
         )
-        assert error is None and result is not None
+        assert error is None
+        if result is None:
+            assert conn.in_transaction  # Borrowed auto views request the exact plain arm.
         return result
 
     call(10)
@@ -605,7 +609,7 @@ def test_concurrent_cold_rebuild_is_serial_and_admission_falls_back(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         outcomes = list(pool.map(query, range(workers)))
     assert peak == 1
-    assert outcomes.count("two_stage") >= 2
+    assert outcomes.count("legacy") >= 2
     assert outcomes.count("ram") == ram.MAX_ACTIVE_VIEWS
 
 
@@ -613,7 +617,7 @@ def test_key_heap_capacity_is_policy_fallback_not_no_data(corpus, monkeypatch):
     conn, _, vectors, _ = corpus
     monkeypatch.setattr(ram, "MAX_KEY_HEAP_BYTES", 1)
     with stage.query_view(conn) as view:
-        assert view.backend == "two_stage"
+        assert view.backend == "legacy"
         assert _search(conn, vectors[0])
 
 

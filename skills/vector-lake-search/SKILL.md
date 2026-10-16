@@ -1,6 +1,6 @@
 ---
 name: vector-lake-search
-version: 11.1.0
+version: 11.1.1
 tier: action-allowed
 description: 'Search the Vector Lake index for knowledge graph nodes and entities.'
 ---
@@ -22,19 +22,37 @@ description: 'Search the Vector Lake index for knowledge graph nodes and entitie
   <request>Execute semantic searches using the appropriate MCP tools and return formatted insights.</request>
 </task_context>
 
+## 显式检索范围
+
+`domain` 必填，且必须是任务已授权、已确认的真实域；例如资料范围确属医疗 IT 时使用 `Medical_IT`，政策治理资料使用 `Policy_and_Governance`。`General` 是实际类别，不是全部域。不要将不存在的域别名当成有效选择，也不要在失败时退回无域查询；域选择本身不是认证 ACL。
+
+参数模板如下，不可原样发送。默认不外发 query embedding；仅当任务明确授权外发时才改变该开关。页面 profile 与分块选项不扩张 memory/claim 的范围。
+
+```json
+{
+  "query": "<task-query>",
+  "domain": "<authorized-domain>",
+  "top_k": 5,
+  "mode": "page",
+  "allow_external_embedding": false,
+  "profile": "auto",
+  "use_chunks": false
+}
+```
+
 <execution_workflow>
   <workflow>
     1. Analyze the search request to formulate the optimal semantic `query` string.
-    2. Determine the optimal `top_k` and `mode` ('page', 'memory', or 'claim') for the query. Apply advanced filters when appropriate: `domain` (e.g. 'HIT', 'Clinical'), `cluster`, or `include_history=True` for historical/decayed nodes.
-    3. Ensure a physical sandbox in the `scratch/` directory is prepared for holding intermediate search context if needed.
-    4. Call the `search_vector_lake` MCP tool to execute the search query.
+    2. Confirm explicit authorized `domain`, then choose bounded `top_k` and `mode` ('page', 'memory', or 'claim'). `cluster` is an additional selector. Decayed pages remain eligible with a ranking penalty; `include_history=True` can explicitly include Deprecated/Archived records.
+    3. Do not automatically persist retrieved bodies or private context. `scratch/` is temporary storage, not a physical sandbox.
+    4. Call `search_vector_lake` with explicit `query`, `domain` and default `allow_external_embedding=False`; do not widen scope after an error.
     5. Evaluate the search results. [Fable 5 Checkpoint: If results are ambiguous or insufficient, request human approval or refine query].
     6. Return the consolidated findings.
   </workflow>
 
   <tool_dispatch>
     - `mentat-mind-mcp`: `search_vector_lake` to query the index.
-    - `invoke_subagent`: Mandated for concurrent tasks if the search intent is complex.
+    - Delegate only with user/applicable-contract authorization and a real host capability; complexity alone is not permission.
   </tool_dispatch>
 
   <checkpoint_rules>
@@ -44,11 +62,7 @@ description: 'Search the Vector Lake index for knowledge graph nodes and entitie
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - 校验查询是否准确覆盖了核心意图。
-      - 评估搜索的 top_k 和 mode 是否最优化。
-    </thought>
+    Report results, evidence locators and limitations; do not output private reasoning drafts.
     Present the search results clearly, identifying the nodes, entities, and sources retrieved.
   </output_format>
 
@@ -58,6 +72,6 @@ description: 'Search the Vector Lake index for knowledge graph nodes and entitie
   </metrics>
 
   <validation_gate>
-    Validate that any intermediate outputs are safely stored in the `scratch/` directory and ensure that the retrieved nodes exist in the lake registry.
+    Validate authorized scope and source locators. Any persistence requires its own authority; a scratch directory does not establish privacy isolation.
   </validation_gate>
 </delivery_standards>

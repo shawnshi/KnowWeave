@@ -216,6 +216,9 @@ def search_vector_lake(
     cluster: str = "",
     include_history: bool = False,
     as_xml: bool = False,
+    allow_external_embedding: bool = False,
+    profile: str = 'auto',
+    use_chunks: bool = False,
 ) -> str:
     """Search the Vector Lake index.
     
@@ -223,19 +226,31 @@ def search_vector_lake(
         query: The semantic query string.
         top_k: Number of results to return (default 5).
         mode: Search mode: 'page' (hybrid lexical + vector + PPR), 'memory' (operational memory), or 'claim' (facts).
-        domain: Optional filter by domain (e.g. 'HIT', 'Clinical', 'General').
+        domain: Exact subject filter, e.g. 'Medical_IT', 'Policy_and_Governance', 'General'.
+            General is a literal category, not all domains. 'HIT' and 'Clinical' are not aliases.
+            Keep retrieval within task-authorized domains; use separate queries for multiple domains.
         cluster: Optional filter by topic cluster.
         include_history: If True, includes historical/decayed nodes or expired memories.
         as_xml: If True, returns structured XML evidence nodes instead of Markdown.
+        allow_external_embedding: Explicit permission to send this query to the embedding provider.
+            Default False keeps the query local. Domain scope is required; it is a selection
+            constraint, not an authenticated access-control boundary.
+        profile: Ranking policy: auto, legacy, balanced, entity, source, author, analysis.
+            Auto uses local intent rules; preferences do not establish evidence quality.
+        use_chunks: Opt into an already-built scoped chunk sidecar; never builds it.
     """
+    if not domain.strip():
+        raise ValueError('Explicit domain is required; General is not all domains')
     return tools.search_vector_lake(
         query,
         top_k,
         as_xml=as_xml,
-        domain=domain if domain else None,
-        cluster=cluster if cluster else None,
+        domain=domain.strip(),
+        cluster=cluster,
         include_history=include_history,
         mode=mode,
+        allow_external_embedding=allow_external_embedding,
+        profile=profile, use_chunks=use_chunks,
     )
 
 def _payload_path_allowed(abs_path) -> bool:
@@ -351,21 +366,45 @@ def lint_vector_lake(auto_fix: bool = False) -> str:
         return f"MCP Exception: {str(e)}\n{traceback.format_exc()}"
 
 @mcp.tool()
-def preview_query_context(query_str: str) -> str:
+def preview_query_context(
+    query_str: str, domain: str = '', cluster: str = '', allow_external_embedding: bool = False,
+    profile: str = 'auto', use_chunks: bool = False,
+) -> str:
     """Return an inline reasoning context without a proposal payload or Wiki write.
 
     Retrieval may record an audit-ledger entry. For page proposals, use
     ``query_logic_lake`` and finalize only after independent validation.
+
+    Args:
+        query_str: The topic or command for reasoning.
+        domain: Required exact subject domain; General is not all domains.
+        cluster: Optional exact topic cluster.
+        allow_external_embedding: Explicit permission to send the query to the embedding provider.
+            Default False uses only local retrieval. This flag does not establish authorization.
     """
-    return tools.preview_query_context(query_str)
+    if not domain.strip():
+        raise ValueError('Explicit domain is required for context retrieval')
+    return tools.preview_query_context(
+        query_str, domain=domain, cluster=cluster or None,
+        allow_external_embedding=allow_external_embedding,
+        profile=profile, use_chunks=use_chunks,
+    )
 
 
 @mcp.tool()
-def query_logic_lake(query_str: str, dry_run: bool = False) -> str:
+def query_logic_lake(
+    query_str: str, dry_run: bool = False, domain: str = '', cluster: str = '',
+    allow_external_embedding: bool = False,
+    profile: str = 'auto', use_chunks: bool = False,
+) -> str:
     """Deep reasoning with budget-controlled context.
 
     Args:
         query_str: The topic or command for reasoning.
+        domain: Required exact subject domain; General is not all domains.
+        cluster: Optional exact topic cluster.
+        allow_external_embedding: Explicit permission to send the query to the embedding provider.
+            Default False uses only local retrieval. This flag does not establish authorization.
         dry_run: Return the provenance trace instead of the synthesis prompt.  The prompt
             template documents this switch (``dry_run: true`` stops after the context
             envelope is written) and this wrapper passes it through to
@@ -373,7 +412,13 @@ def query_logic_lake(query_str: str, dry_run: bool = False) -> str:
             wrapper dropped the argument; it does not, and the flag has been honoured since
             the test in ``tests/test_query_payload_and_writes.py`` was added.
     """
-    return tools.prepare_query_context(query_str, dry_run)
+    if not domain.strip():
+        raise ValueError('Explicit domain is required for context retrieval')
+    return tools.prepare_query_context(
+        query_str, dry_run, domain=domain, cluster=cluster or None,
+        allow_external_embedding=allow_external_embedding,
+        profile=profile, use_chunks=use_chunks,
+    )
 
 @mcp.tool()
 def finalize_query_synthesis(files_written_str: str, query_str: str) -> str:

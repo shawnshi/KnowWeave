@@ -19,6 +19,7 @@ import os
 import sqlite3
 import sys
 import threading
+import weakref
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ _LOCK = threading.RLock()
 _SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_VIEWS)
 _BINDINGS: OrderedDict[sqlite3.Connection, tuple[tuple, bytes]] = OrderedDict()
 _CURRENT: _Snapshot | None = None
+_RETIRED = None
 _PID = os.getpid()
 
 
@@ -117,8 +119,10 @@ def _numpy():
 
 def clear() -> None:
     """Release the cache/bindings; outstanding immutable leases remain valid."""
-    global _CURRENT
+    global _CURRENT, _RETIRED
     with _LOCK:
+        if _CURRENT is not None:
+            _RETIRED = weakref.ref(_CURRENT.matrix)
         _CURRENT = None
         _BINDINGS.clear()
 
@@ -137,6 +141,7 @@ def _metadata(state: dict) -> tuple:
         int(state["row_count"]),
         state.get("written_at"),
         int(state.get("shortlist") or 256),
+        state.get('vector_revision'),
     )
 
 
@@ -214,10 +219,10 @@ def _matches_current(conn: sqlite3.Connection, snapshot: _Snapshot) -> bool:
 def acquire(conn: sqlite3.Connection, state: dict) -> Lease | None:
     """Caller guarantees a pinned, owned read-only transaction around this lease.
 
-    One current matrix, at most four in-flight views, eight small bindings and
-    one serial bounded rebuild. Fallback on optional absence/capacity only.
+    One live matrix generation, four views and eight bindings. A changed generation
+    waits for old references to die; callers use exact SQL rather than overlapping matrices.
     """
-    global _CURRENT, _PID
+    global _CURRENT, _RETIRED, _PID
     np = _numpy()
     if np is None:
         log.debug("RAM vector candidates unavailable: NumPy is not installed")
@@ -244,9 +249,10 @@ def acquire(conn: sqlite3.Connection, state: dict) -> Lease | None:
                 clear()
                 _PID = os.getpid()
             database = _database(conn)
+            revision = state.get('vector_revision')
             stamp = (
-                conn.execute("PRAGMA data_version").fetchone()[0],
-                conn.total_changes,
+                ('vector_revision', revision) if revision is not None else conn.execute("PRAGMA data_version").fetchone()[0],
+                0 if revision is not None else conn.total_changes,
                 conn.execute("PRAGMA schema_version").fetchone()[0],
                 metadata,
             )
@@ -270,6 +276,14 @@ def acquire(conn: sqlite3.Connection, state: dict) -> Lease | None:
             ):
                 rebuilt = _CURRENT
             else:
+                if _CURRENT is not None:
+                    _RETIRED = weakref.ref(_CURRENT.matrix)
+                    _CURRENT = None
+                    _BINDINGS.clear()
+                if _RETIRED is not None and _RETIRED() is not None:
+                    log.debug('RAM generation retained by an earlier query; exact SQL fallback')
+                    return None
+                _RETIRED = None
                 rebuilt = _load(conn, database, metadata, np)
             if rebuilt is None:
                 log.debug("RAM vector candidates unavailable: key heap budget exceeded")
@@ -293,7 +307,10 @@ def acquire(conn: sqlite3.Connection, state: dict) -> Lease | None:
 
 
 def _after_fork() -> None:
-    global _LOCK, _SLOTS, _BINDINGS, _CURRENT, _PID
+    global _LOCK, _SLOTS, _BINDINGS, _CURRENT, _RETIRED, _PID
+    # RSP-RAM-01: inherited aliases/views can outlive their snapshot and lease.
+    if _CURRENT is not None:
+        _RETIRED = weakref.ref(_CURRENT.matrix)
     _LOCK = threading.RLock()
     _SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_VIEWS)
     _BINDINGS = OrderedDict()

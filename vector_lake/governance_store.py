@@ -1578,14 +1578,77 @@ def _memory_payloads(memory_ids: list[str]) -> list[dict]:
     return [by_id[memory_id] for memory_id in memory_ids if memory_id in by_id]
 
 
+def _scoped_memory_items(domain: str | None, cluster: str | None) -> list[dict]:
+    """Read only matching payloads; an unresolved source never widens the requested scope."""
+    from vector_lake.schema_validator import DOMAIN_ALIASES, canonical_domain
+
+    source = "json_extract(m.data_json, '$.source_page')"
+    source_key = (
+        f"CASE WHEN lower(substr({source}, -3)) = '.md' "
+        f"THEN substr({source}, 1, length({source}) - 3) ELSE {source} END"
+    )
+    predicates, params, names = [], [], []
+    if domain:
+        canonical = canonical_domain(domain).lower()
+        names = sorted({canonical} | {
+            alias.lower() for alias, target in DOMAIN_ALIASES.items()
+            if target.lower() == canonical
+        })
+        placeholders = ','.join('?' for _ in names)
+        predicates.append(
+            "lower(COALESCE(NULLIF(json_extract(m.data_json, '$.domain'), ''), p.domain, '')) "
+            f"IN ({placeholders})"
+        )
+        params.extend(names)
+    if cluster:
+        predicates.append(
+            "lower(COALESCE(NULLIF(json_extract(m.data_json, '$.topic_cluster'), ''), "
+            "p.topic_cluster, '')) = ?"
+        )
+        params.append(cluster.lower())
+    sql = (
+        "SELECT m.data_json FROM operational_memory m LEFT JOIN page_index_nodes p "
+        f"ON p.node_key = {source_key} WHERE " + " AND ".join(predicates)
+        + " ORDER BY m.rowid"
+    )
+    from vector_lake import scoped_retrieval_index, retrieval_runtime
+    conn = get_connection()
+    accelerated = scoped_retrieval_index.scoped_sql(conn, names if domain else None, cluster)
+    if accelerated is not None:
+        sql, params = accelerated
+    retrieval_runtime.backend('memory_index' if accelerated else 'memory_scan')
+    items, payload_bytes = [], 0
+    for row in conn.execute(sql, params):
+        retrieval_runtime.checkpoint()
+        payload_bytes += len(row[0].encode('utf-8')) if isinstance(row[0], str) else 0
+        if len(items) >= 10000 or payload_bytes > 16 * 1024 * 1024:
+            raise retrieval_runtime.RetrievalBudgetExceeded('Scoped memory materialization budget exhausted; no truncated ranking returned')
+        try:
+            items.append(json.loads(row[0]))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError('Invalid scoped operational memory payload') from exc
+    return items
+
+
 def search_operational_memory(
     query: str,
     top_k: int = 12,
     memory_types: list[str] | None = None,
     include_history: bool = False,
+    domain: str | None = None,
+    cluster: str | None = None,
 ) -> list[dict]:
+    if top_k <= 0:
+        raise ValueError('top_k must be positive')
     allowed_types = _normalize_memory_types(memory_types)
     terms = _query_terms(query)
+    if domain or cluster:
+        # Scope precedes scoring and LIMIT on every backend; never fall back to unscoped data.
+        memories = _scoped_memory_items(domain, cluster)
+        return score_memory_items(
+            memories, terms, top_k, allowed_types=allowed_types, include_history=include_history,
+            df=_memory_term_frequencies(memories, terms), total=len(memories),
+        )
     backend = _memory_search_backend()
 
     if backend == "legacy":
@@ -1666,6 +1729,8 @@ def search_memory_packet_views(
     query: str,
     active_top_k: int = 24,
     history_top_k: int = 12,
+    domain: str | None = None,
+    cluster: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Return ``(active, history_inclusive)`` slices for the Memory Packet.
 
@@ -1684,6 +1749,13 @@ def search_memory_packet_views(
     index cannot serve (see :mod:`vector_lake.memory_gram_index`).
     """
     terms = _query_terms(query)
+    if domain or cluster:
+        memories = _scoped_memory_items(domain, cluster)
+        df, total = _memory_term_frequencies(memories, terms), len(memories)
+        return (
+            score_memory_items(memories, terms, active_top_k, include_history=False, df=df, total=total),
+            score_memory_items(memories, terms, history_top_k, include_history=True, df=df, total=total),
+        )
     if _memory_search_backend() == "legacy":
         memories = _load_memory_items()
         # One frequency pass serves both views: it is a full scan of the loaded collection, and

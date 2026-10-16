@@ -192,7 +192,9 @@ def author_page_keys(*, refresh: bool = False) -> frozenset[str]:
         return frozenset()
     with _lock:
         if not refresh and key in _cache:
-            return _cache[key]
+            cached = _cache.pop(key)
+            _cache[key] = cached
+            return cached
     try:
         names = _latest_canonical_names(prefixes)
     except sqlite3.Error as exc:
@@ -212,4 +214,6 @@ def author_page_keys(*, refresh: bool = False) -> frozenset[str]:
         )
     with _lock:
         _cache[key] = keys
+        while len(_cache) > 8:
+            _cache.pop(next(iter(_cache)))
     return keys

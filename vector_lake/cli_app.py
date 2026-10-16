@@ -40,8 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Usage Examples:
   python cli.py sync
-  python cli.py search "MSL" --top_k 5
-  python cli.py search "deployment target" --mode memory
+  python cli.py search "MSL" --domain Medical_IT --top_k 5
+  python cli.py search "deployment target" --domain System_Architecture --mode memory
   python cli.py review
   python cli.py review resolve 0
   python cli.py review resolve review_ab12cd34ef56
@@ -85,14 +85,37 @@ Usage Examples:
     search_parser = subparsers.add_parser("search", help="[SEARCH] CJK-aware search with graph expansion.")
     search_parser.add_argument("query", help="Semantic query string.")
     search_parser.add_argument("--top_k", type=int, default=5, help="Number of results (default: 5).")
-    search_parser.add_argument("--domain", type=str, default=None, help="Filter by domain namespace.")
+    search_parser.add_argument("--domain", type=str, required=True, help="Exact authorized domain; General is not all domains.")
+    search_parser.add_argument("--allow-external-embedding", action="store_true", help="Permit sending this query to the embedding provider.")
     search_parser.add_argument("--cluster", type=str, default=None, help="Filter by topic cluster.")
     search_parser.add_argument("--include-history", action="store_true", help="Bypass temporal invalidation to search deprecated facts.")
     search_parser.add_argument("--mode", choices=["page", "memory", "claim"], default="page", help="Search page index, operational memory, or fact claims.")
+    search_parser.add_argument("--profile", choices=['auto','legacy','balanced','entity','source','author','analysis'], default='auto')
+    search_parser.add_argument("--use-chunks", action='store_true', help='Use an already-built scoped chunk sidecar; never builds it.')
 
     query_parser = subparsers.add_parser("query", help="[QUERY] Deep reasoning with budget-controlled context.")
     query_parser.add_argument("query_str", help="The topic or command for reasoning.")
-    query_parser.add_argument("--dry-run", action="store_true", help="Output Markdown to stdout only without persisting to disk.")
+    query_parser.add_argument("--domain", required=True, help="Exact authorized domain, e.g. Medical_IT.")
+    query_parser.add_argument("--cluster", default=None, help="Optional exact topic cluster.")
+    query_parser.add_argument("--allow-external-embedding", action="store_true", help="Permit sending this query to the embedding provider.")
+    query_parser.add_argument("--dry-run", action="store_true", help="Prepare context/provenance without publishing Wiki pages; still creates a temporary payload.")
+    query_parser.add_argument("--profile", choices=['auto','legacy','balanced','entity','source','author','analysis'], default='auto')
+    query_parser.add_argument("--use-chunks", action='store_true')
+
+    chunks_parser = subparsers.add_parser('chunk-index', help='[SEARCH] Preview/build chunks for explicit approved pages; no automatic corpus scan.')
+    chunks_parser.add_argument('--domain', required=True)
+    chunks_parser.add_argument('--page', action='append', required=True, help='Existing indexed page key; repeat for at most eight pages.')
+    chunks_parser.add_argument('--apply', action='store_true')
+    chunks_parser.add_argument('--allow-external-embedding', action='store_true')
+    chunks_parser.add_argument('--budget-seconds', type=float, default=60)
+    eval_parser = subparsers.add_parser('retrieval-eval', help='[SEARCH] Offline evaluation of explicit local judgments/results; never calls a model.')
+    eval_parser.add_argument('--dataset', required=True)
+    eval_parser.add_argument('--results', required=True)
+    eval_parser.add_argument('--k', type=int, default=10)
+    indexes_parser = subparsers.add_parser('retrieval-indexes', help='[MAINTENANCE] Inspect explicit SQLite retrieval accelerators; only --apply writes.')
+    indexes_parser.add_argument('--db', required=True, help='Explicit existing SQLite file; never initialized automatically.')
+    indexes_parser.add_argument('--apply', action='store_true')
+    indexes_parser.add_argument('--budget-seconds', type=float, default=60)
 
     subparsers.add_parser("graph", help="[GRAPH] Visualize the LLM-Wiki topology as an interactive 3D HTML dashboard.")
     timeline_rebuild_parser = subparsers.add_parser("timeline-rebuild", help="[TIMELINE] Rebuild timeline_events from timeline-event claims.")
@@ -289,18 +312,38 @@ def main() -> int:
                     include_queued=not getattr(args, "awaiting_only", False),
                 ))
         elif args.command == "search":
+            if not args.domain.strip():
+                raise ValueError('Explicit non-empty domain is required')
             print(tools.search_vector_lake(
                 args.query,
                 args.top_k,
-                domain=getattr(args, "domain", None),
-                cluster=getattr(args, "cluster", None),
+                domain=args.domain,
+                cluster=args.cluster or '',
                 include_history=getattr(args, "include_history", False),
                 mode=getattr(args, "mode", "page"),
+                allow_external_embedding=args.allow_external_embedding,
+                profile=args.profile, use_chunks=args.use_chunks,
             ))
         elif args.command == "lint":
             print(tools.lint_vector_lake(getattr(args, "auto_fix", False)))
         elif args.command == "query":
-            print(tools.prepare_query_context(args.query_str, getattr(args, "dry_run", False)))
+            if not args.domain.strip():
+                raise ValueError('Explicit non-empty domain is required')
+            print(tools.prepare_query_context(
+                args.query_str, getattr(args, "dry_run", False), domain=args.domain,
+                cluster=args.cluster, allow_external_embedding=args.allow_external_embedding,
+                profile=args.profile, use_chunks=args.use_chunks,
+            ))
+        elif args.command == 'chunk-index':
+            from vector_lake.chunk_index import build_selected_pages
+            print(json.dumps(build_selected_pages(args.page, args.domain, apply=args.apply,
+                allow_external_embedding=args.allow_external_embedding, budget_seconds=args.budget_seconds), ensure_ascii=False, indent=2))
+        elif args.command == 'retrieval-indexes':
+            from vector_lake.scoped_retrieval_index import inspect_file
+            print(json.dumps(inspect_file(args.db, apply_changes=args.apply, budget_seconds=args.budget_seconds), ensure_ascii=False, indent=2))
+        elif args.command == 'retrieval-eval':
+            from vector_lake.retrieval_eval import evaluate_files
+            print(json.dumps(evaluate_files(args.dataset, args.results, args.k), ensure_ascii=False, indent=2))
         elif args.command == "graph":
             print(tools.visualize_vector_lake())
         elif args.command == "timeline-rebuild":

@@ -165,6 +165,76 @@ def test_filtered_arm_reports_the_raw_depth_not_the_survivor_count(monkeypatch):
     assert examined >= 10, "the shortlist was full; only the filter rejected everything"
 
 
+@pytest.mark.parametrize("domain,threshold", [("Alpha", 0.5), ("NoSuchDomain", 0.5), ("Alpha", 1.1)])
+def test_filtered_arm_records_metadata_and_similarity_survivors(monkeypatch, domain, threshold):
+    vectors = _seed(monkeypatch, count=20)
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        two_stage_index.build(conn)
+    monkeypatch.setattr(ts, "VECTOR_MIN_COSINE", threshold)
+    query = [float(x) for x in vectors["Doc_000"]]
+    reuse = {}
+
+    results, error, examined = ts._get_vector_search_results_filtered(
+        query, 20, _Catalog(), domain, None, False, None, reuse=reuse
+    )
+
+    assert error is None and examined == 20
+    assert reuse["diagnostics"] == {
+        "metadata_passed": 0 if domain == "NoSuchDomain" else 10,
+        "similarity_passed": len(results),
+    }
+    assert len(results) == (10 if domain == "Alpha" and threshold == 0.5 else 0)
+
+
+def test_filtered_arm_does_not_reuse_diagnostics_after_failure(monkeypatch):
+    vectors = _seed(monkeypatch, count=20)
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        two_stage_index.build(conn)
+    reuse = {}
+    ts._get_vector_search_results_filtered(
+        [float(x) for x in vectors["Doc_000"]], 20, _Catalog(), "Alpha", None, False, None,
+        reuse=reuse,
+    )
+
+    results, error, _ = ts._get_vector_search_results_filtered(
+        [0.0], 20, _Catalog(), "Alpha", None, False, None, reuse=reuse,
+    )
+
+    assert results is None and error
+    assert "diagnostics" not in reuse
+
+
+def test_vector_cap_includes_filter_counts_and_selector_context(monkeypatch):
+    vectors = _seed(monkeypatch, count=20)
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        two_stage_index.build(conn)
+    monkeypatch.setattr(ts, "MAX_FILTERED_RECALL_CANDIDATES", 16)
+    monkeypatch.setattr(ts, "VECTOR_MIN_COSINE", 1.1)
+    monkeypatch.setattr(ts, "_candidate_depth", lambda: 5)
+    monkeypatch.setattr(ts, "_expand_query_locally", lambda query: [query])
+    monkeypatch.setattr(ts, "_get_fts_recall_results", lambda *a, **k: [])
+    monkeypatch.setattr(ts, "_vector_projection_error", lambda: None)
+    monkeypatch.setattr(
+        ts, "_get_query_embedding", lambda query: ([float(x) for x in vectors["Doc_000"]], None)
+    )
+
+    rows, notes, error = ts._search_scored_pages(
+        "probe", top_k=3, domain="Alpha", catalog=_Catalog()
+    )
+
+    assert error is None and rows == []
+    note = next(note for note in notes if "filtered recall cap" in note)
+    assert "raw_examined=16" in note
+    assert "target_depth=5" in note and "selected=0" in note
+    assert "metadata_passed=" in note and "similarity_passed=0" in note
+    assert "min_cosine>1.1" in note and "domain=Alpha" in note
+    assert "include_history=False" in note
+    assert not any("embedding-backfill" in note for note in notes)
+
+
 def test_filtered_recall_widens_to_the_cap_when_everything_is_rejected():
     calls: list[int] = []
 
@@ -437,6 +507,7 @@ def test_supported_binary_backend_keeps_tied_prefixes_across_chunks():
 
 
 def test_unknown_backend_uses_original_depths(monkeypatch):
+    monkeypatch.setenv('VECTOR_LAKE_VECTOR_INDEX', 'two_stage')
     vectors = _seed(monkeypatch)
     conn = db_store.get_connection()
     with db_store.transaction():
@@ -510,7 +581,8 @@ def test_reuse_failure_is_reported_and_cleared(monkeypatch):
         query, 10, catalog, "Alpha", None, False, None, reuse=reuse
     )
     assert result is None and raw == 0
-    assert error and "RuntimeError: shortlist dependency failed" in error
+    assert error and 'RuntimeError' in error
+    assert 'shortlist dependency failed' not in error
     assert reuse == {}, "a failed expansion must not leave a reusable pool behind"
 
 

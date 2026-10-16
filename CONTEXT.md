@@ -116,10 +116,10 @@ The following CLI commands remain the ground truth operating surface for *human 
 ```powershell
 python cli.py doctor
 python cli.py sync
-python cli.py search "query" --top_k 5
-python cli.py search "query" --mode memory --top_k 5
-python cli.py search "query" --mode claim --top_k 5
-python cli.py query "question" [--dry-run]
+python cli.py search "query" --domain General --top_k 5
+python cli.py search "query" --domain General --mode memory --top_k 5
+python cli.py search "query" --domain General --mode claim --top_k 5
+python cli.py query "question" --domain General --dry-run
 python cli.py review
 python cli.py audit-graph
 python cli.py research [--dry-run]
@@ -127,8 +127,9 @@ python cli.py debt --top 20
 python cli.py trace "<query-or-id>"
 python cli.py merge-suggestions --limit 20
 python cli.py graph
-python cli.py gc --days 30 --dry-run
-python cli.py delete "<raw-source-path>" --dry-run
+# gc/delete 默认预览；写入须显式 --apply 并取得相应授权。
+python cli.py gc --days 30
+python cli.py delete "<raw-source-path>"
 ```
 
 For Windows validation, prefer:
@@ -138,19 +139,11 @@ $env:PYTHONUTF8='1'; python -m unittest discover -s tests -p 'test_*.py' -v
 $env:PYTHONUTF8='1'; python -m compileall vector_lake tests
 ```
 
-## 5. Current Validation Baseline
+## 5. Validation entry points
 
-Last verified: 2026-07-08 (V11.5 Refactoring).
+Use the test commands in [README.md](README.md#开发测试) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Evidence must identify the current commit/source version and test scope; historical test totals, memory counts and Doctor snapshots are not current acceptance evidence. The core fallback/native manifests are bounded selections, not whole-repository or production-SLO approval.
 
-- Unit tests: `Ran 8 tests ... OK`
-- Compile: `python -m compileall vector_lake tests` OK
-- Doctor: healthy
-- `search --mode memory`: smoke OK
-- Debt snapshot:
-  - `operational_memory_count: 13755`
-  - `superseded_memory_count: 510`
-  - `conflicted_memory_count: 0`
-  - `memory_type_counts: {'fact': 11881, 'decision': 1393, 'task_state': 384, 'preference': 97}`
+For a resident MCP connection, verify its interpreter, PID and loaded code with `runtime_identity`. Restarting watchdog/runner alone does not reload MCP.
 
 ## 6. Operating Rules
 

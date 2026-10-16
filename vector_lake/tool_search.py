@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 from array import array
@@ -12,9 +13,10 @@ import functools
 import ast
 import operator
 from html import escape
+from pathlib import Path
 
 from vector_lake import governance_store, search_ledger
-from vector_lake import author_facet
+from vector_lake import author_facet, retrieval_runtime as runtime
 from vector_lake.domain_dictionary import PUBLIC_QUERY_PROFILE, QUERY_EXPANSION_DICT
 from vector_lake.node_vocabulary import strip_prefix
 from vector_lake.schema_validator import canonical_domain
@@ -237,7 +239,7 @@ def _passes_filters(node: dict, domain: str | None, cluster: str | None, include
             if not _safe_eval(filter_expr, node):
                 return False
         except Exception as exc:
-            log.warning("Filter expr evaluation failed for node %s: %s", node.get("_key"), exc)
+            log.warning("Filter expression evaluation failed: %s", runtime.safe_error(exc))
             return False
     return True
 
@@ -288,6 +290,9 @@ def _get_query_embedding(query: str) -> tuple[list[float], str | None]:
     if not os.environ.get("GEMINI_API_KEY"):
         return [], "GEMINI_API_KEY is not set"
     deadline = time.monotonic() + QUERY_EMBEDDING_BUDGET_SECONDS
+    state = runtime.current()
+    if state is not None:
+        deadline = min(deadline, state.deadline)
     key = _embedding_cache_key(query)
     with _QUERY_EMBEDDING_CACHE_LOCK:
         cached = _QUERY_EMBEDDING_CACHE.get(key)
@@ -318,16 +323,21 @@ def _get_query_embedding(query: str) -> tuple[list[float], str | None]:
             if remaining <= 0:
                 result = ((), "query embedding budget exhausted before provider call")
             else:
-                embeddings = embed_texts([query], budget_seconds=remaining, durable_reservation=False)
+                embeddings = embed_texts([query], budget_seconds=min(remaining, runtime.remaining_seconds()), durable_reservation=False)
                 if not embeddings:
                     result = ((), "embedding provider returned no vector")
                 else:
-                    values = tuple(embeddings[0])
+                    import math
+                    values = tuple(float(value) for value in embeddings[0])
+                    norm = math.hypot(*values)
+                    if not values or not all(math.isfinite(value) for value in values) or not math.isfinite(norm) or norm == 0:
+                        raise ValueError('Query embedding must be finite and non-zero')
+                    values = tuple(value / norm for value in values)
                     _store_query_embedding_by_key(key, values)
                     result = (values, None)
         except Exception as exc:
-            log.warning("Failed to get query embedding: %s", exc)
-            result = ((), f"{type(exc).__name__}: {exc}")
+            message = runtime.failed_stage('Query embedding', exc)
+            result = ((), message)
         flight.set_result(result)
         return list(result[0]), result[1]
     except BaseException as exc:
@@ -359,7 +369,7 @@ def _vector_projection_error() -> str | None:
                     f"{state.get('model')}/{state.get('dimension')}, "
                     f"query {config.model}/{config.dimension}; rebuild vectors")
     except Exception as exc:
-        return f"embedding projection check failed ({type(exc).__name__}: {exc})"
+        return runtime.failed_stage('Embedding projection check', exc)
     return None
 
 
@@ -398,8 +408,7 @@ def _get_vector_search_results(query_vector: list[float], limit: int = 50) -> tu
                 results[page_key] = sim
         return results, None
     except Exception as e:
-        log.warning(f"Failed to query vec_embeddings: {e}")
-        return {}, f"vec_embeddings query failed: {type(e).__name__}: {e}"
+        return {}, runtime.failed_stage('vec_embeddings query', e)
 
 def _metadata_first_enabled() -> bool:
     """Whether a filtered query rejects on metadata before paying for the exact rerank.
@@ -444,6 +453,8 @@ def _get_vector_search_results_filtered(
     Metadata verdicts are reused, but exact reranking stays with the original SQL and tie ordering.
     A changed database/query/selector invalidates it; an inconsistent prefix disables prefetching.
     """
+    if reuse is not None:
+        reuse.pop("diagnostics", None)
     try:
         from vector_lake.db_store import get_connection
         import sqlite_vec
@@ -532,16 +543,20 @@ def _get_vector_search_results_filtered(
                 sim = 1.0 - (dist * dist) / 2.0
                 if sim > VECTOR_MIN_COSINE:
                     results[key] = sim
+            if reuse is not None:
+                reuse["diagnostics"] = {
+                    "metadata_passed": len(eligible),
+                    "similarity_passed": len(results),
+                }
             return results, None, len(keys)
     except Exception as e:
         if reuse is not None:
             reuse.clear()
-        log.warning(f"Failed to run the metadata-first vector arm: {e}")
-        return None, f"vector arm failed: {type(e).__name__}: {e}", 0
+        return None, runtime.failed_stage('Metadata-first vector arm', e), 0
 
 
 _LAST_FTS_ERROR = threading.local()
-_LAST_MEMORY_VIEWS = threading.local()
+_LAST_RERANK_NOTE = threading.local()
 
 
 def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
@@ -593,7 +608,7 @@ def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
                             for key in keys if key in metadata
                         ]
             except Exception as exc:  # noqa: BLE001 - native fault is not a valid empty result
-                log.warning("Tantivy query failed (%s: %s); using FTS5", type(exc).__name__, exc)
+                log.warning("Tantivy query failed (%s); using FTS5", runtime.safe_error(exc))
 
         clean_toks = [t.replace('"', '') for t in query_tok.split()]
         query_esc = " ".join(f'"{t}"' for t in clean_toks if t.strip())
@@ -601,24 +616,40 @@ def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
             _LAST_FTS_ERROR.msg = None
             return []
 
-        cur = conn.execute("""
-            SELECT node_key, title, summary, bm25(wiki_search_index) as rank 
-            FROM wiki_search_index 
-            WHERE wiki_search_index MATCH ? 
-            ORDER BY rank LIMIT ?
-        """, (query_esc, limit))
+        state = runtime.current()
+        scope = state.fts_scope if state is not None else None
+        clauses, params = ['wiki_search_index MATCH ?'], [query_esc]
+        join = ''
+        if scope is not None:
+            join = ' JOIN page_index_nodes p ON p.node_key=wiki_search_index.node_key'
+            if scope['domain']:
+                # Connection-local, read-only UDF: exactly the Python selector's alias,
+                # case and Unicode-whitespace semantics, not a schema installation.
+                conn.create_function('vl_canonical_domain', 1, lambda value: canonical_domain(value).lower(), deterministic=True)
+                clauses.append('vl_canonical_domain(p.domain)=?')
+                params.append(canonical_domain(scope['domain']).lower())
+            if scope['cluster']:
+                clauses.append('lower(p.topic_cluster)=?')
+                params.append(scope['cluster'].lower())
+            if not scope['include_history']:
+                clauses.append("lower(COALESCE(p.status,'')) NOT IN ('deprecated','archived')")
+        cur = conn.execute(
+            'SELECT wiki_search_index.node_key, wiki_search_index.title, wiki_search_index.summary, '
+            'bm25(wiki_search_index) AS rank FROM wiki_search_index' + join +
+            ' WHERE ' + ' AND '.join(clauses) + ' ORDER BY rank LIMIT ?', [*params, limit],
+        )
         rows = [dict(row) for row in cur.fetchall()]
         _LAST_FTS_ERROR.msg = None
         _LAST_FTS_ERROR.backend = "fts5"
         _LAST_FTS_ERROR.backends.add("fts5")
         return rows
     except Exception as e:
-        msg = f"FTS5 query failed ({type(e).__name__}: {e})"
+        msg = f"FTS5 query failed ({runtime.safe_error(e)})"
         log.warning(msg)
         _LAST_FTS_ERROR.msg = msg
         return []
 
-def _get_fts_recall_results(query: str, limit: int = 50) -> list[dict]:
+def _get_fts_recall_results(query: str, limit: int = 50, supplemental_queries=()) -> list[dict]:
     """Original-query hits first; bounded contextual substitutions fill unused slots."""
     primary = _get_fts_search_results(query, limit=limit)
     primary_error = getattr(_LAST_FTS_ERROR, "msg", None)
@@ -629,6 +660,10 @@ def _get_fts_recall_results(query: str, limit: int = 50) -> list[dict]:
     # dictionary term preserves the other qualifiers; unrelated expansions cannot erase originals.
     variants = []
     seen_queries = {query.casefold()}
+    for variant in supplemental_queries:
+        if variant and variant.casefold() not in seen_queries:
+            seen_queries.add(variant.casefold())
+            variants.append(variant)
     for term, replacements in QUERY_EXPANSION_DICT.items():
         if term not in query:
             continue
@@ -776,39 +811,41 @@ def format_operational_memory_results(
     domain: str | None = None,
     cluster: str | None = None,
 ) -> str:
-    fetch_k = top_k * 3 if (domain or cluster) else top_k
+    scope = {"domain": domain, "cluster": cluster} if domain or cluster else {}
     memories = governance_store.search_operational_memory(
-        query,
-        top_k=fetch_k,
-        include_history=include_history,
-        memory_types=memory_types,
+        query, top_k=top_k, include_history=include_history, memory_types=memory_types, **scope,
     )
-    if domain:
-        d_lower = domain.lower()
-        memories = [
-            m for m in memories
-            if d_lower in str(m.get("source_page", "")).lower() or d_lower in str(m.get("domain", "")).lower()
-        ]
-    if cluster:
-        c_lower = cluster.lower()
-        memories = [
-            m for m in memories
-            if c_lower in str(m.get("topic_cluster", "")).lower()
-        ]
-    memories = memories[:top_k]
-    if not memories:
-        return "No operational memory matched the query."
-    return "".join(_format_memory_result(memory, as_xml=as_xml, index=index) for index, memory in enumerate(memories))
+    blocks, emitted, used = [], [], 0
+    for index, memory in enumerate(memories):
+        runtime.checkpoint()
+        bounded = {**memory, 'text': str(memory.get('text') or '')[:4000]}
+        block = _format_memory_result(bounded, as_xml=as_xml, index=index)
+        if used + len(block) > runtime.MAX_CONTEXT_CHARS - 1000:
+            state = runtime.current()
+            if state is not None:
+                state.problem('Memory response character budget exhausted')
+            break
+        blocks.append(block)
+        used += len(block)
+        emitted.append({'key': str(memory.get('memory_id') or '')})
+    runtime.defer_record({'query': query, 'mode': 'memory', 'top_k': top_k, 'returned': emitted,
+                          'notes': [], 'status': 'partial' if len(emitted) < len(memories) else 'complete'})
+    return ''.join(blocks) if blocks else 'No operational memory matched the query.'
 
 
-def build_memory_packet(query: str, max_chars: int = 60000) -> dict:
-    cached_query = getattr(_LAST_MEMORY_VIEWS, "query", None)
-    if cached_query == query and hasattr(_LAST_MEMORY_VIEWS, "views"):
-        memories, historical = _LAST_MEMORY_VIEWS.views
+def build_memory_packet(
+    query: str, max_chars: int = 60000, *, domain: str | None = None,
+    cluster: str | None = None, _views=None,
+) -> dict:
+    if max_chars < 0:
+        raise ValueError('max_chars must be non-negative')
+    scope = {"domain": domain, "cluster": cluster} if domain or cluster else {}
+    if _views is not None:
+        memories, historical = _views
+    elif scope:
+        memories, historical = governance_store.search_memory_packet_views(query, domain=domain, cluster=cluster)
     else:
         memories, historical = governance_store.search_memory_packet_views(query)
-        _LAST_MEMORY_VIEWS.query = query
-        _LAST_MEMORY_VIEWS.views = (memories, historical)
 
     stale_or_conflicted = [
         item for item in historical
@@ -871,7 +908,7 @@ def build_memory_packet(query: str, max_chars: int = 60000) -> dict:
     ] or ["- None matched."]
 
     from vector_lake import memory_gram_index
-    gram_usable = memory_gram_index.gram_index_usable()
+    gram_usable = True if scope else memory_gram_index.gram_index_usable()
     policy_line = "Policy: Use this packet as the machine-facing runtime memory. If it conflicts with wiki prose, prefer active non-conflicted memory items and surface the conflict."
     if not gram_usable:
         policy_line += " [DEGRADED: Operational memory gram index is behind; served via exact projected scan]"
@@ -922,7 +959,9 @@ def build_memory_packet(query: str, max_chars: int = 60000) -> dict:
         # ``head`` plus ``tail`` alone overran the budget, so there was nothing to fit: no memory
         # line was emitted above, and the packet is cut to keep the ``budget_used <= budget_max``
         # invariant ``assemble_context`` depends on.
-        packet = packet[: max(0, max_chars - 80)].rstrip() + f"\n{truncated_marker}\n</MEMORY_PACKET>"
+        minimal = f"<MEMORY_PACKET>\n{truncated_marker}\n</MEMORY_PACKET>"
+        packet = minimal if len(minimal) <= max_chars else ""
+        omitted = len(memories)
     return {
         "packet": packet,
         "memory_count": len(memories),
@@ -1064,6 +1103,7 @@ def _rerank_candidates_locally(query: str, candidates: list[tuple[float, dict]])
     keeps upstream influence on purpose so graph-expanded candidates, which have
     no lexical overlap by construction, are not buried.
     """
+    _LAST_RERANK_NOTE.message = None
     if len(candidates) < 2:
         return candidates
     try:
@@ -1078,6 +1118,7 @@ def _rerank_candidates_locally(query: str, candidates: list[tuple[float, dict]])
         # Fail open and loudly: with no reranker the upstream order stands, which is exactly what
         # VECTOR_LAKE_RERANK_WEIGHT=0 means.  Silent here would hide a broken install, because the
         # scores keep looking normalised either way.
+        _LAST_RERANK_NOTE.message = 'Local reranking unavailable: required native symbol is missing'
         log.warning(
             "Local reranking unavailable: vector_lake_core.fast_bm25_rerank is missing "
             "(build the Rust core with `maturin develop`); keeping upstream order."
@@ -1119,10 +1160,12 @@ def _rerank_candidates_locally(query: str, candidates: list[tuple[float, dict]])
         )
     except Exception as exc:
         # Fail open: a reranker fault must never drop results.
-        log.warning("Local reranking failed (%s: %s); keeping upstream order.", type(exc).__name__, exc)
+        _LAST_RERANK_NOTE.message = f'Local reranking failed: {type(exc).__name__}'
+        log.warning("Local reranking failed (%s); keeping upstream order.", type(exc).__name__)
         return candidates
 
     if len(rerank_indices) != len(candidates):
+        _LAST_RERANK_NOTE.message = 'Local reranking failed: candidate count mismatch'
         log.warning(
             "Local reranking returned %s scores for %s candidates; keeping upstream order.",
             len(rerank_indices), len(candidates),
@@ -1209,7 +1252,7 @@ def _safe_eval(expr: str, context: dict) -> bool:
         tree = ast.parse(expr, mode='eval')
         return bool(_eval(tree.body))
     except Exception as e:
-        log.warning(f"Failed to safe_eval expression '{expr}': {e}")
+        log.warning("Filter expression invalid: %s", runtime.safe_error(e))
         return False
 
 
@@ -1227,6 +1270,7 @@ def _filtered_recall(fetch, catalog, depth: int, domain, cluster, include_histor
     """
     limit = min(depth, MAX_FILTERED_RECALL_CANDIDATES)
     while True:
+        runtime.checkpoint()
         rows, error = fetch(limit)
         keys = list(rows) if isinstance(rows, dict) else [row["node_key"] for row in rows]
         nodes = catalog.nodes_by_key(keys)
@@ -1248,13 +1292,18 @@ def _filtered_recall(fetch, catalog, depth: int, domain, cluster, include_histor
         if error or complete or capped:
             if capped:
                 note = (f"filtered recall cap ({MAX_FILTERED_RECALL_CANDIDATES}) reached; "
-                        "results may be incomplete")
+                        f"results may be incomplete (raw_examined={examined}, "
+                        f"target_depth={depth}, selected={len(selected)}, "
+                        f"domain={domain or '(any)'}, cluster={cluster or '(any)'}, "
+                        f"include_history={include_history}, filter_expr_active={bool(filter_expr)})")
             elif not error and not selected and keys:
                 # The source did match; the selectors removed every candidate. Reporting this as
                 # "no stored vectors matched" sent the reader to ``embedding-backfill``, which
                 # cannot repair a filter. Name the stage that actually decided.
                 note = (f"{len(keys)} ranked candidate(s) matched but none passed the "
-                        "domain/cluster/history/filter selectors")
+                        "domain/cluster/history/filter selectors "
+                        f"(domain={domain or '(any)'}, cluster={cluster or '(any)'}, "
+                        f"include_history={include_history}, filter_expr_active={bool(filter_expr)})")
             else:
                 note = None
             return (dict(list(selected.items())[:depth]) if isinstance(selected, dict)
@@ -1294,17 +1343,73 @@ def _filtered_graph_expansions(ranked, catalog, limit, domain, cluster, include_
     return selected
 
 
+def _scoped_chunk_candidates(query, domain, cluster, include_history, query_vector, catalog, plan, *, filter_expr=None):
+    from pathlib import Path
+    from vector_lake import chunk_index
+    if not domain:
+        raise ValueError('Chunk retrieval requires an explicit domain')
+    model = _embedding_cache_key(query)[0] if query_vector else None
+    root = Path(get_wiki_dir()).resolve()
+    accepted, stale, excluded, checked = {}, set(), set(), set()
+    limit, notes = 25, []
+    while True:
+        runtime.checkpoint()
+        rows, batch_notes = chunk_index.search_chunks(
+            query, domain, cluster=cluster, include_history=include_history,
+            query_vector=query_vector, model=model, supplemental_queries=plan.supplemental_queries,
+            top_k=limit,
+        )
+        notes.extend(n for n in batch_notes if n not in notes)
+        nodes = catalog.nodes_by_key([row['page_key'] for row in rows])
+        for row in rows:
+            key = row['page_key']
+            if key in checked:
+                continue
+            checked.add(key)
+            node = nodes.get(key)
+            if node is None or not plan.accepts(node) or not _passes_filters(node, domain, cluster, include_history, filter_expr):
+                excluded.add(key)
+                continue
+            try:
+                path = (root / (key + '.md')).resolve()
+                if '/' in key or '\\' in key or not path.is_relative_to(root):
+                    raise ValueError('Invalid chunk source path')
+                if chunk_index.content_hash(chunk_index.read_page(path)) != row['source_hash']:
+                    raise ValueError('Stale chunk source')
+            except runtime.RetrievalBudgetExceeded as exc:
+                notes.append(runtime.failed_stage('Chunk source budget', exc))
+                return list(accepted.values())[:25], notes
+            except (OSError, UnicodeError, ValueError):
+                stale.add(key)
+                continue
+            accepted[key] = row
+        if len(accepted) >= 25 or len(rows) < limit:
+            break
+        if limit >= chunk_index.MAX_CANDIDATES:
+            notes.append('Filtered chunk document budget reached; results may be incomplete')
+            break
+        limit = min(limit * 2, chunk_index.MAX_CANDIDATES)
+    if stale:
+        notes.append(f'Chunk source unavailable or changed for {len(stale)} candidate(s); refresh explicitly')
+    if excluded:
+        notes.append(f'Chunk candidates excluded by current source metadata: {len(excluded)}')
+    return list(accepted.values())[:25], notes
+
+
 def _search_scored_pages(
     query: str,
     top_k: int,
-    domain: str = None,
-    cluster: str = None,
+    domain: str | None = None,
+    cluster: str | None = None,
     include_history: bool = False,
-    filter_expr: str = None,
+    filter_expr: str | None = None,
     catalog=None,
     projection_note: str | None = None,
     *,
     timings: dict[str, float] | None = None,
+    allow_external_embedding: bool = True,
+    profile: str = 'legacy',
+    use_chunks: bool = False,
 ):
     """Ranked pages plus retrieval notes.
 
@@ -1322,10 +1427,16 @@ def _search_scored_pages(
     """
     from vector_lake import page_index_projection
 
+    from vector_lake.retrieval_plan import plan_query, PlannedCatalog
+    plan = plan_query(query, profile)
+    if use_chunks and not domain:
+        raise ValueError('Chunk retrieval requires an explicit domain')
     started = time.perf_counter()
     phase_started = started
-    if timings is not None:
-        timings.clear()
+    if top_k <= 0:
+        raise ValueError('top_k must be positive')
+    timings = {} if timings is None else timings
+    timings.clear()
 
     def _mark(phase):
         nonlocal phase_started
@@ -1338,12 +1449,21 @@ def _search_scored_pages(
     # (a missing index, unreadable tokens) record through that same closure -- referencing a local
     # assigned further down raised ``NameError: cannot access free variable 'fusion_mode'`` on exactly
     # those paths.
-    fusion_mode = _fusion_mode()
+    fusion_mode = 'rrf' if use_chunks else _fusion_mode()
     _LAST_FTS_ERROR.backends = set()
 
     def _record(returned_rows, notes, error=None):
-        search_ledger.record(
-            query,
+        generation = page_index_projection.index_file_stamp()
+        if use_chunks:
+            from vector_lake.chunk_index import generation_token
+            try:
+                generation = (generation, generation_token())
+            except OSError:
+                generation = (generation, 'chunk-state-unavailable')
+        _, failures = split_retrieval_notes(notes)
+        status = 'failed' if error or (failures and not returned_rows) else 'partial' if failures else 'complete'
+        payload: dict = dict(
+            query=query,
             mode="page",
             top_k=top_k,
             returned=returned_rows,
@@ -1352,7 +1472,19 @@ def _search_scored_pages(
             error=error,
             fusion=fusion_mode,
             fts_backend="+".join(sorted(_LAST_FTS_ERROR.backends)) or "none",
+            selectors={"domain": domain, "cluster": cluster, "include_history": include_history,
+                       "filter_expr_active": bool(filter_expr)},
+            index_generation=repr(generation),
+            configuration={"candidate_depth": _candidate_depth(), "candidate_pool": _candidate_pool(),
+                           "allow_external_embedding": allow_external_embedding,
+                           "use_chunks": use_chunks, **plan.diagnostics()},
+            timings=dict(timings),
+            status=status,
         )
+        if status == 'failed' and not payload['error']:
+            payload['error'] = 'retrieval_failed'
+        if not runtime.defer_record(payload):
+            search_ledger.record(**payload)
         _mark("ledger")
         if timings is not None:
             timings["total"] = (time.perf_counter() - started) * 1000.0
@@ -1378,6 +1510,8 @@ def _search_scored_pages(
         _record([], [], error=answer)
         return [], [], answer
 
+    if plan.event_query:
+        catalog = PlannedCatalog(catalog, plan)
     intent = _keyword_intent(query)
     scored = []
     tokens = _expand_query_locally(query)
@@ -1391,13 +1525,26 @@ def _search_scored_pages(
     # PHASE 2 FTS5 + VECTOR HYBRID QUERY
     hybrid_scores = {}
     vector_notes = []
+    if plan.profile != 'legacy':
+        vector_notes.append(f'Retrieval profile: {plan.profile}; ranking preference is not evidence confidence')
+    if use_chunks:
+        vector_notes.append('Chunk fusion: reciprocal rank fusion; sidecar is opt-in')
+    if plan.event_query:
+        vector_notes.append('Event query constraints: metadata/title years only; event identity requires source verification')
+        if plan.year_ambiguous:
+            vector_notes.append('Event year unverified: multiple years requested; no single-year restriction applied')
     
     # 1. FTS5 Search
+    state = runtime.current()
+    if state is not None:
+        state.fts_scope = {'domain': domain, 'cluster': cluster, 'include_history': include_history} if getattr(catalog, 'source', '') == 'projection' else None
     fts_ranked: list[str] = []
+    lexical_nodes: dict[str, dict] = {}
     try:
-        if domain or cluster or filter_expr or not include_history:
+        if domain or cluster or filter_expr or not include_history or plan.event_year:
             def fetch_fts(limit):
-                rows = _get_fts_recall_results(query, limit=limit)
+                rows = (_get_fts_recall_results(query, limit=limit, supplemental_queries=plan.supplemental_queries)
+                        if plan.supplemental_queries else _get_fts_recall_results(query, limit=limit))
                 return rows, getattr(_LAST_FTS_ERROR, "msg", None)
 
             fts_results, fts_error, fts_note = _filtered_recall(
@@ -1407,7 +1554,8 @@ def _search_scored_pages(
             if fts_note:
                 vector_notes.append(f"FTS: {fts_note}")
         else:
-            fts_results = _get_fts_recall_results(query, limit=_candidate_depth())
+            fts_results = (_get_fts_recall_results(query, limit=_candidate_depth(), supplemental_queries=plan.supplemental_queries)
+                           if plan.supplemental_queries else _get_fts_recall_results(query, limit=_candidate_depth()))
             fts_error = getattr(_LAST_FTS_ERROR, "msg", None)
         if fts_error:
             vector_notes.append(fts_error)
@@ -1431,8 +1579,19 @@ def _search_scored_pages(
                     _LAST_FTS_ERROR.backend = "index.json"
                     _LAST_FTS_ERROR.backends.add("index.json")
                     vector_notes.append(f"FTS5 fallback: matched {len(fts_results)} node(s) from index.json")
+        # Finish lexical evidence before starting optional vector work. Keep this
+        # request-local snapshot usable even after the SQL progress deadline expires.
+        read_nodes = getattr(catalog, 'nodes_by_key', None)
+        if not callable(read_nodes):
+            raise TypeError('Catalog node reader unavailable')
+        loaded_nodes = read_nodes([row['node_key'] for row in fts_results])
+        if not isinstance(loaded_nodes, dict):
+            raise TypeError('Catalog node reader must return a dictionary')
+        lexical_nodes = loaded_nodes
         for position, row in enumerate(fts_results):
             key = row['node_key']
+            if key not in lexical_nodes:
+                continue
             raw_score = row.get('rank')
             if raw_score is None:
                 raw_score = row.get('score', 0)
@@ -1444,74 +1603,113 @@ def _search_scored_pages(
             hybrid_scores[key] = hybrid_scores.get(key, 0.0) + contribution
             fts_ranked.append(key)
     except Exception as e:
-        log.error(f"FTS5 Search failed: {e}")
+        log.error("FTS5 Search failed (%s)", type(e).__name__)
+        vector_notes.append(f"FTS arm failed: {type(e).__name__}")
 
     _mark("fts")
 
     # 2. Vector Search (Hybrid blending)
     vector_ranked: list[str] = []
-    projection_error = _vector_projection_error()
-    query_vector, embedding_error = ([], projection_error) if projection_error else _get_query_embedding(query)
-    _mark("embedding")
-    if query_vector:
-        vector_note = None
-        if domain or cluster or filter_expr or not include_history:
-            # Metadata-first arm: reject on metadata before paying for the exact rerank.  The
-            # fallback to the plain arm (shadow index unavailable, or the switch off) keeps the old
-            # cost and ordering profile rather than losing filtered recall.
-            examined = {"raw": None}
-            shortlist_reuse = {}
-
-            def _fetch(limit, _examined=examined):
-                rows, error, raw = (
-                    _get_vector_search_results_filtered(
-                        query_vector, limit, catalog, domain, cluster, include_history, filter_expr,
-                        reuse=shortlist_reuse,
-                    )
-                    if _metadata_first_enabled()
-                    else (None, None, 0)
-                )
-                if rows is None:
-                    _examined["raw"] = None
-                    return _get_vector_search_results(query_vector, limit=limit)
-                _examined["raw"] = raw
-                return rows, error
-
-            vector_results, vector_error, vector_note = _filtered_recall(
-                _fetch,
-                catalog, _candidate_depth(), domain, cluster, include_history, filter_expr,
-                raw_count=lambda: examined["raw"],
-            )
-            if vector_note:
-                vector_notes.append(f"vector: {vector_note}")
+    query_vector = []
+    try:
+        projection_error = _vector_projection_error() if allow_external_embedding and not runtime.expired() else None
+        if runtime.expired():
+            query_vector, embedding_error = [], 'Request deadline budget exhausted'
+        elif not allow_external_embedding:
+            query_vector, embedding_error = [], "External embedding disabled by request policy"
         else:
-            vector_results, vector_error = _get_vector_search_results(query_vector, limit=_candidate_depth())
-        if vector_error:
-            vector_notes.append(vector_error)
-        elif not vector_results and not vector_note:
-            vector_notes.append(
-                "no stored vectors matched; run `embedding-backfill --apply` to (re)build the vector projection"
-            )
-        # ``_get_vector_search_results`` inserts in ascending distance, so enumeration order is
-        # the vector ranking that RRF needs.
-        for position, (key, sim) in enumerate(vector_results.items()):
-            if fusion_mode == "rrf":
-                contribution = 1.0 / (RRF_K + position + 1)
+            query_vector, embedding_error = ([], projection_error) if projection_error else _get_query_embedding(query)
+        _mark("embedding")
+        if query_vector:
+            vector_note = None
+            if domain or cluster or filter_expr or not include_history or plan.event_year:
+                # Metadata-first arm: reject on metadata before paying for the exact rerank.  The
+                # fallback to the plain arm (shadow index unavailable, or the switch off) keeps the old
+                # cost and ordering profile rather than losing filtered recall.
+                examined = {"raw": None}
+                shortlist_reuse = {}
+
+                def _fetch(limit, _examined=examined):
+                    rows, error, raw = (
+                        _get_vector_search_results_filtered(
+                            query_vector, limit, catalog, domain, cluster, include_history, filter_expr,
+                            reuse=shortlist_reuse,
+                        )
+                        if _metadata_first_enabled()
+                        else (None, None, 0)
+                    )
+                    if rows is None:
+                        _examined["raw"] = None
+                        return _get_vector_search_results(query_vector, limit=limit)
+                    _examined["raw"] = raw
+                    return rows, error
+
+                vector_results, vector_error, vector_note = _filtered_recall(
+                    _fetch,
+                    catalog, _candidate_depth(), domain, cluster, include_history, filter_expr,
+                    raw_count=lambda: examined["raw"],
+                )
+                if vector_note:
+                    diagnostics = shortlist_reuse.get("diagnostics")
+                    if diagnostics:
+                        vector_note += (
+                            f"; metadata_passed={diagnostics['metadata_passed']}, "
+                            f"similarity_passed={diagnostics['similarity_passed']}, "
+                            f"min_cosine>{VECTOR_MIN_COSINE}"
+                        )
+                    vector_notes.append(f"vector: {vector_note}")
             else:
-                # scale similarity so it competes/blends with BM25.
-                contribution = (sim ** 2) * _vector_sim_scale()
-            hybrid_scores[key] = hybrid_scores.get(key, 0.0) + contribution
-            vector_ranked.append(key)
-    else:
-        vector_notes.append(embedding_error or "query embedding unavailable")
+                vector_results, vector_error = _get_vector_search_results(query_vector, limit=_candidate_depth())
+            if vector_error:
+                vector_notes.append(vector_error)
+            elif not vector_results and not vector_note:
+                vector_notes.append(
+                    'Page vector path had no eligible matches; chunk path evaluated separately' if use_chunks else
+                    "no stored vectors matched; run `embedding-backfill --apply` to (re)build the vector projection"
+                )
+            # ``_get_vector_search_results`` inserts in ascending distance, so enumeration order is
+            # the vector ranking that RRF needs.
+            for position, (key, sim) in enumerate(vector_results.items()):
+                if fusion_mode == "rrf":
+                    contribution = 1.0 / (RRF_K + position + 1)
+                else:
+                    # scale similarity so it competes/blends with BM25.
+                    contribution = (sim ** 2) * _vector_sim_scale()
+                hybrid_scores[key] = hybrid_scores.get(key, 0.0) + contribution
+                vector_ranked.append(key)
+        else:
+            vector_notes.append(embedding_error or "query embedding unavailable")
+    except runtime.RetrievalBudgetExceeded as exc:
+        vector_notes.append(runtime.failed_stage('Vector retrieval', exc) + '; lexical path retained')
 
     _mark("vector_search")
+    chunk_details = {}
+    if use_chunks:
+        try:
+            chunk_rows, chunk_notes = _scoped_chunk_candidates(
+                query, domain, cluster, include_history, query_vector, catalog, plan,
+                filter_expr=filter_expr,
+            )
+            vector_notes.extend(chunk_notes)
+            for position, row in enumerate(chunk_rows):
+                key = row['page_key']
+                hybrid_scores[key] = hybrid_scores.get(key, 0) + 1 / (RRF_K + position + 1)
+                chunk_details[key] = row
+        except (sqlite3.Error, OSError, UnicodeError, ValueError, ImportError, runtime.RetrievalBudgetExceeded) as exc:
+            vector_notes.append(runtime.failed_stage('Chunk retrieval', exc) + '; page paths retained')
+    _mark('chunks')
     fts_hits = set(fts_ranked)
     vector_hits = set(vector_ranked)
 
     # Only the keys the hybrid stage actually produced are materialised, so the
     # 7 178-node dict never has to exist in memory.
-    nodes = catalog.nodes_by_key(list(hybrid_scores))
+    nodes = dict(lexical_nodes)
+    missing = [key for key in hybrid_scores if key not in nodes]
+    if missing and not runtime.expired():
+        try:
+            nodes.update(catalog.nodes_by_key(missing))
+        except (sqlite3.Error, runtime.RetrievalBudgetExceeded) as exc:
+            vector_notes.append(runtime.failed_stage('Candidate hydration', exc) + '; completed lexical evidence retained')
 
     for key, score in hybrid_scores.items():
         node = nodes.get(key)
@@ -1523,7 +1721,12 @@ def _search_scored_pages(
             origin = "fts"
         else:
             origin = "vec"
-        node = {"_key": key, **node, "_origin": origin}
+        if key in chunk_details:
+            origin = (origin + '+chunk') if key in fts_hits or key in vector_hits else 'chunk'
+        node = {**node, "_key": key, "_origin": origin}
+        if key in chunk_details:
+            node['_chunk_source_hash'] = chunk_details[key]['source_hash']
+            node['_chunk_hits'] = chunk_details[key]['hits']
         if not _passes_filters(node, domain, cluster, include_history, filter_expr):
             continue
         if not include_history and node.get('status', '').lower() == 'decayed' and intent != 'temporal':
@@ -1536,68 +1739,72 @@ def _search_scored_pages(
 
     # P2-1: Dynamic Graph Expansion via Multi-hop PPR (Personalized PageRank)
     top_keys = {node["_key"] for _, node in scored[:5]}
-    adj = catalog.adjacency() if top_keys else None
-    if top_keys and adj:
-        # PPR parameters.  Non-seed nodes must still receive teleportation mass,
-        # otherwise the walk collapses to "adjacent to a seed" after two steps.
-        seed_keys = set(top_keys)
-        existing_keys = {node["_key"] for _, node in scored}
-        expansion_limit = 12 if intent == "entity" else 5
+    try:
+        adj = catalog.adjacency() if top_keys and not runtime.expired() else None
+        if top_keys and adj:
+            # PPR parameters.  Non-seed nodes must still receive teleportation mass,
+            # otherwise the walk collapses to "adjacent to a seed" after two steps.
+            seed_keys = set(top_keys)
+            existing_keys = {node["_key"] for _, node in scored}
+            expansion_limit = 12 if intent == "entity" else 5
 
-        if HAVE_CORE and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
-            # The same walk on a prebuilt index.  Measured 31.9 -> 1.5 ms per query (20.7x) and
-            # verified bit-identical on 16 edge cases plus the live graph: the legacy call pays for
-            # moving the 39 382-edge dict into Rust and cloning ~150k strings per call, which the
-            # index does once (27.9 ms) per graph generation.
-            from vector_lake import page_index_projection as _pip
+            if HAVE_CORE and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
+                # The same walk on a prebuilt index.  Measured 31.9 -> 1.5 ms per query (20.7x) and
+                # verified bit-identical on 16 edge cases plus the live graph: the legacy call pays for
+                # moving the 39 382-edge dict into Rust and cloning ~150k strings per call, which the
+                # index does once (27.9 ms) per graph generation.
+                from vector_lake import page_index_projection as _pip
 
-            sorted_ppr = vector_lake_core.prepared_personalized_pagerank(
-                _ppr_index(adj, _pip.adjacency_generation()), list(seed_keys), 0.85, 2
-            )
-        elif HAVE_CORE:
-            sorted_ppr = vector_lake_core.fast_personalized_pagerank(adj, list(seed_keys), 0.85, 2)
-        else:
-            alpha = 0.85
-            restart_mass = (1 - alpha) / len(top_keys)
-            ppr_scores = {k: 1.0 / len(top_keys) for k in seed_keys}
-
-            for _ in range(2):
-                next_scores = {k: restart_mass if k in seed_keys else 0.0 for k in adj}
-                for node, current_score in ppr_scores.items():
-                    neighbors = adj.get(node, [])
-                    if neighbors:
-                        total_weight = sum(w for _, w in neighbors)
-                        if total_weight <= 0:
-                            continue
-                        for neighbor, w in neighbors:
-                            next_scores[neighbor] = next_scores.get(neighbor, 0.0) + alpha * current_score * (w / total_weight)
-                ppr_scores = next_scores
-
-            sorted_expansions = sorted(
-                [(k, v) for k, v in ppr_scores.items() if k not in existing_keys and v > 0.0],
-                key=lambda x: x[1], 
-                reverse=True
-            )
-        if HAVE_CORE:
-            # VL-S02: graph-wide zero entries are not reachable candidates. In RRF a zero
-            # would otherwise become a positive vote merely because it has a list position.
-            sorted_expansions = [(k, v) for k, v in sorted_ppr if k not in existing_keys and v > 0.0]
-
-        expansions = _filtered_graph_expansions(
-            sorted_expansions, catalog, expansion_limit, domain, cluster, include_history, filter_expr,
-        )
-        for expansion_rank, (expanded_key, ppr_weight, expanded_node) in enumerate(expansions):
-            if fusion_mode == "rrf":
-                # The expansion ordering is a third *ranked list*, expressed in the same units as
-                # the fused ones.  Scaling it by 15 instead put it in the space the other two no
-                # longer use after RRF: at sum-fusion ``ppr_weight * 15`` is about 0.45 against
-                # BM25 magnitudes, but against RRF's ~0.015 it dominated -- measured 40 queries with
-                # real embeddings, expansion's share of returned pages went 2/200 to 156/200 and
-                # recall@5 fell 0.75 to 0.33.  One list, one vote, or the stages are not comparable.
-                expansion_score = 1.0 / (RRF_K + expansion_rank + 1)
+                sorted_ppr = vector_lake_core.prepared_personalized_pagerank(
+                    _ppr_index(adj, _pip.adjacency_generation()), list(seed_keys), 0.85, 2
+                )
+            elif HAVE_CORE:
+                sorted_ppr = vector_lake_core.fast_personalized_pagerank(adj, list(seed_keys), 0.85, 2)
             else:
-                expansion_score = ppr_weight * 15.0
-            scored.append((expansion_score, {"_key": expanded_key, **expanded_node, "_origin": "ppr"}))
+                alpha = 0.85
+                restart_mass = (1 - alpha) / len(top_keys)
+                ppr_scores = {k: 1.0 / len(top_keys) for k in seed_keys}
+
+                for _ in range(2):
+                    next_scores = {k: restart_mass if k in seed_keys else 0.0 for k in adj}
+                    for node, current_score in ppr_scores.items():
+                        neighbors = adj.get(node, [])
+                        if neighbors:
+                            total_weight = sum(w for _, w in neighbors)
+                            if total_weight <= 0:
+                                continue
+                            for neighbor, w in neighbors:
+                                next_scores[neighbor] = next_scores.get(neighbor, 0.0) + alpha * current_score * (w / total_weight)
+                    ppr_scores = next_scores
+
+                sorted_expansions = sorted(
+                    [(k, v) for k, v in ppr_scores.items() if k not in existing_keys and v > 0.0],
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+            if HAVE_CORE:
+                # VL-S02: graph-wide zero entries are not reachable candidates. In RRF a zero
+                # would otherwise become a positive vote merely because it has a list position.
+                sorted_expansions = [(k, v) for k, v in sorted_ppr if k not in existing_keys and v > 0.0]
+
+            expansions = _filtered_graph_expansions(
+                sorted_expansions, catalog, expansion_limit, domain, cluster, include_history, filter_expr,
+            )
+            for expansion_rank, (expanded_key, ppr_weight, expanded_node) in enumerate(expansions):
+                if fusion_mode == "rrf":
+                    # The expansion ordering is a third *ranked list*, expressed in the same units as
+                    # the fused ones.  Scaling it by 15 instead put it in the space the other two no
+                    # longer use after RRF: at sum-fusion ``ppr_weight * 15`` is about 0.45 against
+                    # BM25 magnitudes, but against RRF's ~0.015 it dominated -- measured 40 queries with
+                    # real embeddings, expansion's share of returned pages went 2/200 to 156/200 and
+                    # recall@5 fell 0.75 to 0.33.  One list, one vote, or the stages are not comparable.
+                    expansion_score = 1.0 / (RRF_K + expansion_rank + 1)
+                else:
+                    expansion_score = ppr_weight * 15.0
+                scored.append((expansion_score, {**expanded_node, "_key": expanded_key, "_origin": "ppr"}))
+
+    except Exception as exc:
+        vector_notes.append(runtime.failed_stage('PPR', exc))
 
     scored.sort(key=lambda item: item[0], reverse=True)
 
@@ -1606,7 +1813,7 @@ def _search_scored_pages(
     # Phase 1: Expand candidate pool for reranking.  Pool size is fixed, so the reranker's
     # pool-local min-max normalisation no longer depends on how many answers the caller asked for.
     pool_size = _candidate_pool()
-    max_sources_pool = int(pool_size * 0.6)
+    max_sources_pool = int(pool_size * 0.6) if plan.profile == 'legacy' else pool_size
     expansion_quota = _expansion_quota(pool_size)
     source_budget = [0]
 
@@ -1645,14 +1852,17 @@ def _search_scored_pages(
 
     # Phase 2: Local deterministic ranking. Text-model reranking is delegated
     # to the host agent when explicitly requested, not performed by runtime code.
+    _LAST_RERANK_NOTE.message = None
     reranked = _rerank_candidates_locally(query, candidate_pool)
+    if _LAST_RERANK_NOTE.message:
+        vector_notes.append(_LAST_RERANK_NOTE.message)
     _mark("rerank")
 
     # Phase 3: Final top_k extraction.  Sources are demoted, not counted: a fixed multiplicative
     # penalty keeps the ordering a function of the pool (so top-k remains a pure window) and keeps
     # every eligible page in the ranking, while still making an all-Source answer hard to produce.
     # The absolute cap this replaces shortened the window for 104 of 333 queries at top_k=20.
-    penalty = _source_rank_penalty()
+    penalty = _source_rank_penalty() if plan.profile == 'legacy' else 1.0
     penalised = [
         (score * penalty if node.get("type", "").lower() == "source" else score, node)
         for score, node in reranked
@@ -1661,7 +1871,7 @@ def _search_scored_pages(
     # the same reason the entity tier had to move -- the sort below reads scores, so anything that
     # only reorders is discarded.  Authorship is not in the text: 131 of the 149 pages written from
     # raw/article never name the author, so "what did he say about X" cannot find them by words.
-    author_mode = author_facet.author_facet_mode()
+    author_mode = author_facet.author_facet_mode() if plan.profile == 'legacy' else ('boost' if plan.profile == 'author' else 'off')
     if author_mode != "off":
         author_keys = author_facet.author_page_keys()
         if author_keys:
@@ -1693,14 +1903,21 @@ def _search_scored_pages(
     # The entity tier belongs *here*, at the final ordering: the sort below is by score, so a tier
     # expressed inside the reranker (which only reorders, it does not rescore) was overwritten by
     # this very statement -- measured, the switch changed no rank at all.
-    final_scored = _entity_first_order(query, penalised)[:top_k]
+    final_scored = (_entity_first_order(query, penalised) if plan.profile == 'legacy' else plan.order(penalised))[:top_k]
+    if plan.event_year:
+        unverified = sum(plan.year_status(node) == 'unverified' for _, node in final_scored)
+        if unverified:
+            vector_notes.append(f'Event year unverified for {unverified} candidate(s); inspect the source before claiming an exact event match')
     _mark("final_order")
 
     if projection_note:
         vector_notes.append(projection_note)
+    if runtime.expired():
+        vector_notes.append('Request deadline budget exhausted; partial paths retained')
     _record(
         [
-            {"key": node["_key"], "origin": node.get("_origin", "?"), "score": round(score, 6)}
+            {"key": node["_key"], "origin": node.get("_origin", "?"), "score": round(score, 6),
+             **({'chunk_source_hash': node['_chunk_source_hash']} if node.get('_chunk_source_hash') else {})}
             for score, node in final_scored
         ],
         vector_notes,
@@ -1720,7 +1937,7 @@ def _relevant_excerpt(content: str, query: str, limit: int = 2500) -> tuple[str,
     path: list[str] = []
     for index, heading in enumerate(headings):
         level = len(heading.group(1))
-        path = path[:level - 1] + [heading.group(2).strip()]
+        path = path[:level - 1] + [heading.group(2).strip()[:512]]
         end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
         sections.append((heading.start(), end, " > ".join(path)))
     if not sections or sections[0][0] > 0:
@@ -1742,12 +1959,117 @@ def _relevant_excerpt(content: str, query: str, limit: int = 2500) -> tuple[str,
             if score > best[0]:
                 best = (score, position, min(end, position + limit), heading)
     _, start, end, heading = best
-    line = content.count("\n", 0, offset + start) + 1
-    return body[start:end].strip(), f"L{line}" + (f" ({heading})" if heading else "")
+    line = len(re.findall(r'\r\n|\r|\n', content[:offset + start])) + 1
+    return body[start:end].strip(), f"L{line}" + (f" ({heading[:1024]})" if heading else "")
 
 
-def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain: str = None, cluster: str = None, include_history: bool = False, mode: str = "page", filter_expr: str = None):
+def _evidence_excerpts(content: str, query: str, limit: int = 2500) -> tuple[str, str]:
+    """Keep opposing aspects in separate source windows without changing page membership."""
+    lower = query.lower()
+    positive = ('优势', '优点', 'strength', 'advantage')
+    negative = ('不足', '缺点', '风险', '局限', 'weakness', 'limitation', 'shortcoming')
+    if limit < 400 or not (any(t in lower for t in positive) and any(t in lower for t in negative)):
+        return _relevant_excerpt(content, query, limit)
+    per_window = (limit - 200) // 2
+    windows = [_relevant_excerpt(content, ' '.join(aspect), per_window)
+               for aspect in (positive, negative)]
+    if windows[0][1] == windows[1][1] or windows[0][0] == windows[1][0]:
+        return _relevant_excerpt(content, query, limit)
+    text = '\n\n'.join(f'[Source excerpt: {locator}]\n{snippet}' for snippet, locator in windows)
+    if len(text) > limit:
+        return _relevant_excerpt(content, query, limit)
+    return text, '; '.join(locator for _, locator in windows)
+
+
+def _evidence_for_node(content: str, query: str, node: dict):
+    readable = content.replace('\r\n', '\n').replace('\r', '\n').lstrip('\ufeff')
+    snippet, locator = _evidence_excerpts(readable, query)
+    expected = node.get('_chunk_source_hash')
+    if not expected:
+        return snippet, locator, None
+    from vector_lake.chunk_index import content_hash
+    digest = content_hash(content)
+    if digest != expected:
+        return '', f'L1 @sha256:{digest}', 'Source changed since chunk recall; chunk evidence withheld'
+    hits = node.get('_chunk_hits') or []
+    if not hits or '; ' in locator:
+        return snippet, locator + f' @sha256:{digest}', None
+    # Re-locate each fragment inside its recorded line span in the actual current file.
+    # Never quote stored chunk text merely because an index row claims a source hash.
+    from bisect import bisect_right
+    lines = content.splitlines(keepends=True)
+    floor = 0
+    if lines and lines[0].lstrip('\ufeff').strip() == '---':
+        floor = next((i + 1 for i in range(1, len(lines)) if lines[i].strip() == '---'), len(lines))
+    breaks = [m.end() for m in re.finditer(r'\r\n|\r|\n', content)]
+    windows, locations, seen = [], [], set()
+    used = 0
+    invalid_span = False
+    for hit in hits[:3]:
+        try:
+            if not isinstance(hit, dict) or type(hit.get('start_line')) is not int or type(hit.get('end_line')) is not int:
+                raise ValueError('Invalid chunk span type')
+            start, end = hit['start_line'] - 1, hit['end_line']
+            fragment = hit['text']
+            if not isinstance(fragment, str) or not fragment or start < floor or not start < end <= len(lines):
+                raise ValueError('Invalid chunk span range')
+        except (KeyError, TypeError, ValueError):
+            invalid_span = True
+            continue
+        area = ''.join(lines[start:end])
+        position = area.find(fragment)
+        if position < 0:
+            invalid_span = True
+            continue
+        if fragment in seen:
+            continue
+        seen.add(fragment)
+        offset = sum(len(line) for line in lines[:start]) + position
+        first_line = bisect_right(breaks, offset) + 1
+        last_line = bisect_right(breaks, offset + len(fragment) - 1) + 1
+        location = f'L{first_line}-L{last_line}'
+        actual = area[position:position + len(fragment)].replace('\r\n', '\n').replace('\r', '\n')
+        block = f'[Chunk source: {location}]\n{actual}'
+        if used + len(block) + 2 > 2500:
+            break
+        windows.append(block)
+        locations.append(location)
+        used += len(block) + 2
+    if windows:
+        warning = 'Some chunk spans could not be revalidated' if invalid_span else None
+        return '\n\n'.join(windows), '; '.join(locations) + f' @sha256:{digest}', warning
+    return snippet, locator + f' @sha256:{digest}', 'Chunk span could not be revalidated; current source window used'
+
+
+def split_retrieval_notes(notes: list[str]) -> tuple[list[str], list[str]]:
+    """Separate known ranking-policy information; unfamiliar notes remain degradations."""
+    information, degradations = [], []
+    for note in notes:
+        if note.startswith(("VECTOR_LAKE_AUTHOR_FACET=boost:", "VECTOR_LAKE_AUTHOR_FACET=filter:",
+                            "External embedding disabled by request policy", "Retrieval profile:",
+                            "Chunk fusion:", "Chunk candidates excluded by current source metadata:",
+                            "Event year unverified", "Event query constraints:",
+                            "Page vector path had no eligible matches; chunk path evaluated separately")) or re.match(
+            r"^(?:FTS|vector): \d+ ranked candidate\(s\) matched but none passed the domain/cluster/history/filter selectors ", note
+        ):
+            information.append(note)
+        else:
+            degradations.append(note)
+    return information, degradations
+
+
+@runtime.request_entry
+def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain: str | None = None, cluster: str | None = None, include_history: bool = False, mode: str = "page", filter_expr: str | None = None, allow_external_embedding: bool = False, profile: str = 'auto', use_chunks: bool = False):
+    if top_k <= 0:
+        raise ValueError('top_k must be positive')
+    from vector_lake.retrieval_plan import PROFILES
+    if profile not in PROFILES:
+        raise ValueError('Unknown retrieval profile')
     normalized_mode = str(mode or "page").lower()
+    if normalized_mode != 'page' and (use_chunks or profile not in {'auto', 'legacy'}):
+        raise ValueError('Profiles and chunk retrieval apply to page mode only')
+    if normalized_mode not in {"page", "memory", "operational-memory", "operational_memory", "claim", "claims"}:
+        raise ValueError('mode must be page, memory or claim')
     if normalized_mode in {"memory", "operational-memory", "operational_memory"}:
         return format_operational_memory_results(query, top_k=top_k, as_xml=as_xml, include_history=include_history, domain=domain, cluster=cluster)
     if normalized_mode in {"claim", "claims"}:
@@ -1761,28 +2083,41 @@ def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain:
         cluster=cluster,
         include_history=include_history,
         filter_expr=filter_expr,
+        allow_external_embedding=allow_external_embedding,
+        profile=profile, use_chunks=use_chunks,
     )
     if error:
         return error
 
     result = ""
     page_notes = []
-    if vector_notes:
-        result += "[DEGRADED] Retrieval notes: " + "; ".join(vector_notes) + "\n\n"
+    information, degradations = split_retrieval_notes(vector_notes)
+    for label, notes in (("DEGRADED", degradations), ("INFO", information)):
+        if notes:
+            result += f"[{label}] Retrieval notes: " + "; ".join(notes) + "\n\n"
     if not final_scored:
+        if degradations:
+            return result + '[STATUS] failed\nRetrieval failed; no absence conclusion is available.'
         return result + "No matching pages."
+    state = runtime.current()
+    if state is not None:
+        state.emitted_keys = set()
     for index, (score, node) in enumerate(final_scored):
         filepath = os.path.join(wiki_dir, f"{node['_key']}.md")
         snippet = ""
         locator = "summary"
         if os.path.exists(filepath):
             try:
-                with open(filepath, "r", encoding="utf-8") as handle:
-                    snippet, locator = _relevant_excerpt(handle.read(), query)
-            except (OSError, UnicodeDecodeError) as exc:
-                snippet = str(node.get("summary") or "")
+                content = runtime.read_source(Path(filepath), root=Path(wiki_dir))
+                snippet, locator, source_note = _evidence_for_node(content, query, node)
+                if source_note:
+                    page_notes.append(f"{node['_key']}.md: {source_note}")
+                    if state is not None:
+                        state.problem(source_note)
+            except (OSError, UnicodeError, ValueError, runtime.RetrievalBudgetExceeded) as exc:
+                snippet = str(node.get("summary") or "")[:2500]
                 locator = "index-summary"
-                page_notes.append(f"{node['_key']}.md: {type(exc).__name__}; original page text unavailable")
+                page_notes.append(f"{node['_key']}.md: {runtime.failed_stage('Source evidence', exc)}; original page text unavailable")
         else:
             snippet = str(node.get("summary") or "")
             
@@ -1790,22 +2125,35 @@ def search_vector_lake(query: str, top_k: int = 5, as_xml: bool = False, domain:
         tension_info = ""
         if tension_edges:
             tension_info = "  [Tension Edges]:\n"
-            for te in tension_edges:
-                tension_info += f"    -> {te.get('target')} (Polarity: {te.get('polarity')}, Intensity: {te.get('intensity')}): {te.get('context')}\n"
+            for te in tension_edges[:12]:
+                tension_info += f"    -> {str(te.get('target'))[:160]} (Polarity: {te.get('polarity')}, Intensity: {te.get('intensity')}): {str(te.get('context'))[:256]}\n"
                 
         if as_xml:
-            result += (f"<Evidence_Node ID='Wiki_{index}' "
+            block = (f"<Evidence_Node ID='Wiki_{index}' "
                        f"Source='{escape(node['_key'], quote=True)}.md' "
                        f"Locator='{escape(locator, quote=True)}'>\n"
                        f"{escape(tension_info + snippet)}\n</Evidence_Node>\n")
         else:
-            result += f"- **{node.get('title', node['_key'])}** (score: {score:.3f}) [source: {node['_key']}.md:{locator}]\n{tension_info}  {snippet}...\n\n"
+            block = f"- **{str(node.get('title', node['_key']))[:512]}** (score: {score:.3f}) [source: {node['_key']}.md:{locator}]\n{tension_info}  {snippet}...\n\n"
+        if len(result) + len(block) > runtime.MAX_CONTEXT_CHARS - 2000:
+            if state is not None:
+                state.problem('Response character budget exhausted')
+            page_notes.append('Response character budget exhausted')
+            break
+        result += block
+        if state is not None and state.emitted_keys is not None:
+            state.emitted_keys.add(node['_key'])
     if page_notes:
         result = "[DEGRADED] Source text notes: " + "; ".join(page_notes) + "\n\n" + result
     return result
 
 
-def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
+@runtime.request_entry
+def assemble_context(
+    query: str, max_chars: int = DEFAULT_MAX_CHARS, *, domain: str | None = None,
+    cluster: str | None = None, allow_external_embedding: bool = False,
+    profile: str = 'legacy', use_chunks: bool = False,
+) -> dict:
     """Assemble a budget-bounded reasoning context for a query.
 
     Pages come from ``_search_scored_pages`` directly.  This function previously
@@ -1831,20 +2179,33 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
     # budget is used in each branch) and pays the second retrieval in the rare case instead.
     nominal_budget = int(max_chars * BUDGET_SHARES["operational_memory"])
     burst_budget = int(max_chars * BUDGET_SHARES["memory_burst"])
-    memory_packet = build_memory_packet(
-        query, max_chars=burst_budget if burst_budget > nominal_budget else nominal_budget
-    )
-    if not memory_packet["warning_count"] and burst_budget > nominal_budget:
-        memory_packet = build_memory_packet(query, max_chars=nominal_budget)
+    scope = {"domain": domain, "cluster": cluster} if domain or cluster else {}
+    memory_notes = []
+    try:
+        runtime.checkpoint()
+        request_views = governance_store.search_memory_packet_views(query, domain=domain, cluster=cluster) if scope else None
+        packet_options = {**scope, "_views": request_views} if scope else {}
+        memory_packet = build_memory_packet(
+            query, max_chars=burst_budget if burst_budget > nominal_budget else nominal_budget,
+            **packet_options,
+        )
+        if not memory_packet["warning_count"] and burst_budget > nominal_budget:
+            memory_packet = build_memory_packet(query, max_chars=nominal_budget, **packet_options)
+    except Exception as exc:
+        message = runtime.failed_stage('Memory', exc)
+        memory_notes.append(message)
+        packet = '<MEMORY_PACKET>\n[DEGRADED] ' + message + '\n</MEMORY_PACKET>'
+        memory_packet = {'packet': packet if len(packet) <= nominal_budget else '', 'memory_count': 0,
+                         'warning_count': 0, 'omitted_count': 0, 'is_degraded': True}
     actual_memory_used = len(memory_packet["packet"])
 
     purpose = ""
     try:
         from vector_lake.purpose_contract import render_strategy_directive
 
-        purpose = render_strategy_directive()
+        purpose = render_strategy_directive() if not scope else ""
     except Exception as exc:
-        log.warning("Strategy directive unavailable for context assembly: %s", exc)
+        log.warning("Strategy directive unavailable for context assembly: %s", runtime.safe_error(exc))
     purpose_budget = int(max_chars * BUDGET_SHARES["system_prompt"])
     purpose = purpose[:purpose_budget]
 
@@ -1854,8 +2215,11 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
     # index.json at most once even when the projection is behind.
     catalog, projection_note = page_index_projection.read_catalog()
     scored_pages, vector_notes, retrieval_error = _search_scored_pages(
-        query, top_k=15, catalog=catalog, projection_note=projection_note
+        query, top_k=15, catalog=catalog, projection_note=projection_note,
+        domain=domain, cluster=cluster, allow_external_embedding=allow_external_embedding,
+        profile=profile, use_chunks=use_chunks,
     )
+    vector_notes.extend(memory_notes)
 
     # The index summary is materialised *before* the wiki budget so the wiki gets whatever the
     # summary did not use.  Charging the wiki budget for the index's *allocation* rather than its
@@ -1866,14 +2230,21 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
             if catalog is None:
                 index_summary = "[Index read failed]"
             else:
-                index_summary = "\n".join(catalog.node_summary_lines(50))[:index_budget]
+                if scope:
+                    index_summary = "\n".join(
+                        f"[{node.get('type') or '?'}] {node.get('title') or node['_key']}"
+                        for _, node in scored_pages
+                        if _passes_filters(node, domain, cluster, False, None)
+                    )[:index_budget]
+                else:
+                    index_summary = "\n".join(catalog.node_summary_lines(50))[:index_budget]
                 # The projection note is not appended here: ``_search_scored_pages`` already
                 # returned it in ``vector_notes`` from the same ``projection_note`` this function
                 # handed it, and appending it a second time made every degraded answer report the
                 # same fallback twice.
         except Exception as exc:
             index_summary = "[Index read failed]"
-            log.error("Index summary unavailable: %s", exc)
+            log.error("Index summary unavailable: %s", runtime.safe_error(exc))
 
     # Wiki dynamically eats what memory, the index summary and the purpose left.
     wiki_budget = max(0, max_chars - actual_memory_used - len(index_summary) - len(purpose))
@@ -1883,31 +2254,47 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
     page_notes = []
     wiki_used = 0
     page_count = 0
-    author_keys = author_facet.author_page_keys() if author_facet.annotate_enabled() else frozenset()
+    wiki_spans = []
+    author_keys = author_facet.author_page_keys() if author_facet.annotate_enabled() and not runtime.expired() else frozenset()
+    state = runtime.current()
+    if state is not None:
+        state.emitted_keys = set()
     for score, node in scored_pages:
+        if wiki_used >= wiki_budget:
+            break
         key = node["_key"]
         filepath = os.path.join(wiki_dir, f"{key}.md")
         snippet = ""
         locator = "summary"
-        try:
-            with open(filepath, "r", encoding="utf-8") as handle:
-                snippet, locator = _relevant_excerpt(handle.read(), query)
-        except UnicodeDecodeError as exc:
-            snippet = str(node.get("summary") or "")[:2500]
-            locator = "index-summary"
-            page_notes.append(f"{key}.md: {type(exc).__name__}; original page text unavailable")
-        except OSError:
-            snippet = str(node.get("summary") or "")[:2500]
+        if runtime.expired():
+            snippet = str(node.get('summary') or '')[:2500]
+            locator = 'index-summary'
+            page_notes.append(f'{key}.md: request deadline exhausted; retained metadata summary only, no new source read')
+        else:
+            try:
+                content = runtime.read_source(Path(filepath), root=Path(wiki_dir))
+                snippet, locator, source_note = _evidence_for_node(content, query, node)
+                if source_note:
+                    page_notes.append(f'{key}.md: {source_note}')
+                    if state is not None:
+                        state.problem(source_note)
+            except (OSError, UnicodeError, ValueError, runtime.RetrievalBudgetExceeded) as exc:
+                snippet = str(node.get("summary") or "")[:2500]
+                locator = 'index-summary'
+                page_notes.append(f'{key}.md: {runtime.failed_stage("Source evidence", exc)}; original page text unavailable')
         # An authorship marker, never a filter: the reader can tell the author's own writing from
         # writing about him, which no amount of page text says (131 of 149 author pages never name
         # him).  It does not change which pages are retrieved.
         marker = " `[author]`" if key in author_keys else ""
-        block = f"- **{node.get('title', key)}**{marker} (score: {score:.3f}; source: {key}.md:{locator})\n  {snippet}\n\n"
+        block = f"- **{str(node.get('title', key))[:512]}**{marker} (score: {score:.3f}; source: {key}.md:{locator})\n  {snippet}\n\n"
         if wiki_used + len(block) > wiki_budget:
             break
+        wiki_spans.append((key, wiki_used))
         wiki_blocks.append(block)
         wiki_used += len(block)
         page_count += 1
+        if state is not None and state.emitted_keys is not None:
+            state.emitted_keys.add(key)
     wiki_context = "".join(wiki_blocks)
 
     # ``purpose`` is the last claimant on the budget and must not overflow it.  It was already
@@ -1923,6 +2310,7 @@ def assemble_context(query: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict:
         "memory_omitted_count": memory_packet["omitted_count"],
         "wiki_context": wiki_context,
         "wiki_page_count": page_count,
+        "_wiki_spans": wiki_spans,
         "index_summary": index_summary,
         "purpose": purpose,
         "retrieval_notes": list(vector_notes or []) + page_notes + ([retrieval_error] if retrieval_error else []),

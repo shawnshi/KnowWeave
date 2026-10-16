@@ -39,14 +39,14 @@ $env:PYTHONUTF8='1'; python -m pytest -p no:cacheprovider -q tests/test_command_
 完整测试与实例运行检查（`doctor`、`search`、`debt` 面向当前配置的知识库，不是隔离测试）：
 
 ```powershell
-$env:PYTHONUTF8='1'; python -m pytest -p no:cacheprovider -q      # pytest.ini 仅发现 tests/；与 CI 一致
+$env:PYTHONUTF8='1'; python -m pytest -p no:cacheprovider -q      # pytest.ini 仅发现 tests/；CI 核心后端使用独立固定清单
 $env:PYTHONUTF8='1'; python -m compileall -q vector_lake tests
 $env:PYTHONUTF8='1'; python cli.py doctor
-$env:PYTHONUTF8='1'; python cli.py search "<keyword>" --mode memory --top_k 3
+$env:PYTHONUTF8='1'; python cli.py search "<keyword>" --domain General --mode memory --top_k 3
 $env:PYTHONUTF8='1'; python cli.py debt --top 1
 ```
 
-测试数量、语料规模和运行时健康度会随实例变化，应执行当前验证命令。历史变更和评测记录见 CHANGELOG 与 Git 历史，不作为当前健康度或质量保证。
+检索示例中的 `General` 是实际类别，不代表全域；执行前须按任务授权选择明确域，不能省略 `--domain`。测试数量、语料规模和运行时健康度会随实例变化，应执行当前验证命令。历史变更和评测记录见 CHANGELOG 与 Git 历史，不作为当前健康度或质量保证。
 
 
 [原生 wheel 构建与分发边界](NATIVE_WHEELS.md)；[目标平台与执行证据边界](PLATFORM_SUPPORT.md)。

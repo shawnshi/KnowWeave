@@ -48,15 +48,17 @@ def test_the_mcp_query_tool_forwards_the_documented_dry_run_switch(monkeypatch):
 
     seen = []
 
-    def fake(query_str, dry_run=False):
-        seen.append((query_str, dry_run))
+    def fake(query_str, dry_run=False, **scope):
+        seen.append((query_str, dry_run, scope))
         return "rendered"
 
     monkeypatch.setattr(mcp_server.tools, "prepare_query_context", fake)
 
-    assert mcp_server.query_logic_lake("q") == "rendered"
-    assert mcp_server.query_logic_lake("q", dry_run=True) == "rendered"
-    assert seen == [("q", False), ("q", True)], seen
+    assert mcp_server.query_logic_lake("q", domain="Medical_IT") == "rendered"
+    assert mcp_server.query_logic_lake("q", dry_run=True, domain="Medical_IT") == "rendered"
+    scope = {"domain": "Medical_IT", "cluster": None, "allow_external_embedding": False,
+             "profile": "auto", "use_chunks": False}
+    assert seen == [("q", False, scope), ("q", True, scope)], seen
 
 
 def test_host_mcp_manifests_are_identical():
@@ -134,11 +136,11 @@ def test_mcp_server_registers_its_tool_surface():
     assert "runtime_identity" in names
 
 
-def test_readme_maintenance_examples_match_parser_and_bind_approval():
+def test_operations_maintenance_examples_match_parser_and_bind_approval():
     from scripts import repair_orphan_memory
 
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    commands = [line for line in readme.splitlines() if line.startswith("python scripts/repair_orphan_memory.py ")]
+    operations = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+    commands = [line for line in operations.splitlines() if line.startswith("python scripts/repair_orphan_memory.py ")]
     assert len(commands) == 5
     parser_source = inspect.getsource(repair_orphan_memory.main)
     documented_modes = set()
@@ -164,7 +166,8 @@ def test_readme_json_examples_are_parseable_and_use_the_published_module():
     assert len(configs) == 1
     entry = configs[0]["mcpServers"][EXPECTED_MCP_SERVER]
     assert entry["args"] == ["-m", "vector_lake.mcp_server"]
-    assert entry["env"]["PYTHONPATH"] == "C:/path/to/vector-lake"
+    assert entry["env"]["PYTHONPATH"] == "C:/path/to/KnowWeave"
+    assert entry["command"] == "C:/path/to/KnowWeave/.venv/Scripts/python.exe"
     assert "GEMINI_API_KEY" not in entry["env"]
 
 
@@ -186,7 +189,8 @@ def test_readme_cli_examples_parse_without_running_commands():
     parser = build_parser()
     examples = 0
     for block in re.findall(r"```(?:powershell|bash|sh)\s*\n(.*?)```", readme, re.DOTALL):
-        assert r"\_" not in block, "Markdown escapes inside code break copy/paste"
+        for escaped in (r"\_", r"\[", r"\]", r"\*"):
+            assert escaped not in block, "Markdown escapes inside code break copy/paste"
         for line in block.splitlines():
             command = line.strip()
             if command.startswith("python cli.py "):
@@ -194,3 +198,76 @@ def test_readme_cli_examples_parse_without_running_commands():
                 parser.parse_args(tokens[2:])
                 examples += 1
     assert examples >= 20, "the operational CLI examples must remain covered"
+
+
+def test_documented_source_paths_keep_the_python_package_name():
+    for name in ("README.md", "CONTEXT.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "`KnowWeave/" not in text, "Repository rename must not rename Python source paths"
+        paths = re.findall(r"`(vector_lake/[a-z_]+\.py)`", text)
+        assert paths, f"{name} must document the Python source entry points"
+        for path in paths:
+            assert (ROOT / path).is_file(), f"{name} references missing source {path}"
+
+
+def test_documented_deployment_roots_use_the_repository_name():
+    for name in ("README.md", "docs/CONFIGURATION.md", "docs/OPERATIONS.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "C:/path/to/vector-lake" not in text
+        assert "C:/path/to/KnowWeave" in text
+
+
+def _documented_skill_arguments(name):
+    text = (ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```json\s*\n(.*?)```", text, re.DOTALL)
+    assert len(blocks) == 1, "A copyable scoped MCP argument example is required"
+    arguments = json.loads(blocks[0])
+    assert arguments["domain"] == "<authorized-domain>"
+    assert arguments["allow_external_embedding"] is False
+    assert arguments["profile"] == "auto"
+    assert "General" in text and "授权" in text
+    assert "<thought>" not in text
+    return arguments
+
+
+def test_query_skill_requires_explicit_authorized_domain():
+    arguments = _documented_skill_arguments("vector-lake-query")
+    assert arguments["query_str"] == "<task-query>"
+
+
+def test_search_skill_requires_explicit_authorized_domain():
+    arguments = _documented_skill_arguments("vector-lake-search")
+    assert arguments["query"] == "<task-query>"
+    assert arguments["top_k"] == 5
+    text = (ROOT / "skills" / "vector-lake-search" / "SKILL.md").read_text(encoding="utf-8")
+    assert "(e.g. 'HIT', 'Clinical')" not in text
+
+
+def test_operations_retrieval_examples_require_domain_without_execution():
+    from vector_lake.cli_app import build_parser
+
+    text = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+    commands = re.findall(r"`(python cli.py (?:search|query) [^`]+)`", text)
+    assert len(commands) >= 2
+    parser = build_parser()
+    for command in commands:
+        tokens = shlex.split(command)
+        assert "--domain" in tokens
+        args = parser.parse_args(tokens[2:])
+        assert args.domain.strip()
+
+
+def test_all_current_entrypoint_retrieval_examples_parse_with_domain():
+    from vector_lake.cli_app import build_parser
+
+    parser = build_parser()
+    examples = 0
+    for relative in ("README.md", "CONTEXT.md", "docs/OPERATIONS.md", "docs/DEVELOPMENT.md"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        commands = re.findall(r"\bpython cli\.py (?:search|query) [^`\n]+", text)
+        for command in commands:
+            tokens = shlex.split(command)
+            assert "--domain" in tokens, relative
+            assert parser.parse_args(tokens[2:]).domain.strip()
+            examples += 1
+    assert examples >= 15

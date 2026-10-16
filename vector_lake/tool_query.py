@@ -6,8 +6,8 @@ import time
 
 from vector_lake import get_extension_root, provenance
 from vector_lake.template_loader import read_template, render_template_text
-from vector_lake.tool_search import assemble_context
-from vector_lake import stub_creator
+from vector_lake.tool_search import assemble_context, split_retrieval_notes
+from vector_lake import stub_creator, retrieval_runtime
 from vector_lake.wiki_utils import (
     get_wiki_dir,
     normalize_entity_name,
@@ -90,6 +90,9 @@ def _render_context_payload(query_str: str, context: dict) -> str:
     if max_chars <= 0:
         raise ValueError("budget_max must be positive")
     wiki = str(context.get("wiki_context") or "")
+    original_wiki = wiki
+    serialization_omissions = []
+    spans = context.get("_wiki_spans")
     index = str(context.get("index_summary") or "")
     purpose = str(context.get("purpose") or "")
     notes = [str(note) for note in (context.get("retrieval_notes") or []) if note]
@@ -108,14 +111,19 @@ def _render_context_payload(query_str: str, context: dict) -> str:
                 f"{context['memory_packet']}"
             )
         if wiki:
-            pages = context.get("wiki_page_count", 0) if wiki == context.get("wiki_context") else wiki.count("- **")
+            pages = (sum(0 <= start < len(wiki) for _, start in spans) if spans is not None else
+                     context.get("wiki_page_count", 0) if wiki == context.get("wiki_context") else wiki.count("- **"))
             parts.append(
                 f"\n\n--- RELEVANT WIKI PAGES ({pages} pages, {len(wiki)}/{max_chars} chars) ---\n{wiki}"
             )
         if index:
             parts.append(f"\n\n--- NODE INDEX SUMMARY ---\n{index}")
-        if notes:
-            parts.append("\n\n--- RETRIEVAL NOTES (degradations) ---\n" + "\n".join(f"- {note}" for note in notes))
+        information, degradations = split_retrieval_notes(notes)
+        for label, items in (("degradations", degradations), ("information", information)):
+            if items:
+                parts.append(
+                    f"\n\n--- RETRIEVAL NOTES ({label}) ---\n" + "\n".join(f"- {note}" for note in items)
+                )
         if purpose:
             parts.append(f"\n\n--- PURPOSE ---\n{purpose}")
         return "".join(parts)
@@ -125,13 +133,16 @@ def _render_context_payload(query_str: str, context: dict) -> str:
 
     payload = render()
     while over_budget(payload) and wiki:
-        previous = wiki.rfind("\n- **")
+        starts = [start for _, start in spans if 0 <= start < len(wiki)] if spans is not None else None
+        previous = starts[-1] if starts else wiki.rfind("\n- **")
         wiki = wiki[:previous].rstrip() if previous >= 0 else ""
         if not any("Wiki pages omitted" in note for note in notes):
             notes.append("Wiki pages omitted from serialized payload to meet the budget.")
         payload = render()
     while over_budget(payload) and index:
         index = index.rsplit("\n", 1)[0] if "\n" in index else ""
+        if not serialization_omissions:
+            serialization_omissions.append("Index summary omitted from serialized payload to meet the budget.")
         payload = render()
     if over_budget(payload) and purpose:
         purpose = ""
@@ -139,19 +150,45 @@ def _render_context_payload(query_str: str, context: dict) -> str:
         payload = render()
     if over_budget(payload):
         raise ValueError("query metadata, memory and retrieval notes exceed serialized payload budget")
+    state = retrieval_runtime.current()
+    if state is not None:
+        for note in [*notes, *serialization_omissions]:
+            if note not in (context.get("retrieval_notes") or []):
+                state.problem(note)
+        if wiki != original_wiki:
+            survivors = {key for key, start in spans if 0 <= start < len(wiki)} if spans is not None else set()
+            if state.emitted_keys is not None:
+                state.emitted_keys.intersection_update(survivors)
     return payload
 
 
-def preview_query_context(query_str: str) -> str:
+@retrieval_runtime.request_entry
+def preview_query_context(
+    query_str: str, *, domain: str | None = None, cluster: str | None = None,
+    allow_external_embedding: bool = False,
+    profile: str = 'auto', use_chunks: bool = False,
+) -> str:
     """Return a query context inline, without writing a proposal payload or Wiki page.
 
     Retrieval may record an audit-ledger event; it is not a filesystem-wide dry run.
     """
-    return _render_context_payload(query_str, assemble_context(query_str))
+    options = {"domain": domain, "cluster": cluster,
+               "allow_external_embedding": allow_external_embedding,
+               "profile": profile, "use_chunks": use_chunks} if domain or cluster else {}
+    return _render_context_payload(query_str, assemble_context(query_str, **options))
 
 
-def prepare_query_context(query_str: str, dry_run: bool = False):
-    context_block = _render_context_payload(query_str, assemble_context(query_str))
+@retrieval_runtime.request_entry
+def prepare_query_context(
+    query_str: str, dry_run: bool = False, *, domain: str | None = None,
+    cluster: str | None = None, allow_external_embedding: bool = False,
+    profile: str = 'auto', use_chunks: bool = False,
+):
+    options = {"domain": domain, "cluster": cluster,
+               "allow_external_embedding": allow_external_embedding,
+               "profile": profile, "use_chunks": use_chunks} if domain or cluster else {}
+    context = assemble_context(query_str, **options)
+    context_block = _render_context_payload(query_str, context)
 
     # The template is resolved and read *before* the payload is written.  It used to be read
     # afterwards, and a missing template merely set the template text to its own error message --
@@ -174,7 +211,10 @@ def prepare_query_context(query_str: str, dry_run: bool = False):
         f.write(context_block)
         
     if dry_run:
-        trace = provenance.format_trace(provenance.build_trace_for_query(query_str))
+        if options:
+            trace = f"Domain: {domain}; cluster: {cluster or '(any)'}\n" + str(context.get('wiki_context') or '')
+        else:
+            trace = provenance.format_trace(provenance.build_trace_for_query(query_str))
         return f"[DRY RUN] Context assembled at {payload_path}\n\nTrace:\n{trace}"
 
     # ``{{wiki_dir}}`` used to be substituted into a template that never contained it. It is

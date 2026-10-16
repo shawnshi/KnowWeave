@@ -207,7 +207,7 @@ def test_query_embedding_cache_is_bounded_and_serves_repeats(monkeypatch):
     second, error_again = tool_search._get_query_embedding("repeat me")
 
     assert error is None and error_again is None
-    assert first == second == [0.25] * 4
+    assert first == second == [0.5] * 4
     assert len(calls) == 1, "a repeat query must not hit the provider again"
 
     for index in range(tool_search.QUERY_EMBEDDING_CACHE_SIZE + 10):

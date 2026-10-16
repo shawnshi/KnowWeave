@@ -20,8 +20,10 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from filelock import FileLock
 
 from vector_lake.wiki_utils import get_runtime_tmp_dir
 
@@ -31,6 +33,12 @@ LEDGER_FILENAME = "search_ledger.jsonl"
 #: Rotate one generation aside once the live file passes this.  2 MiB holds roughly 4 000 entries
 #: at the observed line size, and the ceiling is twice that.
 MAX_BYTES = 2 * 1024 * 1024
+_WRITE_LOCK = threading.RLock()
+_SKIPPED_WRITES = 0
+
+
+def observation_status() -> dict:
+    return {'skipped_writes': _SKIPPED_WRITES}
 
 
 def ledger_path() -> Path:
@@ -67,6 +75,11 @@ def record(
     error: str | None = None,
     fusion: str | None = None,
     fts_backend: str | None = None,
+    selectors: dict | None = None,
+    index_generation: str | None = None,
+    configuration: dict | None = None,
+    timings: dict | None = None,
+    status: str | None = None,
 ) -> None:
     """Append one entry.  Never raises: a measurement must not break the thing it measures.
 
@@ -76,6 +89,7 @@ def record(
     The eval harness recorded both in its run config; production did not -- measured 2026-09-25:
     903 entries, ``fusion`` null in all of them.
     """
+    global _SKIPPED_WRITES
     if not enabled():
         return
     try:
@@ -87,6 +101,27 @@ def record(
             "q_chars": len(str(query)),
             "returned": returned,
         }
+        if status is not None:
+            if status not in {'complete', 'partial', 'failed'}:
+                raise ValueError('Invalid retrieval completion status')
+            entry['status'] = status
+        if selectors is not None:
+            entry["selectors"] = {
+                key: selectors[key] for key in ('domain', 'cluster', 'include_history', 'filter_expr_active')
+                if key in selectors
+            }
+        if index_generation is not None:
+            import hashlib
+            entry["index_generation"] = hashlib.sha256(index_generation.encode()).hexdigest()[:16]
+        if configuration is not None:
+            entry["configuration"] = {
+                key: configuration[key] for key in ('candidate_depth', 'candidate_pool', 'allow_external_embedding',
+                                                      'profile', 'use_chunks', 'event_year_requested', 'supplemental_query_count',
+                                                      'actual_vector_backends', 'actual_backends', 'source_bytes')
+                if key in configuration
+            }
+        if timings is not None:
+            entry["timings_ms"] = {str(key): round(float(value), 2) for key, value in timings.items()}
         if fusion:
             entry["fusion"] = str(fusion)
         if fts_backend:
@@ -100,11 +135,18 @@ def record(
 
         path = ledger_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        _rotate(path)
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if not _WRITE_LOCK.acquire(timeout=0.25):
+            raise TimeoutError('Ledger process writer budget exhausted')
+        try:
+            with FileLock(str(path) + '.lock', timeout=0.1):
+                _rotate(path)
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        finally:
+            _WRITE_LOCK.release()
     except Exception as exc:  # noqa: BLE001 - see the docstring
-        log.debug("search ledger write skipped: %s: %s", type(exc).__name__, exc)
+        _SKIPPED_WRITES += 1
+        log.debug("search ledger write skipped: %s", type(exc).__name__)
 
 
 def entries(limit: int = 0) -> list[dict]:

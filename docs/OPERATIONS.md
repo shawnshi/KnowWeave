@@ -84,7 +84,7 @@ Windows 常驻入口为计划任务 **`VectorLake-Watchdog`**，执行 `scripts/
 正式运行链为 `VectorLake-Watchdog → scripts/watchdog_service.ps1 → watchdog_sync.py`；`scratch/` 只承载日志、备份和临时验收制品，不应作为常驻程序入口。包装器支持 `-Python`、`-MemoryDir`、`-PayloadRoot`、`-RunnerAutostart` 和 `-CatchupIntervalSeconds`，这些参数只影响所启动的进程，不修改全局环境。部署时可在计划任务的既有 `-File scripts/watchdog_service.ps1` 动作后追加下列参数，实际目录与解释器由部署者填写，不另起第二个服务：
 
 ```text
--Python "C:/path/to/python.exe" -MemoryDir "C:/path/to/MEMORY" -PayloadRoot "C:/path/to/vector-lake/brain" -RunnerAutostart 1 -CatchupIntervalSeconds 600
+-Python "C:/path/to/python.exe" -MemoryDir "C:/path/to/MEMORY" -PayloadRoot "C:/path/to/KnowWeave/brain" -RunnerAutostart 1 -CatchupIntervalSeconds 600
 ```
 
 只启动文件监听不会自动为启动前已经存在、之后未修改的 raw 文件补队。关闭周期补扫时，这些文件可能继续没有摄取任务；需要启用周期补扫，或在明确范围授权后手动准备任务。不要通过修改原始文件来伪造新事件，也不要把重新注册任务当作保留现有参数的重启。
@@ -95,7 +95,7 @@ Windows 常驻入口为计划任务 **`VectorLake-Watchdog`**，执行 `scripts/
    自定义 `--model-cmd` 保留 shell/stdin/stdout 协议，stdout 必须只返回 `{"files_written": [{"filename": "Source_*.md", "content": "..."}], "integration": {"disposition": "integrated|standalone", "relations": [...]}}`；standalone 用 `reason`，每次成功都必须返回 canonical Source 页。纯数组或缺少集成判断会被拒绝；租约、源哈希和候选清单由宿主提供，不能由模型改写。内置后端共用结果验证、修复预算和 `finalize_ingest`，不另建发布路径。
 
    当前摄取契约版本为 `10`（`tool_ingest.INGEST_CONTRACT_VERSION`），会在认领前重建旧版 queued / failed / awaiting\_subagent 提示词，保留 queued / failed 的原有尝试次数，不改动已领取的 subagent\_processing 作业。升级前先等待在途任务完成并保留恢复点；磁盘改动不会热更新驻留进程。
-3. **检索**：`python cli.py search "<keyword>"`，或 `python cli.py query "<question>"` 走预算受控的上下文组装。
+3. **检索**：`python cli.py search "<keyword>" --domain General`，或 `python cli.py query "<question>" --domain General --dry-run` 走预算受控的上下文组装。这里的 `General` 是实际类别，不是全域；执行前须按任务授权选择正确域，不能省略。`query --dry-run` 仍会准备临时 payload，不能据此推断零写入。
 4. **摄取队列**：`python cli.py ingest-tasks` 查看 queued / awaiting\_subagent 作业；模型或 subagent 只返回包含 `files_written` 和 `integration` 的对象，宿主控制器验证后调用 `finalize_ingest` 入湖。
 5. **来源预算与历史缺页**：同一 `(路径, 内容哈希)` 反复确定性校验失败，来源预算耗尽后停止派发；模型进程退出、超时或无效交付属于后端故障，不是内容拒收，按后端暂停门处理。`python cli.py ingest-tasks --abandoned` / `--terminal-failed` 查看来源或作业预算，`--clear-abandoned [FILE]` / `--close-terminal-failed` 仅用于已授权的队列维护，不是出版凭据。已处理但缺少当前 Source 的来源，应使用 [受控重编](controlled-recompile.md)：v2 每次批准 1–60 份精确公共来源，先冻结当前哈希、大小、mtime 与旧 ledger，再校验并小批派发；私人或归属不明材料不套用公共批准。保留历史拒收与失败记录，不修改原文或台账来绕过预算。
 6. **周期治理**：`python cli.py review` 处理冲突与候选队列，`python cli.py doctor` 检查运行健康度。
@@ -126,6 +126,41 @@ Watchdog 和 Runner 更新既有遥测时附带白名单侧栏 `<meta>/runtime/{
 
 上线仍须单独核验依赖风险、不可变原生版本、代码/任务/数据库恢复点、托管进程生命周期、真实业务探针和回退。灾备以 canonical SQLite/outbox 为恢复权威；顺序复制的投影文件不能视为共同快照，应隔离旧消费者与租约后重建并验证。计划任务中的 RestartOnFailure 配置不等于实际退出码触发重启的验收证据。
 
+
+## 历史孤儿记忆的定向维护
+
+正常页面删除会在同一 native SQLite 事务中，先删除引用所选 claim 的运行态记忆，再删除 claim；lookup 行和 gram dirty / retirement 标记由数据库触发器同步维护。初始化会刷新原生 INSERT / UPDATE lookup 触发器，避免旧定义遗漏 `source_rowid`。
+
+遗留孤儿使用 `scripts/repair_orphan_memory.py`，不需要全库重建。仅选择 claim、页面投影和显式 canonical `page_key` 都已不存在的记忆；实体显示名或 ID 相同不算该页面仍存在。`freeze` / `apply` 要求 canonical mutation outbox 已结算，冻结最多 2000 条。以下为 PowerShell 示例，路径与批准值须按本机实际范围填写：
+
+```powershell
+$env:VECTOR_LAKE_MEMORY_DIR = "C:/data/MEMORY"
+$Database = "$env:VECTOR_LAKE_MEMORY_DIR/wiki/.meta/vector_lake.db"
+$Archive = "$env:VECTOR_LAKE_MEMORY_DIR/wiki/.meta/backups/orphan-memory-recovery"
+$ApprovedCount = [int](Read-Host "输入已核对的冻结数量")
+
+python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode freeze --expect-count $ApprovedCount
+python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode dry-run
+# 核对 manifest 与 dry-run 的数量和 scope hash 后，才输入批准 hash 并执行写入。
+$ApprovedScopeHash = Read-Host "输入已批准的 scope SHA256"
+python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode refresh-triggers --approved-count $ApprovedCount --approved-sha256 $ApprovedScopeHash
+python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode apply --approved-count $ApprovedCount --approved-sha256 $ApprovedScopeHash
+```
+
+只有需要撤回清理时，才使用同一 archive、批准数量及 hash 执行恢复；不要把它与清理流程连续运行：
+
+```powershell
+python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode restore --approved-count $ApprovedCount --approved-sha256 $ApprovedScopeHash
+```
+
+* 默认模式为 `dry-run`；`apply` / `restore` / `refresh-triggers` 都必须显式绑定批准数量与 scope hash。不要把有写入作用的 mode 当作预览。
+* `refresh-triggers` 只替换 `trg_om_index_insert` / `trg_om_index_update`，验证行内容与其他 schema 不变；不迁移表结构，也不回填全库历史行。触发器更新需单独纳入授权。
+* `apply` 在独占 native 事务内重验实时范围、原始 payload 与 canonical 行号；范围变化、未结算 outbox、嵌套事务或索引验证失败均拒绝提交。无关记忆、lookup 和已有 gram 标记保持不变。
+* `restore` 恢复原始 canonical 行号与字段，重新生成正确的 lookup；已有 ID 或行号冲突时拒绝覆盖。旧版本错误的 lookup 排序标记不是恢复目标。
+* SQL 与迭代采用合作式 deadline，不能承诺操作系统 I/O 永不阻塞。提交后连接清理或回执出版失败，返回明确的 `state=committed` 及错误元数据；不能当作未执行直接重试。
+* archive 包含完整 SQLite 快照和原始记忆 payload，应保留在本机私有备份目录，不进入 Git、模型审查包或对外报告。恢复演练使用隔离数据库，不能在生产库上随意往返执行。
+
+执行后检查 `claim-pointer-report`、`projections` 与 `doctor`。gram 索引可能因其他摄取产生 live dirty backlog 而回退精确扫描；这不等于清理失败，也不代表应强制重建。是否维护以实际 `due=`、写入门和用户授权为准。
 
 ## Notes
 

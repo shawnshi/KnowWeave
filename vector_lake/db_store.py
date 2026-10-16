@@ -65,7 +65,9 @@ def _apply_connection_pragmas(conn: sqlite3.Connection) -> None:
 def get_connection() -> sqlite3.Connection:
     if getattr(_LOCAL, "conn", None) is None:
         db_path = get_db_path()
-        conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+        from vector_lake.retrieval_runtime import current, remaining_seconds
+        timeout = min(30.0, remaining_seconds()) if current() is not None else 30.0
+        conn = sqlite3.connect(str(db_path), timeout=timeout, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         
         # Load sqlite-vec extension
@@ -76,7 +78,8 @@ def get_connection() -> sqlite3.Connection:
         _apply_connection_pragmas(conn)
         
         _LOCAL.conn = conn
-    return _LOCAL.conn
+    from vector_lake.retrieval_runtime import track_connection
+    return track_connection(_LOCAL.conn)
 
 def close_connection():
     if hasattr(_LOCAL, "conn") and _LOCAL.conn is not None:
@@ -2569,9 +2572,11 @@ def upsert_embedding(page_key: str, embedding: list[float], *, content_digest: s
     if not embedding:
         return
     import math
-    norm = math.sqrt(sum(x*x for x in embedding))
-    if norm > 0:
-        embedding = [x/norm for x in embedding]
+    embedding = [float(value) for value in embedding]
+    norm = math.hypot(*embedding)
+    if not all(math.isfinite(value) for value in embedding) or not math.isfinite(norm) or norm == 0:
+        raise ValueError('Embedding must be finite and non-zero')
+    embedding = [value / norm for value in embedding]
     conn = get_connection()
     import sqlite_vec
     query_blob = sqlite_vec.serialize_float32(embedding)

@@ -21,26 +21,26 @@
 
 ## 目录与阅读路径
 
-- **首次使用**：[快速开始](#快速开始) → [首次摄取与验收](#首次摄取与验收) → [接入 MCP](#接入-mcp)
-- **了解设计**：[Architecture](#architecture) → [技术与进程职责](#技术与进程职责) → [详细架构](docs/ARCHITECTURE.md)
-- **运行与维护**：[Config](#config) → [Commands](#commands) → [运维与恢复](docs/OPERATIONS.md)
-- **开发与平台验证**：[开发测试](#开发测试) → [开发指南](docs/DEVELOPMENT.md) → [平台边界](docs/PLATFORM_SUPPORT.md)
+* **首次使用**：[快速开始](#快速开始) → [首次摄取与验收](#首次摄取与验收) → [接入 MCP](#接入-mcp)
+* **了解设计**：[Architecture](#architecture) → [技术与进程职责](#技术与进程职责) → [详细架构](docs/ARCHITECTURE.md)
+* **运行与维护**：[Config](#config) → [Commands](#commands) → [运维与恢复](docs/OPERATIONS.md)
+* **开发与平台验证**：[开发测试](#开发测试) → [开发指南](docs/DEVELOPMENT.md) → [平台边界](docs/PLATFORM_SUPPORT.md)
 
 ## 快速开始
 
-### 1. 环境与部署路径
+### 1\. 环境与部署路径
 
-- Python **≥ 3.10**；目标系统为 Windows 11+、macOS 26+，以及符合内核要求的指定 Linux 发行版。目标与实际验收范围见 [平台说明](docs/PLATFORM_SUPPORT.md)，不能把 CI 配置当成已实测支持。
-- **基础部署**可不安装可选 `vector_lake_core`；相关能力会按各自契约降级或提示不可用。其他依赖如 rjieba 仍含原生二进制，这不是“禁用所有 Rust/C 扩展”。
-- **预编译核心部署**仅在已取得可信、匹配 checkout / 平台的包时使用 [免编译安装](docs/NATIVE_WHEELS.md)。当前没有公开 Release/PyPI 核心下载渠道；CI 构建包只在任务临时目录，不可据此下载。普通部署不安装 Rust/Cargo/maturin，缺包不自动源码编译。
-- **完整摄取**另需选择并安装 Pi / Gemini / Codex CLI，在运行它的同一用户身份下完成认证。安装 Python SDK、配置 embedding Key 或通过 `--check`，都不能证明文本模型已经可用。
+* Python **≥ 3.10**；目标系统为 Windows 11+、macOS 26+，以及符合内核要求的指定 Linux 发行版。目标与实际验收范围见 [平台说明](docs/PLATFORM_SUPPORT.md)，不能把 CI 配置当成已实测支持。
+* **基础部署**可不安装可选 `vector_lake_core`；相关能力会按各自契约降级或提示不可用。其他依赖如 rjieba 仍含原生二进制，这不是“禁用所有 Rust/C 扩展”。
+* **预编译核心部署**仅在已取得可信、匹配 checkout / 平台的包时使用 [免编译安装](docs/NATIVE_WHEELS.md)。当前没有公开 Release/PyPI 核心下载渠道；CI 构建包只在任务临时目录，不可据此下载。普通部署不安装 Rust/Cargo/maturin，缺包不自动源码编译。
+* **完整摄取**另需选择并安装 Pi / Gemini / Codex CLI，在运行它的同一用户身份下完成认证。安装 Python SDK、配置 embedding Key 或通过 `--check`，都不能证明文本模型已经可用。
 
 以下主线使用 **Windows PowerShell、仓库根目录、已激活的项目 venv**。不要在未激活的新终端照抄裸 `python`。如果激活脚本受本机策略限制，不修改全局策略；将下文每个 `python` 替换为 `.\.venv\Scripts\python.exe` 的实际路径。macOS/Linux 使用 `python3 -m venv .venv` 与 `source .venv/bin/activate`，其平台构建/验收限制仍适用。
 
 ```powershell
-git clone https://github.com/shawnshi/KnowWeave.git vector-lake
+git clone https://github.com/shawnshi/KnowWeave.git KnowWeave
 if ($LASTEXITCODE -ne 0) { throw '克隆未成功：先定位正确仓库，不继续安装' }
-cd vector-lake
+cd KnowWeave
 if (Test-Path '.venv') { throw '已有环境：使用新目录或先审阅，不覆盖' }
 python -m venv .venv
 if ($LASTEXITCODE -ne 0) { throw '创建虚拟环境失败，不继续安装' }
@@ -52,7 +52,7 @@ python -m pip install --only-binary=:all: -r requirements.txt
 
 后续终端应显示同一个项目解释器。已有部署不要覆盖其环境或配置；创建新环境，验收后再按独立的切换流程启用。
 
-### 2. 新建演示库与最小配置
+### 2\. 新建演示库与最小配置
 
 下例只用于**没有 `config.json` 的新 checkout 和全新演示目录**。已有配置必须先审阅并合并，不运行下面的初始化片段。环境变量会覆盖文件配置，示例显式绑定当前进程的演示路径，避免误用宿主历史 MEMORY。
 
@@ -87,7 +87,7 @@ python cli.py doctor
 
 这一步会把**合成演示材料**发送给已选模型，并写入演示库，可能产生模型费用；如配置了 embedding 凭据，索引阶段还可能请求 embedding。不要换成私人或未经授权的材料。
 
-### 1. 准备一份材料并登记任务
+### 1\. 准备一份材料并登记任务
 
 ```powershell
 $sample = "# KnowWeave 快速上手`n`n本示例使用合成资料验证知识编译、来源追踪与检索。"
@@ -98,7 +98,7 @@ python cli.py ingest-tasks
 
 `sync` 负责发现来源、准备摄取任务及相关索引维护，**不自行调用文本模型完成编译**。看到 queued / awaiting_subagent 只表示作业已准备，不表示已发布。
 
-### 2. 启动一个守护，再执行一次真实摄取
+### 2\. 启动一个守护，再执行一次真实摄取
 
 在**第二个 PowerShell 终端**进入同一仓库并激活相同 venv，然后明确绑定同一演示库、关闭自动 Runner：
 
@@ -118,14 +118,14 @@ python scripts/ingest_runner.py --once --limit 1 --concurrency 1 --no-shadow
 
 这里只启动一次手工 Runner；不要再启动监督器或另一个自动 Runner。手工 Runner 默认 shadow，只有这里明确的 `--no-shadow` 才启用模型与真实写页。shadow 仍会认领作业、更新状态，不是零副作用预览。
 
-### 3. 核对结果，而不是只看退出码
+### 3\. 核对结果，而不是只看退出码
 
 ```powershell
 python cli.py ingest-tasks
 Get-ChildItem (Join-Path $MemoryRoot 'wiki') -Filter 'Source_*.md'
-python cli.py search "快速上手" --top_k 5
-python cli.py search "快速上手" --mode claim --top_k 5
-python cli.py query "这份快速上手材料说明了什么？" --dry-run
+python cli.py search "快速上手" --domain General --top_k 5
+python cli.py search "快速上手" --domain General --mode claim --top_k 5
+python cli.py query "这份快速上手材料说明了什么？" --domain General --dry-run
 ```
 
 成功应同时看到：本次任务不再等待处理、Runner 本批没有未处理错误、对应 Source 页面已物化且保留原始来源、检索可以找到该资料。单次 Runner 退出或任务领取不证明完成；canonical 提交也不等于所有投影就绪。`query --dry-run` 输出上下文而不保存 synthesis，不承诺跳过其他初始化/读取行为。
@@ -148,13 +148,14 @@ flowchart LR
 
 **两条闭环：**材料经摄取成为可追溯知识；Agent 明确写入的新事实/偏好/决策/任务状态先经过受控 mutation，再生成运行态记忆。二者复用 canonical、outbox 与投影机制，不允许模型直接改 SQLite。
 
-### Storage Layout & Architecture
+### Storage Layout \& Architecture
 
 |数据 / 组件|职责与权威边界|
 |-|-|
 |`MEMORY/raw/`|原始信源，只读输入|
 |`MEMORY/purpose.md`|目的与证据合同；新库必须准备有效合同，不能靠空文件占位|
 |`MEMORY/wiki/.meta/vector_lake.db`|canonical 数据、作业/租约、outbox 及派生索引；并非每个表都是 canonical|
+|`MEMORY/wiki/.meta/retrieval_chunks.sqlite3`|可选分块检索侧车；须显式构建，普通查询不会创建或修复|
 |`MEMORY/wiki/*.md`|人可审阅的发布层；手工修改也须进入校验 mutation 路径|
 |`index.json` / `claim_topology.json`、FTS / 向量等|派生投影，不是另一套可直接修改的真相源|
 |`brain/`、`scratch/`|仓库侧任务包、日志与验收制品，不是原始知识库|
@@ -175,6 +176,17 @@ flowchart LR
 
 **MCP** 提供 Agent 工具，不替代后台消费；**Watchdog** 消费 outbox、监听和维护，并默认看护真实写页的 Runner；**Runner** 领取作业、调用模型并提交校验结果。只读检索可不启动守护，发生写入后需要消费 outbox。常驻与手工 Runner 不应对同一个 MEMORY 根并跑。
 
+## 当前检索行为
+
+- 公共 MCP/CLI 页面检索默认 `profile=auto`；可显式选择 `legacy`、`balanced`、`entity`、`source`、`author` 或 `analysis`。默认不普遍抬高 Source/作者材料，排序分值不是证据置信度。
+- 明确的会议年份参与候选资格与有界扩召回；创建、摄入或核验时间不冒充事件时间。无法核验年份的材料会标注缺口，不承诺已经识别事件身份。
+- 分块融合 `use_chunks` 默认关闭；普通查询不自动构建侧车或调用外部 embedding。构建、索引维护与外部 embedding 分别授权。
+- `auto`/`ram` 无法取得 RAM 候选时回退精确 SQL；只有显式 `two_stage` 使用二值近似预筛。
+- 完成状态区分 `complete`、`partial`、`failed`。可选阶段到期后保留已取得的词法证据；正文不可读时明确标注元数据摘要。请求预算是协作式限制，不是对原生、文件系统或传输的物理硬取消。
+- 默认保留 Decayed 页面并降权，排除 Deprecated/Archived；`include_history` 可显式纳入历史状态。域、专题和这些开关都不是认证 ACL。
+
+参数和构建入口见 [配置参考](docs/CONFIGURATION.md)。合成样本与故障路径测试不代表真实相关性提升或生产 SLO 验收。
+
 ## 接入 MCP
 
 GUI 客户端不会可靠继承当前终端的 venv。必须把下例解释器、仓库和 MEMORY 路径改成自己的绝对路径；macOS/Linux 的解释器通常为 `<repo>/.venv/bin/python`。
@@ -183,10 +195,10 @@ GUI 客户端不会可靠继承当前终端的 venv。必须把下例解释器�
 {
   "mcpServers": {
     "mentat-mind-mcp": {
-      "command": "C:/path/to/vector-lake/.venv/Scripts/python.exe",
+      "command": "C:/path/to/KnowWeave/.venv/Scripts/python.exe",
       "args": ["-m", "vector_lake.mcp_server"],
       "env": {
-        "PYTHONPATH": "C:/path/to/vector-lake",
+        "PYTHONPATH": "C:/path/to/KnowWeave",
         "VECTOR_LAKE_MEMORY_DIR": "C:/path/to/MEMORY",
         "VECTOR_LAKE_DB_PATH": "C:/path/to/MEMORY/wiki/.meta/vector_lake.db",
         "PYTHONUTF8": "1",
@@ -200,6 +212,8 @@ GUI 客户端不会可靠继承当前终端的 venv。必须把下例解释器�
 不要将真实 Key 写入仓库示例。上例是通用 `mcpServers` 配置，不是 Pi 专用配置；Pi 入口及重连说明见 [配置指南](docs/CONFIGURATION.md)。在实际连接调用 `runtime_identity` 核对解释器、PID、加载代码与原生身份；独立 `doctor` 不能代替该连接验收。
 
 ## 常驻部署与已知边界
+
+watchdog、runner 和 MCP 是独立进程。重启前两者不会刷新常驻 MCP 的已加载代码；MCP 需在宿主中重连，并用该连接的 `runtime_identity` 验收。
 
 Windows 常驻链为 `VectorLake-Watchdog → scripts/watchdog_service.ps1 → watchdog_sync.py → Runner`。正式部署必须在任务动作中显式指定 `-Python`、`-MemoryDir` 等参数；包装器的默认宿主 Python 不保证是项目 venv。注册脚本会更新任务配置，不是保留参数的重启命令。
 
@@ -241,7 +255,8 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 ## Commands
 
 
-> **MCP 是主接口**：Agent 直接调用 `vector_lake/mcp_server.py` 注册的工具，不经过终端模拟。本仓库**不随附**任何 slash command 兼容层（`commands/` 目录已不存在）；打包技能的宿主可另用 `$vector-lake:query`、`$vector-lake:timeline` 同名技能。
+
+> **MCP 是主接口**：Agent 直接调用 `vector_lake/mcp_server.py` 注册的工具。本仓库不随附 slash command 兼容层；宿主若打包 skills，应按实际注册的插件命名空间调用。项目保留 `vector-lake-*` 技能标识，不把旧宿主的固定前缀当作跨客户端协议。
 >
 > 全量恢复、内部调度和重建端点保留在 CLI，避免 Agent 在常规检索中误触重型维护。
 
@@ -279,46 +294,87 @@ python watchdog_sync.py
 搜索页面层：
 
 ```powershell
-python cli.py search "Agent memory" --top_k 5
+python cli.py search "Agent memory" --domain System_Architecture --top_k 5
 ```
 
 搜索运行态记忆：
 
 ```powershell
-python cli.py search "部署目标" --mode memory --top_k 5
+python cli.py search "部署目标" --domain System_Architecture --mode memory --top_k 5
 ```
 
 搜索 claim-level facts：
 
 ```powershell
-python cli.py search "Agent memory" --mode claim --top_k 5
+python cli.py search "Agent memory" --domain System_Architecture --mode claim --top_k 5
 ```
 
 基于 Memory Packet 和 wiki 证据做 synthesis：
 
 ```powershell
-python cli.py query "对比 Karpathy LLM Wiki 与 Agent memory 的架构差异"
+python cli.py query "对比 Karpathy LLM Wiki 与 Agent memory 的架构差异" --domain System_Architecture
 ```
 
 准备查询并查看溯源（仍会创建临时上下文 payload，不写 Wiki 页面）：
 
 ```powershell
-python cli.py query "总结当前运行态记忆架构" --dry-run
+python cli.py query "总结当前运行态记忆架构" --domain System_Architecture --dry-run
 ```
 
 只需要内联上下文、不创建提案 payload 时，在 MCP 宿主调用 `preview_query_context`：
 
 ```json
-{"query_str": "总结当前运行态记忆架构"}
+{"query_str": "总结当前运行态记忆架构", "domain": "System_Architecture"}
 ```
 
 预览仍可能记录检索审计事件，不是整个文件系统的零写入模式。
+
+检索接口迁移：MCP 检索/上下文入口及 CLI `search` / `query` 必须显式传入一个 `domain`。`General` 是类别而不是全库；多域任务分别查询。默认不发送查询到外部嵌入服务；只有当前授权允许外发该查询时，才传 `allow_external_embedding: true`（CLI：`--allow-external-embedding`）。这是范围选择与出站许可，不是身份认证或操作系统隔离。未提供外发许可时只使用本地支路，并在结果中说明。底层 Python 函数保留无域的受控内部调用，不应直接作为无约束的外部接口发布。
+
+任务级检索策略（只适用于 page / 上下文，memory / claim 不使用这些排序策略）：
+
+```powershell
+python cli.py search "WiNEX的竞争优势及不足" --domain Medical_IT --profile analysis
+python cli.py search "师成" --domain Medical_IT --profile entity
+python cli.py search "2026年全国卫生健康工作会议要点" --domain Policy_and_Governance --profile auto
+```
+
+`auto` 使用本地规则选择 `entity` / `balanced` / `analysis` / `source` / `author`。非 `legacy` 策略取消全局 Source 降权与作者偏好；`author` 显式增加作者关联偏好，`entity` 仅优先完整标题/别名匹配，`source` 优先原件类型。`legacy` 保留原有全局排序开关。年份只按明确会议查询的事件元数据或标题约束，不使用 created/updated；多年份对比不强制选一个年份。年份和类型匹配都不等于已核验会议事实。
+
+稳定性边界：`auto` / `ram` 在容量或并发不足时回退精确 SQL；二值近似仅由显式 `two_stage` 选择。PPR、记忆、分块证据故障保留独立可用结果，并报告部分完成或失败。弱论坛/软件关键词不硬排除 Product 等实体；分块文档资格过滤后会有界扩深。
+
+查询最多 4096 字符，top_k 为 1–50。请求采用 15 秒合作式预算，正文单页 512 KiB、累计 4 MiB；这些不是物理封网、权限认证或原生调用的硬截止。上下文/台账返回完成状态，异常正文不进入诊断。
+
+可选 scoped-memory / 向量代次加速器必须明确维护，不在检索时创建。以下是参数示例，执行前需替换为已授权的现有数据库并备份；本次代码验证未应用于生产库：
+
+```powershell
+python cli.py retrieval-indexes --db "X:/approved/vector_lake.db"
+python cli.py retrieval-indexes --db "X:/approved/vector_lake.db" --apply --budget-seconds 60
+```
+
+长文分块侧库（仅 CLI 构建，不自动扫描知识库；先将示例页面键替换为已授权且已发布的真实页面键）：
+
+```powershell
+python cli.py chunk-index --domain Medical_IT --page Source_ApprovedReport
+python cli.py chunk-index --domain Medical_IT --page Source_ApprovedReport --apply
+python cli.py search "长文中的关键风险" --domain Medical_IT --use-chunks --profile analysis
+```
+
+第一条只检查显式页面元数据。`--apply` 才向 MEMORY 的 `wiki/.meta/retrieval_chunks.sqlite3` 写入独立侧库；默认只建本地词法分块，不调用外部嵌入。需要分块向量时必须另有正文外发授权，再显式加 `--allow-external-embedding`。每次最多 8 页、单页 512 KiB；模型/维度不符时保留原库并拒绝，不自动迁移。侧库采用 WAL，查询不自动创建索引。`--use-chunks` 将页面与分块路径按 RRF 融合，并复查当前域、状态和源文哈希；不保证因此提高真实召回率。
+
+离线评测只读取指定的本地标签与运行结果，不执行检索或调用模型：
+
+```powershell
+python cli.py retrieval-eval --dataset tests/fixtures/retrieval_synthetic.json --results your-results.json --k 10
+```
+
+结果文件按 case ID 提供页面键列表或 `{"pages": [...], "abstained": true}`。随附标签明确为合成用例，不是人工相关性标注。人工标签须经审核并声明 `label_kind=human`、`status=approved`、`approved_by`；这些字段是来源声明，不是身份认证。指标仅相对已标注相关集，不能当作全库召回率或答案真实性验证。
 
 治理与审计：
 
 ```powershell
 python cli.py review
-python cli.py review resolve <index|item_id> --resolution skip
+python cli.py review resolve "<index|item_id>" --resolution skip
 python cli.py audit-graph
 python cli.py lint
 python cli.py lint --auto-fix
@@ -332,6 +388,7 @@ python cli.py merge-suggestions --limit 20
 
 ```powershell
 python cli.py graph
+# 两者默认仅预览；显式 --apply 才写入，仍须另行授权。
 python cli.py gc --days 30
 python cli.py delete "<raw-source-path>"
 ```
@@ -352,7 +409,7 @@ python cli.py timeline-rebuild --apply
 python cli.py timeline-repair
 python cli.py timeline-repair --apply
 python cli.py projection-rebuild-index --apply
-# 向量影子索引（二值预筛 + 全精度精排）：投影/维度变更后 status 会停用它，重建一次即恢复。
+# 向量影子投影支持 RAM 精确候选与显式 two_stage 二值近似；失效时不自动重建。
 python cli.py vector-index-rebuild
 python cli.py vector-index-rebuild --apply --shortlist 256
 python cli.py embedding-backfill --limit 200
@@ -403,43 +460,10 @@ python cli.py anchor-backfill --only 1,2,5,9-14 --apply
 
 锚点写入需保持 claim 清洗后的文本与 ID 不变：出处标记贴紧追加；含括号而不能安全解析的出处跳过；只定位正文，不在标题或 frontmatter 上补锚点。迁移执行统计与旧评测记录不作为当前运维状态，历史版本见 Git 与 CHANGELOG。
 
-### 历史孤儿记忆的定向维护
-
-正常页面删除会在同一 native SQLite 事务中，先删除引用所选 claim 的运行态记忆，再删除 claim；lookup 行和 gram dirty / retirement 标记由数据库触发器同步维护。初始化会刷新原生 INSERT / UPDATE lookup 触发器，避免旧定义遗漏 `source_rowid`。
-
-遗留孤儿使用 `scripts/repair_orphan_memory.py`，不需要全库重建。仅选择 claim、页面投影和显式 canonical `page_key` 都已不存在的记忆；实体显示名或 ID 相同不算该页面仍存在。`freeze` / `apply` 要求 canonical mutation outbox 已结算，冻结最多 2000 条。以下为 PowerShell 示例，路径与批准值须按本机实际范围填写：
-
-```powershell
-$env:VECTOR_LAKE_MEMORY_DIR = "C:/data/MEMORY"
-$Database = "$env:VECTOR_LAKE_MEMORY_DIR/wiki/.meta/vector_lake.db"
-$Archive = "$env:VECTOR_LAKE_MEMORY_DIR/wiki/.meta/backups/orphan-memory-recovery"
-$ApprovedCount = [int](Read-Host "输入已核对的冻结数量")
-
-python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode freeze --expect-count $ApprovedCount
-python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode dry-run
-# 核对 manifest 与 dry-run 的数量和 scope hash 后，才输入批准 hash 并执行写入。
-$ApprovedScopeHash = Read-Host "输入已批准的 scope SHA256"
-python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode refresh-triggers --approved-count $ApprovedCount --approved-sha256 $ApprovedScopeHash
-python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode apply --approved-count $ApprovedCount --approved-sha256 $ApprovedScopeHash
-```
-
-只有需要撤回清理时，才使用同一 archive、批准数量及 hash 执行恢复；不要把它与清理流程连续运行：
-
-```powershell
-python scripts/repair_orphan_memory.py --database $Database --archive $Archive --mode restore --approved-count $ApprovedCount --approved-sha256 $ApprovedScopeHash
-```
-
-* 默认模式为 `dry-run`；`apply` / `restore` / `refresh-triggers` 都必须显式绑定批准数量与 scope hash。不要把有写入作用的 mode 当作预览。
-* `refresh-triggers` 只替换 `trg_om_index_insert` / `trg_om_index_update`，验证行内容与其他 schema 不变；不迁移表结构，也不回填全库历史行。触发器更新需单独纳入授权。
-* `apply` 在独占 native 事务内重验实时范围、原始 payload 与 canonical 行号；范围变化、未结算 outbox、嵌套事务或索引验证失败均拒绝提交。无关记忆、lookup 和已有 gram 标记保持不变。
-* `restore` 恢复原始 canonical 行号与字段，重新生成正确的 lookup；已有 ID 或行号冲突时拒绝覆盖。旧版本错误的 lookup 排序标记不是恢复目标。
-* SQL 与迭代采用合作式 deadline，不能承诺操作系统 I/O 永不阻塞。提交后连接清理或回执出版失败，返回明确的 `state=committed` 及错误元数据；不能当作未执行直接重试。
-* archive 包含完整 SQLite 快照和原始记忆 payload，应保留在本机私有备份目录，不进入 Git、模型审查包或对外报告。恢复演练使用隔离数据库，不能在生产库上随意往返执行。
-
-执行后检查 `claim-pointer-report`、`projections` 与 `doctor`。gram 索引可能因其他摄取产生 live dirty backlog 而回退精确扫描；这不等于清理失败，也不代表应强制重建。是否维护以实际 `due=`、写入门和用户授权为准。
-
+历史孤儿 memory-ingest 的分类、scope 审批与小批恢复步骤见 [运维指南](docs/OPERATIONS.md#历史孤儿记忆的定向维护)。这是受控维护流程，不是首次安装或后台自动升级步骤。
 
 </details>
+
 
 
 ## 只读运维与维护入口

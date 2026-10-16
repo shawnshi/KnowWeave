@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "label_kind": "synthetic",
+  "name": "retrieval-mechanism-oracles-v1",
+  "limitations": "Invented entities and judgments for deterministic mechanism tests; not human IR evaluation or real WiNEX evidence.",
+  "cases": [
+    {"id": "entity", "query": "示例专家", "domain": "Medical_IT", "profile": "entity", "judgments": {"Person_Synthetic": 3, "Source_SyntheticNews": 1}, "should_abstain": false},
+    {"id": "year", "query": "2026年示例工作会议要点", "domain": "Policy_and_Governance", "profile": "balanced", "judgments": {"Source_Meeting2026": 3, "Source_Meeting2023": 0}, "should_abstain": false},
+    {"id": "analysis", "query": "ExampleSystem优势及不足", "domain": "Medical_IT", "profile": "analysis", "judgments": {"Source_Architecture": 3, "Source_Risks": 3, "Source_Marketing": 0}, "aspects": {"advantages": ["Source_Architecture"], "limitations": ["Source_Risks"]}, "should_abstain": false},
+    {"id": "source", "query": "ExampleSystem官方原文", "domain": "Medical_IT", "profile": "source", "judgments": {"Source_Original": 3, "Concept_Opinion": 1}, "should_abstain": false},
+    {"id": "missing", "query": "不存在的示例会议", "domain": "Policy_and_Governance", "profile": "balanced", "judgments": {"Source_Meeting2023": 0}, "should_abstain": true}
+  ]
+}

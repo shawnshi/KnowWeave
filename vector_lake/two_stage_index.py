@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import logging
 import os
 import sqlite3
@@ -152,9 +153,11 @@ def status(conn: sqlite3.Connection) -> dict | None:
     # time, which any legitimate write after the build would break.
     if len(set(counts.values())) != 1:
         return None
+    from vector_lake import scoped_retrieval_index
     return {
         "model": model,
         "dimension": dimension,
+        "vector_revision": scoped_retrieval_index.vector_revision(conn),
         "row_count": counts["live"],
         "built_row_count": row_count,
         "shortlist": int(shortlist or DEFAULT_SHORTLIST),
@@ -215,12 +218,29 @@ def _current_view(conn: sqlite3.Connection) -> QueryView | None:
     return view if view is not None and view.conn is conn else None
 
 
+def _projection_digest(conn, table=FLOAT_TABLE):
+    from vector_lake.retrieval_runtime import checkpoint
+    digest = hashlib.sha256()
+    cursor = conn.execute(f'SELECT page_key, embedding FROM {table} ORDER BY page_key')
+    try:
+        for key, blob in cursor:
+            checkpoint()
+            encoded = key.encode('utf-8')
+            digest.update(len(encoded).to_bytes(8, 'little'))
+            digest.update(encoded)
+            digest.update(blob)
+    finally:
+        cursor.close()
+    return digest.hexdigest()
+
+
 @contextmanager
 def query_view(conn: sqlite3.Connection, *, status_hint: tuple | None = None):
     """Keep candidate/selector/SQL rerank on one snapshot; never own a caller's transaction.
 
-    A borrowed transaction uses the old binary/legacy arm and never caches data
-    that a rollback/savepoint could undo without changing total_changes.
+    A borrowed transaction never caches data that a rollback could undo. Auto/ram
+    retain exact SQL selection when a RAM lease cannot be acquired; only explicit
+    two_stage opts into binary approximation.
     """
     nested = _current_view(conn)
     if nested is not None:
@@ -254,7 +274,21 @@ def query_view(conn: sqlite3.Connection, *, status_hint: tuple | None = None):
         if owned and state is not None and requested in ("auto", "ram"):
             from vector_lake import ram_candidate_index
             lease = ram_candidate_index.acquire(conn, state)
+        from vector_lake.retrieval_runtime import generation
+        if state is not None:
+            revision = state.get('vector_revision')
+            content = None
+            if revision is None or not owned:
+                # Borrowed writes can roll back and reuse the transactional revision.
+                content = (lease.snapshot.digest.hex() if lease is not None else
+                           _projection_digest(conn, FLOAT_TABLE if requested == 'two_stage' else 'vec_embeddings'))
+            generation('vectors', (state.get('model'), state.get('dimension'), state.get('row_count'),
+                                   state.get('written_at'), revision, content))
+        if requested in ('auto', 'ram') and lease is None:
+            state = None
         backend = "legacy" if state is None else "ram" if lease is not None else "two_stage"
+        from vector_lake.retrieval_runtime import backend as record_backend
+        record_backend('exact_sql' if backend == 'legacy' else backend)
         view = QueryView(conn, state, requested, backend, lease, owned, state_token)
         _VIEWS.current = view
         yield view

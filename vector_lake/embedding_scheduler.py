@@ -882,6 +882,14 @@ def _validated_response_values(response: Any, expected_count: int, dimension: in
             raise EmbeddingResponseError(
                 f"Embedding dimension mismatch at position {position}: expected {dimension}, got {len(values)}"
             )
+        try:
+            values = [float(value) for value in values]
+            norm = math.hypot(*values)
+            valid = all(math.isfinite(value) for value in values) and math.isfinite(norm) and norm > 0
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EmbeddingResponseError(f'Invalid embedding values at position {position}') from exc
+        if not valid:
+            raise EmbeddingResponseError(f'Embedding must be finite and non-zero at position {position}')
         values_list.append(values)
     return values_list
 
