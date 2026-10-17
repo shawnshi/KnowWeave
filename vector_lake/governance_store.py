@@ -1578,8 +1578,8 @@ def _memory_payloads(memory_ids: list[str]) -> list[dict]:
     return [by_id[memory_id] for memory_id in memory_ids if memory_id in by_id]
 
 
-def _scoped_memory_items(domain: str | None, cluster: str | None) -> list[dict]:
-    """Read only matching payloads; an unresolved source never widens the requested scope."""
+def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, *, max_payload_bytes):
+    """Stream (bounded JSON, byte length) in row order on the caller's read snapshot."""
     from vector_lake.schema_validator import DOMAIN_ALIASES, canonical_domain
 
     source = "json_extract(m.data_json, '$.source_page')"
@@ -1607,27 +1607,28 @@ def _scoped_memory_items(domain: str | None, cluster: str | None) -> list[dict]:
         )
         params.append(cluster.lower())
     sql = (
-        "SELECT m.data_json FROM operational_memory m LEFT JOIN page_index_nodes p "
+        "SELECT CASE WHEN length(CAST(m.data_json AS BLOB)) <= ? THEN m.data_json END, "
+        "length(CAST(m.data_json AS BLOB)) FROM operational_memory m LEFT JOIN page_index_nodes p "
         f"ON p.node_key = {source_key} WHERE " + " AND ".join(predicates)
         + " ORDER BY m.rowid"
     )
+    params.insert(0, max_payload_bytes)
     from vector_lake import scoped_retrieval_index, retrieval_runtime
-    conn = get_connection()
-    accelerated = scoped_retrieval_index.scoped_sql(conn, names if domain else None, cluster)
+    retrieval_runtime.track_connection(conn)
+    accelerated = scoped_retrieval_index.scoped_sql(
+        conn, names if domain else None, cluster, max_payload_bytes=max_payload_bytes,
+    )
     if accelerated is not None:
         sql, params = accelerated
     retrieval_runtime.backend('memory_index' if accelerated else 'memory_scan')
-    items, payload_bytes = [], 0
-    for row in conn.execute(sql, params):
-        retrieval_runtime.checkpoint()
-        payload_bytes += len(row[0].encode('utf-8')) if isinstance(row[0], str) else 0
-        if len(items) >= 10000 or payload_bytes > 16 * 1024 * 1024:
-            raise retrieval_runtime.RetrievalBudgetExceeded('Scoped memory materialization budget exhausted; no truncated ranking returned')
-        try:
-            items.append(json.loads(row[0]))
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ValueError('Invalid scoped operational memory payload') from exc
-    return items
+    retrieval_runtime.track_connection(conn)
+    cursor = conn.execute(sql, params)
+    try:
+        for row in cursor:
+            retrieval_runtime.checkpoint()
+            yield row[0], row[1]
+    finally:
+        cursor.close()
 
 
 def search_operational_memory(
@@ -1643,12 +1644,11 @@ def search_operational_memory(
     allowed_types = _normalize_memory_types(memory_types)
     terms = _query_terms(query)
     if domain or cluster:
-        # Scope precedes scoring and LIMIT on every backend; never fall back to unscoped data.
-        memories = _scoped_memory_items(domain, cluster)
-        return score_memory_items(
-            memories, terms, top_k, allowed_types=allowed_types, include_history=include_history,
-            df=_memory_term_frequencies(memories, terms), total=len(memories),
-        )
+        # Scope and full scoped DF precede TopK; only the winners are retained.
+        from vector_lake.scoped_memory_search import search_views
+        return search_views(
+            terms, [(top_k, include_history, allowed_types)], domain=domain, cluster=cluster,
+        )[0]
     backend = _memory_search_backend()
 
     if backend == "legacy":
@@ -1734,28 +1734,21 @@ def search_memory_packet_views(
 ) -> tuple[list[dict], list[dict]]:
     """Return ``(active, history_inclusive)`` slices for the Memory Packet.
 
-    Two retrievals, and for the ``legacy`` backend they share the loaded collection so the
-    whole ``operational_memory`` table is not decoded twice.
+    Scoped calls share one read snapshot, one complete scoped DF pass and one
+    scoring pass with separate bounded active/history TopK heaps. Hidden rows
+    cannot consume the active window. No whole-domain JSON list is retained.
 
-    For the ``gram`` and ``index`` backends this is two *independent*
-    :func:`search_operational_memory` calls, each with its own projected scan.  The two
-    differ only by the ``validity_state`` predicate and ``top_k``, so a single scan looks
-    like it should serve both -- but the active slice needs the top ``active_top_k`` rows
-    *among the non-hidden ones*, which cannot be derived from an unfiltered window: the
-    live corpus carries 26 540 hidden rows of 147 231 (18 %), so any unfiltered window
-    provably wide enough to contain ``active_top_k`` non-hidden rows is wider than the
-    filtered query it was meant to replace.  This docstring used to claim the projected
-    scan was shared; it is not, and the duplication is only expensive while the n-gram
-    index cannot serve (see :mod:`vector_lake.memory_gram_index`).
+    Unscoped ``legacy`` calls share a loaded collection. Unscoped ``gram`` and
+    ``index`` calls retain their independent projected searches and filters.
     """
     terms = _query_terms(query)
     if domain or cluster:
-        memories = _scoped_memory_items(domain, cluster)
-        df, total = _memory_term_frequencies(memories, terms), len(memories)
-        return (
-            score_memory_items(memories, terms, active_top_k, include_history=False, df=df, total=total),
-            score_memory_items(memories, terms, history_top_k, include_history=True, df=df, total=total),
+        from vector_lake.scoped_memory_search import search_views
+        active, history = search_views(
+            terms, [(active_top_k, False, None), (history_top_k, True, None)],
+            domain=domain, cluster=cluster,
         )
+        return active, history
     if _memory_search_backend() == "legacy":
         memories = _load_memory_items()
         # One frequency pass serves both views: it is a full scan of the loaded collection, and

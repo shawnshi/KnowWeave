@@ -68,7 +68,7 @@ def vector_revision(conn):
     return int(row[0]) if row is not None else None
 
 
-def scoped_sql(conn, domains=None, cluster=None):
+def scoped_sql(conn, domains=None, cluster=None, *, max_payload_bytes=None):
     if not status(conn)['memory_acceleration']:
         return None
     clauses, params = [], []
@@ -94,7 +94,12 @@ def scoped_sql(conn, domains=None, cluster=None):
     if not clauses:
         return None
     sets = ' INTERSECT '.join('SELECT rowid FROM (' + sql + ')' for sql in clauses)
-    return 'SELECT data_json FROM operational_memory WHERE rowid IN (' + sets + ') ORDER BY rowid', params
+    projection = 'data_json'
+    if max_payload_bytes is not None:
+        projection = ('CASE WHEN length(CAST(data_json AS BLOB)) <= ? THEN data_json END, '
+                      'length(CAST(data_json AS BLOB))')
+        params.insert(0, max_payload_bytes)
+    return 'SELECT ' + projection + ' FROM operational_memory WHERE rowid IN (' + sets + ') ORDER BY rowid', params
 
 
 def apply(conn, *, budget_seconds=60.0):

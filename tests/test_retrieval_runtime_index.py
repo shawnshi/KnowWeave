@@ -22,11 +22,17 @@ def memory_database():
     return c
 
 
+def scoped_items(c, domain, cluster=None):
+    return [json.loads(raw) for raw, _ in governance_store._iter_scoped_memory_payloads(
+        c, domain, cluster, max_payload_bytes=16 * 1024 * 1024,
+    )]
+
+
 def test_reader_never_creates_accelerators(monkeypatch):
     c = memory_database()
     monkeypatch.setattr(governance_store, 'get_connection', lambda: c)
     before = list(c.execute('SELECT name FROM sqlite_master ORDER BY name'))
-    assert len(governance_store._scoped_memory_items('Medical_IT', None)) == 21
+    assert len(scoped_items(c, 'Medical_IT')) == 21
     assert indexes.scoped_sql(c, ['medical_it']) is None
     assert list(c.execute('SELECT name FROM sqlite_master ORDER BY name')) == before
 
@@ -34,15 +40,15 @@ def test_reader_never_creates_accelerators(monkeypatch):
 def test_explicit_indexes_preserve_scope_and_remove_full_memory_scan(monkeypatch):
     c = memory_database()
     monkeypatch.setattr(governance_store, 'get_connection', lambda: c)
-    expected = governance_store._scoped_memory_items('Medical_IT', 'target')
+    expected = scoped_items(c, 'Medical_IT', 'target')
     assert indexes.apply(c)['memory_acceleration']
-    assert governance_store._scoped_memory_items('Medical_IT', 'target') == expected
+    assert scoped_items(c, 'Medical_IT', 'target') == expected
     sql, params = indexes.scoped_sql(c, ['medical_it'], 'target')
     plan = [r[3] for r in c.execute('EXPLAIN QUERY PLAN ' + sql, params)]
     assert not any('SCAN m' in detail for detail in plan)
     assert any('idx_rsp_memory_domain' in detail for detail in plan)
     assert any('idx_rsp_memory_source' in detail for detail in plan)
-    assert len(governance_store._scoped_memory_items('General', None)) == 180
+    assert len(scoped_items(c, 'General')) == 180
 
 
 def test_accelerator_apply_failure_rolls_back_schema():

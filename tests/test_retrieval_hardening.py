@@ -59,7 +59,7 @@ def test_memory_scope_resolves_source_metadata_without_substring_guessing():
 def test_scoped_memory_does_not_fall_back_to_unscoped_on_database_error(monkeypatch):
     def fail(*args, **kwargs):
         raise db_store.sqlite3.OperationalError('synthetic scoped failure')
-    monkeypatch.setattr(governance_store, '_scoped_memory_items', fail)
+    monkeypatch.setattr(governance_store, '_iter_scoped_memory_payloads', fail)
     monkeypatch.setattr(governance_store, '_load_memory_items', lambda: pytest.fail('unscoped fallback'))
     with pytest.raises(db_store.sqlite3.OperationalError):
         governance_store.search_operational_memory('needle', domain='Medical_IT')

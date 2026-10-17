@@ -7,6 +7,7 @@ are *decided* rather than repaired, which the debt metric must report apart from
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -109,13 +110,14 @@ def prepared(isolated_memory, monkeypatch):
     return isolated_memory
 
 
-def test_the_renderer_replaces_both_yaml_shapes():
+def test_the_renderer_replaces_inline_value_and_refuses_multiline_layout():
     assert (
         _render_with_sources("---\nsources: []\n---\nbody\n", "raw/a.md")
         == '---\nsources: ["raw/a.md"]\n---\nbody\n'
     )
     block = "---\nsources:\n- raw/old.md\n- raw/other.md\ntype: concept\n---\nbody\n"
-    assert _render_with_sources(block, "raw/new.md") == '---\nsources: ["raw/new.md"]\ntype: concept\n---\nbody\n'
+    with pytest.raises(ValueError, match="Unsupported source layout"):
+        _render_with_sources(block, "raw/new.md")
 
 
 def test_the_plan_separates_recoverable_ambiguous_and_unmatched(prepared):
@@ -161,39 +163,36 @@ def test_a_dry_run_changes_nothing(prepared):
     assert _all_gapped("Source_Chosen")
 
 
-def test_the_backfill_restores_the_declaration_and_clears_the_gap(prepared):
+def test_the_backfill_exports_patch_without_restoring_or_clearing_gap(prepared):
     _page("Source_Chosen")
     _materialize("Source_Chosen")
     _raw("raw/docs/thing.md")
     _job("Source_Chosen.md", "C:\\fake\\MEMORY\\raw\\docs\\thing.md")
-
+    path = get_wiki_dir() / "Source_Chosen.md"
+    before = path.read_bytes()
     report = backfill_provenance(dry_run=False, batch=10)
-
-    assert "restored 1 page(s)" in report
-    text = (get_wiki_dir() / "Source_Chosen.md").read_text(encoding="utf-8")
-    assert 'sources: ["raw/docs/thing.md"]' in text
-    gaps = _gaps("Source_Chosen")
-    assert gaps and all(gap == "" and evidence != "[]" for gap, evidence in gaps), gaps
-    # The recovery information is on disk before the write it guards.
-    record = json.loads(_rollback_path().read_text(encoding="utf-8").splitlines()[0])
-    assert record["page_key"] == "Source_Chosen"
-    assert "sources: []" in record["before"]
+    assert "[PATCH ONLY]" in report and "restored 0 page(s)" in report
+    assert path.read_bytes() == before and _all_gapped("Source_Chosen")
+    manifest_path = Path(next(line.removeprefix("patch manifest: ") for line in report.splitlines() if line.startswith("patch manifest: ")))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_applied"] == 0 and manifest["patches_prepared"] == 1
+    assert (manifest_path.parent / manifest["entries"][0]["before_file"]).read_bytes() == before
 
 
-def test_the_revert_puts_the_original_frontmatter_back(prepared):
+def test_the_revert_only_exports_a_hash_matching_legacy_reversal(prepared):
+    import hashlib
     _page("Source_Chosen")
     _materialize("Source_Chosen")
-    _raw("raw/docs/thing.md")
-    _job("Source_Chosen.md", "C:\\fake\\MEMORY\\raw\\docs\\thing.md")
-    backfill_provenance(dry_run=False, batch=10)
-    assert "raw/docs/thing.md" in (get_wiki_dir() / "Source_Chosen.md").read_text(encoding="utf-8")
-
-    report = revert_provenance_backfill(str(_rollback_path()), batch=10)
-
-    assert "reverted 1 page(s)" in report
-    text = (get_wiki_dir() / "Source_Chosen.md").read_text(encoding="utf-8")
-    assert "sources: []" in text
-    assert _all_gapped("Source_Chosen")
+    path = get_wiki_dir() / "Source_Chosen.md"
+    before = path.read_text(encoding="utf-8")
+    path.write_text(_render_with_sources(before, "raw/docs/thing.md"), encoding="utf-8")
+    current = path.read_bytes()
+    rollback = _rollback_path()
+    rollback.write_text(json.dumps({"page_key": "Source_Chosen", "before": before,
+        "after_sha256": hashlib.sha256(current).hexdigest()})+"\n", encoding="utf-8")
+    report = revert_provenance_backfill(str(rollback), batch=10)
+    assert "[PATCH ONLY]" in report and "reverted 0 page(s)" in report
+    assert path.read_bytes() == current and _all_gapped("Source_Chosen")
 
 
 def test_acceptance_records_the_pages_and_only_on_apply(prepared):

@@ -209,11 +209,11 @@ GUI 客户端不会可靠继承当前终端的 venv。必须把下例解释器�
 }
 ```
 
-不要将真实 Key 写入仓库示例。上例是通用 `mcpServers` 配置，不是 Pi 专用配置；Pi 入口及重连说明见 [配置指南](docs/CONFIGURATION.md)。在实际连接调用 `runtime_identity` 核对解释器、PID、加载代码与原生身份；独立 `doctor` 不能代替该连接验收。
+不要将真实 Key 写入仓库示例。上例是通用 `mcpServers` 配置，不是 Pi 专用配置；Pi 入口及重连说明见 [配置指南](docs/CONFIGURATION.md)。在实际连接调用 `runtime_identity` 核对解释器、PID 与选定函数的加载指纹；它不代表整模块或原生映像已验收。还需用受控检索确认目标路径，独立 `doctor` 不能代替该连接验收。
 
 ## 常驻部署与已知边界
 
-watchdog、runner 和 MCP 是独立进程。重启前两者不会刷新常驻 MCP 的已加载代码；MCP 需在宿主中重连，并用该连接的 `runtime_identity` 验收。
+watchdog、runner 和 MCP 是独立进程。重启前两者不会刷新常驻 MCP 的已加载代码；MCP 需在宿主中单独重连，再核对运行身份与实际检索后端。
 
 Windows 常驻链为 `VectorLake-Watchdog → scripts/watchdog_service.ps1 → watchdog_sync.py → Runner`。正式部署必须在任务动作中显式指定 `-Python`、`-MemoryDir` 等参数；包装器的默认宿主 Python 不保证是项目 venv。注册脚本会更新任务配置，不是保留参数的重启命令。
 
@@ -335,7 +335,7 @@ python cli.py query "总结当前运行态记忆架构" --domain System_Architec
 
 ```powershell
 python cli.py search "WiNEX的竞争优势及不足" --domain Medical_IT --profile analysis
-python cli.py search "师成" --domain Medical_IT --profile entity
+python cli.py search "示例研究员" --domain Medical_IT --profile entity
 python cli.py search "2026年全国卫生健康工作会议要点" --domain Policy_and_Governance --profile auto
 ```
 
@@ -343,9 +343,11 @@ python cli.py search "2026年全国卫生健康工作会议要点" --domain Poli
 
 稳定性边界：`auto` / `ram` 在容量或并发不足时回退精确 SQL；二值近似仅由显式 `two_stage` 选择。PPR、记忆、分块证据故障保留独立可用结果，并报告部分完成或失败。弱论坛/软件关键词不硬排除 Product 等实体；分块文档资格过滤后会有界扩深。
 
+限定 `domain` / `cluster` 的 memory 检索及 Memory Packet 使用同一 SQLite 读快照：先流式计算完整作用域的词频，再流式评分、各自保留 active/history TopK。不会先截断候选，也不保留整个域的 JSON 列表；扫描工作量与保留结果分别受预算约束，超限明确失败，不返回假完整排名。未限定范围的受控内部旧路径保持不变，具体上限见 [配置指南](docs/CONFIGURATION.md)。
+
 查询最多 4096 字符，top_k 为 1–50。请求采用 15 秒合作式预算，正文单页 512 KiB、累计 4 MiB；这些不是物理封网、权限认证或原生调用的硬截止。上下文/台账返回完成状态，异常正文不进入诊断。
 
-可选 scoped-memory / 向量代次加速器必须明确维护，不在检索时创建。以下是参数示例，执行前需替换为已授权的现有数据库并备份；本次代码验证未应用于生产库：
+可选 scoped-memory / 向量代次加速器不在检索时自动创建。维护命令默认只读预览，`--apply` 才创建五个 scope 索引；仅当数据库已有 `vec_emb_float` 表时，才同时创建 revision 表及三个触发器。更新代码不会自动安装这些对象。执行前需指定已授权的现有数据库、备份并核对维护边界，参见 [运维说明](docs/OPERATIONS.md#检索-scope--revision-加速器)：
 
 ```powershell
 python cli.py retrieval-indexes --db "X:/approved/vector_lake.db"
@@ -434,9 +436,8 @@ python cli.py claim-evidence-queue
 python cli.py claim-evidence-queue --group month --batch-pages 50
 python cli.py claim-evidence-queue --apply
 python cli.py provenance-backfill
-python cli.py provenance-backfill --limit 1 --apply
-python cli.py provenance-backfill --apply --batch 50
-python cli.py provenance-backfill --revert wiki/.meta/migrations/<date>-provenance-backfill.rollback.jsonl --apply
+python cli.py provenance-backfill --limit 1 --prepare-patch
+python cli.py provenance-backfill --revert "<reviewed-rollback.jsonl>" --prepare-patch
 python cli.py provenance-accept
 python cli.py provenance-accept --apply
 python cli.py anchor-draft
@@ -455,7 +456,7 @@ python cli.py anchor-backfill --only 1,2,5,9-14 --apply
 * `idempotency-status` / `repair-idempotency`：检查唯一性等级，清理冗余幂等键以恢复完整唯一索引，不删除业务行。
 * `claim-pointer-report` / `claim-pointer-repair`：检查及摘除证据中的死 claim 指针，先记录回滚项；`--edges` 只修正可解析的目标页面键，不改边的出处页，不更新证据新鲜度。该入口不清理历史孤儿 operational memory，后者使用下述冻结范围维护脚本。
 * `claim-evidence-queue`：按缺口形状与 cohort 分批进入治理队列，默认演练，`--apply` 才入队。出处缺口不自动转成外部研究指令。占位符和运行态 Packet 叙述不作为 claim。
-* `provenance-backfill`：仅根据摄入台账或唯一源文件逆匹配补来源，经正常写入门提交并保留回滚记录；多义与无匹配时弃权。`provenance-accept` 记录已接受的遗产缺口，不把它伪装成已找到来源。
+* `provenance-backfill`：仅根据摄入台账或唯一源文件逆匹配提出来源候选，多义与无匹配时弃权。默认只读预览；`--prepare-patch` 只导出原始字节、候选文件、diff 和 manifest，不修改 Wiki、canonical、历史或 outbox。兼容参数 `--apply` 也只导出，成功导出后返回退出码 **3**，不表示已修复。撤回旧回填同样只生成反向补丁；过期、布局不支持或导出失败会报错，并披露此前已生成的补丁。补丁依赖读取时的指纹，生成成功不证明当前仍适用、来源真实或已获写入授权；当前版本没有自动应用分支。边界与预算见[来源维护说明](docs/OPERATIONS.md#来源维护受控窗口与仅生成补丁)。`provenance-accept` 另行记录已接受的遗产缺口，不把它伪装成已找到来源。
 * `anchor-draft`：依据候选出处的判别词起草块级归属，并提供原文行供复核；证据不足时弃权。`anchor-backfill --only ... --apply` 只写确认项并保留回滚记录。
 
 锚点写入需保持 claim 清洗后的文本与 ID 不变：出处标记贴紧追加；含括号而不能安全解析的出处跳过；只定位正文，不在标题或 frontmatter 上补锚点。迁移执行统计与旧评测记录不作为当前运维状态，历史版本见 Git 与 CHANGELOG。

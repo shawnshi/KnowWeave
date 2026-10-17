@@ -236,12 +236,13 @@ Usage Examples:
 
     provenance_backfill_parser = subparsers.add_parser(
         "provenance-backfill",
-        help="[MAINTENANCE] Restore `sources:` declarations the ingest ledgers still record.",
+        help="[MAINTENANCE] Preview/export source patches from exact ledgers; never auto-apply.",
     )
-    provenance_backfill_parser.add_argument("--apply", action="store_true", help="Write the restorations. Defaults to dry-run; every page's prior text is written to the rollback file first.")
-    provenance_backfill_parser.add_argument("--batch", type=int, default=50, help="Pages per mutation batch (default: 50).")
-    provenance_backfill_parser.add_argument("--limit", type=int, default=None, help="Restore at most this many pages (for a canary run).")
-    provenance_backfill_parser.add_argument("--revert", default=None, metavar="ROLLBACK_FILE", help="Instead of restoring, put back every page named in this rollback file.")
+    provenance_backfill_parser.add_argument("--apply", action="store_true", help="Legacy application request: prepare patches only and exit 3; no verified exclusive writer is available.")
+    provenance_backfill_parser.add_argument("--prepare-patch", action="store_true", help="Export source-only patch artifacts without applying them.")
+    provenance_backfill_parser.add_argument("--batch", type=int, default=50, help="Requested batch size (default: 50; source-only batches capped at 32).")
+    provenance_backfill_parser.add_argument("--limit", type=int, default=None, help="Prepare at most this many source patch candidates.")
+    provenance_backfill_parser.add_argument("--revert", default=None, metavar="ROLLBACK_FILE", help="Propose source-only reversal patches when the saved post-backfill hash still matches.")
 
     provenance_accept_parser = subparsers.add_parser(
         "provenance-accept",
@@ -468,14 +469,16 @@ def main() -> int:
                 print(tools.revert_provenance_backfill(
                     args.revert,
                     batch=getattr(args, "batch", 50),
-                    dry_run=not getattr(args, "apply", False),
+                    dry_run=not (getattr(args, "apply", False) or getattr(args, "prepare_patch", False)),
                 ))
             else:
                 print(tools.backfill_provenance(
-                    dry_run=not getattr(args, "apply", False),
+                    dry_run=not (getattr(args, "apply", False) or getattr(args, "prepare_patch", False)),
                     batch=getattr(args, "batch", 50),
                     limit=getattr(args, "limit", None),
                 ))
+            if getattr(args, "apply", False):
+                return 3  # Patch preparation does not acknowledge application.
         elif args.command == "provenance-accept":
             print(tools.accept_unrecorded_provenance(
                 dry_run=not getattr(args, "apply", False),

@@ -92,6 +92,8 @@ def projection_locks(filenames: Iterable[str]):
 
 def require_projection_intent(outbox_id: int, filename: str, mutation_type: str, payload_text: str | None, *, claim: dict | None = None, validation_mode: str = "full"):
     row = db_store.validate_mutation_claim(claim) if claim is not None else db_store.current_mutation_intent(outbox_id)
+    if str(row["idempotency_key"] or "").startswith("source-metadata:"):
+        raise ProjectionVersionConflict("Automatic source publication disabled: verified physical exclusion is unavailable; prepare a patch")
     if row["id"] != outbox_id or row["filename"] != filename or row["mutation_type"] != mutation_type or row["payload_text"] != payload_text or str(row["validation_mode"] or "full") != validation_mode:
         raise db_store.MutationClaimLost("Materialization does not match its durable intent")
     if row["status"] not in {"pending", "processing", "completed"}:

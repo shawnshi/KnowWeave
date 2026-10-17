@@ -54,6 +54,21 @@ python -B scripts/business_acceptance.py --backend fallback --output /path/to/ne
 安全运行回退是关闭 Tantivy、使用 FTS5，保留派生队列和控制状态；不要删除 canonical/FTS 数据。回退旧源码或恢复 SQLite 备份后，再次启用新协议必须完整 rebuild，不能沿用旧 ready。源码恢复应使用变更前备份，仅撤回对应变更、保留其他已有工作。合成 fixture 的测试覆盖不能替代目标实例的协议切换、恢复和读写验收；SQLite WAL/NORMAL 的断电持久性承诺未改变。
 
 
+## 检索 scope / revision 加速器
+
+以下命令只读预览显式指定的现有数据库；不是初始化、全量回填或分块构建：
+
+```bash
+python cli.py retrieval-indexes --db "<existing-db-path>"
+```
+
+生产应用须有当前授权、独立复核和可用恢复点。先确认写入作业空闲，在原知识库边界内保留 SQLite 一致备份及 Schema 对象清单，再另加 `--apply` 执行既有事务维护；默认预算 60 秒、最高 120 秒，锁冲突或不兼容对象失败时不覆盖已有对象。安装五个 scope 索引；仅当现有数据库包含 `vec_emb_float` 表时，才同时创建向量 revision 计数表及三个触发器。不重写 memory / 页面 / 向量正文，也不启用外部 embedding 或 chunks。
+
+安装后核验 `memory_acceleration` / `vector_revision`、对象定义和实际查询计划，而不只看命令退出码。scope 索引不能替代大域 memory 的流式 TopK 修复；后者保留完整 scoped DF、独立 active/history 窗口，工作超预算明确失败。新连接与当前工作负载还须验证，合成时延不作为生产 SLO。代码更新后，驻留 MCP 需要单独重连；数据库索引安装不等于驻留函数已更新。
+
+回退优先只撤回本次清单中的派生加速对象。恢复整库会影响备份后的合法写入，必须另行核准并协调 writers，不能因有备份就直接覆盖活动数据库。
+
+
 ## 核心机制与运行时防护 (Core Runtime & Defense Systems)
 
 > **运行前提**：完整摄取需要 **① 单机数据根 ② 常驻 `python watchdog_sync.py`（Windows 可由计划任务 `VectorLake-Watchdog` 托管）③ 已安装、已认证的 Pi / Gemini / Codex CLI 后端**。`cli.py sync` 只准备任务包，统一 Runner 执行模型调用并经 `finalize_ingest` 发布。守护进程自动拉起并看护 `scripts/ingest_runner_service.py`，可用 `VECTOR_LAKE_RUNNER_AUTOSTART=0` 关闭；通常无需另开手工监督器。MCP 客户端身份不决定摄取后端，Pi 的 subagent 要求也不适用于 Gemini/Codex。只启动 MCP server 而不启动守护进程时，写入会在 5 分钟后进入 outbox 积压告警状态。
@@ -161,6 +176,31 @@ python scripts/repair_orphan_memory.py --database $Database --archive $Archive -
 * archive 包含完整 SQLite 快照和原始记忆 payload，应保留在本机私有备份目录，不进入 Git、模型审查包或对外报告。恢复演练使用隔离数据库，不能在生产库上随意往返执行。
 
 执行后检查 `claim-pointer-report`、`projections` 与 `doctor`。gram 索引可能因其他摄取产生 live dirty backlog 而回退精确扫描；这不等于清理失败，也不代表应强制重建。是否维护以实际 `due=`、写入门和用户授权为准。
+
+## 来源维护：受控窗口与仅生成补丁
+
+普通协作锁及“哈希检查后再替换”不能排除直接编辑器的并发写入。当前没有经验证的物理排他发布能力，因此来源维护**不自动修改 Wiki、canonical／派生数据、历史或 outbox**。受控维护窗口须由真实控制建立；确认文字、布尔参数、哈希和审批记录都不能充当排他能力。
+
+`provenance-backfill` 默认只读预览。显式准备补丁使用：
+
+```bash
+python cli.py provenance-backfill --limit 1
+python cli.py provenance-backfill --limit 1 --prepare-patch
+```
+
+补丁包位于同一知识库的 `wiki/.meta/source_metadata_patches/patch-<id>/`，包含原始字节、候选文件、diff 和 manifest。Windows 在固定本地卷上持有所有祖先目录的列举／属性句柄、拒绝 reparse point，并禁止目录删除共享；POSIX 通过 no-follow 目录描述符创建和写入。能力不受支持时拒绝导出，不退回路径检查。manifest 明确标注 `patch_only`、`committed=false`、`source_applied=0`、`automatic_application_supported=false`。当前代码没有自动应用分支；只提供 `prepare_source_metadata_batch`。未发布原型的执行入口拒绝调用，旧 `source-metadata:` outbox 意图也会在消费者发布前拒绝，不能借普通整页写入绕过。
+
+兼容的 `--apply` 请求只生成补丁并返回 **退出码3**，表示没有应用；准备成功不算修复完成。`--prepare-patch` 准备成功返回0；过期撤回或导出失败返回非零，并披露已经生成的补丁数量和 manifest 路径。已审核的旧 rollback 文件只可生成来源反向补丁，必须匹配保存的回填后字节指纹；不会覆盖后续正文编辑：
+
+```bash
+python cli.py provenance-backfill --revert "<reviewed-rollback.jsonl>" --prepare-patch
+```
+
+单批最多32页；每页512 KiB；原始与候选输入各最多4 MiB。canonical 版本经只读 SQLite 读取，每次最多8192行、单行2 MiB、累计32 MiB，并有合作式120秒检查，不承诺原生调用硬取消或进程 RSS 上限。数据库缺失或读取失败会报错，不会初始化数据库或解释成无数据。重复、合并式或无法唯一编辑的 YAML 来源键会拒绝；有效单引号／双引号来源键可生成补丁。只替换经解析验证的单行来源值；多行／块式等未支持布局拒绝，不吞并相邻注释或空白。UTF-8 BOM、正文及非来源头部保持原样。
+
+补丁以读取时的文件／canonical 指纹为前提，生成期间或之后的手改会使其过期；生成完成不证明补丁仍适用于当前文件。不要直接把这些文件复制进 Wiki，也不要用普通整页重写绕过 canonical 历史／绑定保护。后续应用必须在另行核验的受控维护流程下处理；当前版本不提供自动应用能力。
+
+原文身份、事实正确性、来源所有权和写入授权仍由调用方核验。临时补丁保留在原知识库边界内，不进入 Git；不合并节点、不补造关系，也不把磁盘来源戳提升成 canonical admission。
 
 ## Notes
 
