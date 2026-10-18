@@ -143,3 +143,29 @@ def test_an_empty_ledger_reports_no_rate_rather_than_zero(isolated_memory):
     assert summary["entries"] == 0
     assert summary["empty_rate"] is None
     assert summary["latency_ms_p50"] is None
+
+
+def test_summary_separates_the_surfaces_that_share_the_file(isolated_memory):
+    """A page search and a context assembly differ by an order of magnitude in one file."""
+    from vector_lake import search_ledger
+
+    for name, ms in (("search", 40.0), ("search", 60.0), ("context", 460.0), ("context", 640.0)):
+        search_ledger.record("q", mode="page", top_k=5, returned=[], elapsed_ms=ms,
+                             entry_point=name)
+
+    summary = search_ledger.summary()
+
+    assert summary["entries"] == 4
+    assert summary["by_surface"]["search"]["entries"] == 2
+    assert summary["by_surface"]["search"]["latency_ms_p50"] <= 60.0
+    assert summary["by_surface"]["context"]["latency_ms_p50"] >= 460.0
+    # The mixed headline number is still there, and is exactly what should not be read alone.
+    assert summary["latency_ms_p50"] is not None
+
+
+def test_rows_written_before_entry_point_are_attributed_to_their_mode(isolated_memory):
+    from vector_lake import search_ledger
+
+    search_ledger.record("q", mode="memory", top_k=5, returned=[], elapsed_ms=30.0)
+
+    assert search_ledger.summary()["by_surface"]["memory"]["entries"] == 1

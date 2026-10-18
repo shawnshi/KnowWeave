@@ -10,6 +10,29 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_plugin_state():
+    """``scripts/ci_core.py`` keeps its probe state in a module global.
+
+    The tests here drive it both in-process (as the pytest plugin) and in subprocesses, so a test
+    that leaves ``_STATE`` behind changes what the next one observes -- which is how
+    ``test_reusing_successful_probe_invalidates_it_before_native_failure`` failed in a full run and
+    passed alone.  Snapshot and restore around every test instead of relying on file order.
+    """
+    module = sys.modules.get("ci_core")
+    if module is None:
+        sys.path.insert(0, str(REPO / "scripts"))
+        import ci_core as module  # noqa: F401
+    before = json.loads(json.dumps(getattr(module, "_STATE", {}) or {}))
+    try:
+        yield
+    finally:
+        state = getattr(module, "_STATE", None)
+        if isinstance(state, dict):
+            state.clear()
+            state.update(before)
 SCRIPT = REPO / 'scripts' / 'ci_core.py'
 
 

@@ -117,6 +117,34 @@ Gemini/Codex 实际执行可复用安全能力探针；显式 `--check` 仍做�
 
 `index.md`、`log.md`、`overview.md`、`orphan_pages.md`、`wiki_link_stats.md`、`Synthesis_log.md` 为白名单文件，不走上述命名与校验规则。
 
+### 1.1 读路径的列投影与两条检索路径
+
+`operational_memory_index` 不只是"派生的查找表"，它是受域检索的**唯一可扩散底座**：除了
+`memory_type`/`validity_state`/`memory_score`/`updated_rank` 与三个小写文本块，它现在还持有
+`page_key`（保留大小写的来源页键，去掉 `.md`）与 `memory_domain`/`memory_cluster`（行自带的
+`$.domain`/`$.topic_cluster`，缺省空串）。原因很直接：范围谓词是"行自带的值优先，否则看它的页面"，
+而页面那一半只能通过 `page_key` 与 `page_index_nodes.node_key`（同样大小写敏感）相连；
+`page_blob` 是小写化的，永远对不上。语料范围因此从"对 7.4 万行求值 JSON 表达式"变成"列 + 索引"，
+实测 285–470 ms → 84–130 ms。
+
+受域运行态记忆检索有两条实现，**两者同解**，按成本选择：
+
+1. **索引路径**（默认，前提：加速器索引存在、gram 基座可用、`cluster` 来源可判定）：
+   列查询确定范围 → 从 n-gram 倒排取范围内文档频率与相关性 → 按索引列取候选窗 →
+   `score_memory_items` 对命中条目精确重排。索引只是候选生成器，顺序由同一个 oracle 决定。
+2. **payload 扫描**（回退，也是差分测试的参照实现）：单遍读范围内行，只保留词元掩码与排序键，
+   语料 DF 与相关性从同一遍得出。
+
+门控 `SCAN_CHEAPER_PAGE_LIMIT` 只决定"走哪条路"（窄簇的扫描更快），不改变答案。
+
+词法召回（`tool_search`）同样分两档：去停用词的全限定词合取优先；**只有**它零命中时才用
+词频最低、累计文档频率不超过 `RESCUE_MATCH_BUDGET` 的限定词做析取补位。限定词始终是合取的，
+因此"只命中单个限定词的页面"不会冒充答案。
+
+时间线（`tool_timeline`）的读路径以 `_timeline_claims_fingerprint`（一条语句、五个索引聚合）为门，
+与投影一致时走单条索引查询；不一致时回落到 canonical claims 并标注降级。漂移由 watchdog 在
+owner 侧收口，读侧不重建。
+
 ### 2. 双重文件结构设计 (Dual-Schema Format)
 
 根据文件的受控类型，内部的 Markdown 结构被严格限制为两类：

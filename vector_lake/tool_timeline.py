@@ -436,6 +436,23 @@ def repair_timeline_projection(dry_run: bool = True) -> str:
     # fails with "no such column: event_date_source" instead of migrating.
     init_db()
     conn = get_connection()
+    # A no-op repair used to materialise every event anyway -- decode 7 816 payloads, resolve entity
+    # titles, hash every id -- measured 3.2 s to report "nothing to do".  Two structural probes settle
+    # that case without decoding: the parity gap (ids) and the row shape the current writer produces
+    # (``event_date_source`` must be present and consistent with ``event_date``).  Anything the probes
+    # cannot settle still takes the full path below, which is what makes this a fast path and not a
+    # new rule -- ``test_timeline_repair_rewrites_rows_written_before_event_date_source`` still passes.
+    parity = timeline_projection_parity()
+    stale_shape = conn.execute(
+        "SELECT COUNT(*) FROM timeline_events WHERE event_date_source IS NULL "
+        "OR event_date_source NOT IN ('day', 'coarse', 'unknown') "
+        "OR (event_date_source = 'unknown' AND event_date IS NOT NULL) "
+        "OR (event_date_source <> 'unknown' AND event_date IS NULL) "
+        "OR claim_id IS NULL OR claim_id = ''"
+    ).fetchone()[0]
+    if not parity["missing"] and not parity["extra"] and not stale_shape:
+        return (f"Repaired timeline_events: deleted 0 orphan row(s), inserted 0 missing row(s); "
+                f"{parity['projection']} row(s) already in parity with the current writer.")
     claim_rows = conn.execute(
         "SELECT claim_id, claim_text, data_json, updated_at FROM claims "
         "WHERE f_claim_type = 'timeline-event'"

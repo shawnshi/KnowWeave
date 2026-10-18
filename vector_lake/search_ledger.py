@@ -218,6 +218,25 @@ def summary() -> dict:
             return None
         return round(values[min(len(values) - 1, int(len(values) * fraction))], 1)
 
+    # One row per surface.  The headline percentiles mix a page search with a context assembly --
+    # they differ by an order of magnitude -- so a single p50 describes neither.  ``entry_point`` is
+    # absent on rows written before it existed; those are attributed to their ``mode``, and said so.
+    by_surface: dict[str, list[float]] = {}
+    for row in rows:
+        if not isinstance(row.get("ms"), (int, float)):
+            continue
+        name = str(row.get("entry_point") or row.get("mode") or "unknown")
+        by_surface.setdefault(name, []).append(float(row["ms"]))
+    surfaces = {
+        name: {
+            "entries": len(values),
+            "latency_ms_p50": _percentile(sorted(values), 0.5),
+            "latency_ms_p90": _percentile(sorted(values), 0.9),
+            "latency_ms_p95": _percentile(sorted(values), 0.95),
+        }
+        for name, values in sorted(by_surface.items())
+    }
+
     return {
         "entries": len(rows),
         "distinct_queries": len({row.get("q_hash") for row in rows}),
@@ -228,6 +247,7 @@ def summary() -> dict:
         "latency_ms_p50": _percentile(latencies, 0.5),
         "latency_ms_p90": _percentile(latencies, 0.9),
         "origins": dict(sorted(origins.items(), key=lambda item: -item[1])),
+        "by_surface": surfaces,
         "first_at": rows[0].get("at") if rows else None,
         "last_at": rows[-1].get("at") if rows else None,
         "path": str(ledger_path()),
