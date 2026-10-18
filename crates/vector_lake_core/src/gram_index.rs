@@ -285,13 +285,20 @@ pub fn intersect_postings(py: Python<'_>, mut blobs: Vec<Vec<u8>>) -> PyResult<V
         ));
     }
     py.detach(move || {
-        blobs.sort_by_key(Vec::len);
-        let mut result: Option<Vec<u32>> = None;
-        for blob in blobs {
+        for blob in &blobs {
             if blob.len() % 4 != 0 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "postings must contain complete uint32 entries",
                 ));
+            }
+        }
+        blobs.sort_by_key(Vec::len);
+        let mut result: Option<Vec<u32>> = None;
+        for blob in blobs {
+            if let Some(ref previous) = result {
+                if previous.is_empty() {
+                    break;
+                }
             }
             let mut doc = 0u32;
             let mut docs = Vec::with_capacity(blob.len() / 4);

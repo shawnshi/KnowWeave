@@ -20,6 +20,10 @@
   1. 修复源文件入队后发生物理哈希变更时错误累加重试导致死锁在 `terminal_failed` 的缺陷，修正为直接标记 `superseded`，`close_terminal_failed_jobs` 支持物理文件已删除/已重命名场景的自动闭环；
   2. 优化 `select_ingest_candidates` 实体候选生成，移除内层对 7,418 个节点的重复 `target_path.exists()` 文件系统 stat 探针，单次任务组装提速约 360 ms；
   3. 清除 `ingest_abandoned_sources` 误拦截记录，关闭悬挂的重编历史任务，`doctor_vector_lake` 的 `Ingest Jobs` 判定全面恢复健康绿灯（`terminal_failed: 0`）。
+- 检索与时序引擎（Search & Timeline）性能与鲁棒性增强：
+  1. 在 Rust 核心扩展 `crates/vector_lake_core`（v0.2.8）的 `intersect_postings` 算子中引入空交集提前退出机制（Early-exit Short Circuit），在两两求交归零时立即中断循环，避免对后续大 Blob 的无效解包；
+  2. 在 `tool_search._get_query_embedding` 中引入快速失败熔断器（Fast-Fail Circuit Breaker，30 秒静默冷却），在捕获到网络超时或 `EmbeddingBudgetExceeded` 时立即熔断，降级为纯词法与图谱 PPR 检索，杜绝多秒级卡顿阻塞；
+  3. 保持 `timeline` 对 `description` 字段的覆盖性检索，兼顾毫秒级响应与召回完整度。
 - 全库 3 754 项中 3 743 通过；11 项 search-ledger 用例在改动前的 `cacb581` 上以同一清单失败，与本次无关。
 
 ## 内容观察变化时保留 SHA-256 信任基线（2026-10-08）

@@ -254,6 +254,8 @@ _QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, int, str], array]" = OrderedDict
 _QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
 QUERY_EMBEDDING_MAX_IN_FLIGHT = 256
 _QUERY_EMBEDDING_IN_FLIGHT: "dict[tuple[str, int, str], Future]" = {}
+_QUERY_EMBEDDING_CIRCUIT_BREAKER_UNTIL = 0.0
+QUERY_EMBEDDING_CIRCUIT_COOLDOWN_SECONDS = 30.0
 
 
 def _embedding_cache_key(query: str) -> tuple[str, int, str]:
@@ -289,6 +291,9 @@ def _get_query_embedding(query: str) -> tuple[list[float], str | None]:
     """Share concurrent misses by model/dimension/query; each caller keeps its own deadline."""
     if not os.environ.get("GEMINI_API_KEY"):
         return [], "GEMINI_API_KEY is not set"
+    global _QUERY_EMBEDDING_CIRCUIT_BREAKER_UNTIL
+    if time.monotonic() < _QUERY_EMBEDDING_CIRCUIT_BREAKER_UNTIL:
+        return [], "query embedding suspended: circuit breaker active after recent timeout/budget exhaustion"
     deadline = time.monotonic() + QUERY_EMBEDDING_BUDGET_SECONDS
     state = runtime.current()
     if state is not None:
@@ -336,6 +341,9 @@ def _get_query_embedding(query: str) -> tuple[list[float], str | None]:
                     _store_query_embedding_by_key(key, values)
                     result = (values, None)
         except Exception as exc:
+            err_msg = str(exc).lower()
+            if "budget" in err_msg or "timeout" in err_msg or "deadline" in err_msg:
+                _QUERY_EMBEDDING_CIRCUIT_BREAKER_UNTIL = time.monotonic() + QUERY_EMBEDDING_CIRCUIT_COOLDOWN_SECONDS
             message = runtime.failed_stage('Query embedding', exc)
             result = ((), message)
         flight.set_result(result)
