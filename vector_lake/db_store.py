@@ -3929,8 +3929,12 @@ def close_terminal_failed_jobs(source_ingested_only: bool = True) -> dict:
                     kept.append(job["job_id"])
                     continue
             if source_ingested_only and (not filepath or filepath not in ledger):
-                kept.append(job["job_id"])
-                continue
+                from pathlib import Path
+                if filepath and not Path(filepath).exists():
+                    pass  # The source was renamed or removed on disk; close stale job
+                else:
+                    kept.append(job["job_id"])
+                    continue
             conn.execute(
                 "UPDATE jobs SET status = 'superseded', updated_at = ?, "
                 "error_msg = error_msg || ' [closed: the source was ingested by a later job]' "

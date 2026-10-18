@@ -109,9 +109,14 @@ def process_jobs():
         except DispatchClaimLost as e:
             log.warning("Job %s handoff withheld: %s", job_id, e)
         except Exception as e:
-            log.error(f"Job {job_id} failed: {e}")
-            if not fail_dispatch_claim(job, str(e)):
-                log.warning("Job %s failure not recorded: dispatch claim no longer owned", job_id)
+            err_str = str(e)
+            if "source changed" in err_str.lower() or "stale raw-input job" in err_str.lower():
+                log.info("Job %s superseded: source changed on disk before dispatch", job_id)
+                update_job_status(job_id, "superseded", error_msg=err_str)
+            else:
+                log.error(f"Job {job_id} failed: {e}")
+                if not fail_dispatch_claim(job, err_str):
+                    log.warning("Job %s failure not recorded: dispatch claim no longer owned", job_id)
 
 #: Normal cadence of the ingest worker loop.
 INGEST_WORKER_INTERVAL_SECONDS = 5.0

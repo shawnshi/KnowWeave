@@ -942,9 +942,8 @@ def select_ingest_candidates(filepath: str, max_nodes: int = 40, _cache: dict | 
                 validate_wiki_filename(filename)
             except ValueError:
                 continue
-            target_path = wiki_dir / filename
             target_hash = canonical_versions.get(key)
-            if not target_path.exists() or not target_hash:
+            if not target_hash:
                 continue
             aliases = node.get("aliases") or []
             if isinstance(aliases, str):

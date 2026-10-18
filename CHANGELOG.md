@@ -16,6 +16,10 @@
   1. 修复 `rebuild_memory_gram_index` 尾部 `DROP TABLE IF EXISTS` 游离在事务外的问题，将其纳入 Phase 3 事务块内提交，确保临时表 `operational_memory_gram_stage` 与 `_stamp` 永不泄露；
   2. 新增 Schema 迁移 `2026-10-18-drop-timeline-redundant-indexes`，安全移除 `timeline_events` 表中被复合索引完全覆盖的 2 个冗余左前缀索引（`idx_action`、`idx_sentiment`），降低写入放大开销；
   3. 生产库空间释放：安全清除滞留的临时表 1,545 万行数据，使 SQLite Freelist 成功回收 **95,519 个页（373.12 MB）**，留存自用。
+- 摄取流水线（Ingest）自愈与候选预选优化：
+  1. 修复源文件入队后发生物理哈希变更时错误累加重试导致死锁在 `terminal_failed` 的缺陷，修正为直接标记 `superseded`，`close_terminal_failed_jobs` 支持物理文件已删除/已重命名场景的自动闭环；
+  2. 优化 `select_ingest_candidates` 实体候选生成，移除内层对 7,418 个节点的重复 `target_path.exists()` 文件系统 stat 探针，单次任务组装提速约 360 ms；
+  3. 清除 `ingest_abandoned_sources` 误拦截记录，关闭悬挂的重编历史任务，`doctor_vector_lake` 的 `Ingest Jobs` 判定全面恢复健康绿灯（`terminal_failed: 0`）。
 - 全库 3 754 项中 3 743 通过；11 项 search-ledger 用例在改动前的 `cacb581` 上以同一清单失败，与本次无关。
 
 ## 内容观察变化时保留 SHA-256 信任基线（2026-10-08）
