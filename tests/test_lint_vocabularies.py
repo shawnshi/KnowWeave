@@ -12,6 +12,8 @@ These tests drive the check through its real entry point with pages that use the
 source fails here instead of on the live wiki.
 """
 
+import datetime as _dt
+
 from vector_lake.schema_validator import (
     REQUIRED_FIELDS,
     VALID_CATEGORIES,
@@ -44,7 +46,10 @@ def _page(name: str, *, type_: str, status: str, epistemic: str, category: str) 
         f"status: {status}\n"
         f"epistemic-status: {epistemic}\n"
         f"categories: [{category}]\n"
-        "updated: 2026-09-17\n"
+        # Relative to now: semantic GC archives a page that is >30 days old, near-empty and
+        # unlinked, so a hard-coded date silently crossed that threshold as the calendar moved and
+        # the assertion below then read a file the GC had already moved.
+        f"updated: {_dt.date.today().isoformat()}\n"
         "sources: []\n"
         "strategic_scope: core\n"
         "evidence_tier: derived\n"

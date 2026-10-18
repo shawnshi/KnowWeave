@@ -662,12 +662,16 @@ def read_catalog():
         return None, "no index.json to read"
     with _CATALOG_LOCK:
         if _CATALOG_CACHE["key"] == key and _CATALOG_CACHE["catalog"] is not None:
+            from vector_lake import retrieval_runtime as _runtime
+            _runtime.counter('catalog_cache_hit')
             return _CATALOG_CACHE["catalog"], _fallback_note()
         cached = _CATALOG_CACHE["catalog"]
         age = time.monotonic() - float(_CATALOG_CACHE.get("at") or 0.0)
         if cached is not None and age < _fallback_reparse_seconds():
             return cached, _fallback_note(served_from_cache_for=age)
 
+    from vector_lake import retrieval_runtime as _runtime
+    _runtime.counter('catalog_parse')
     index_data = _load_index_json()
     if index_data is None:
         return None, "no index.json to read"
@@ -792,6 +796,8 @@ def adjacency() -> dict[str, list[tuple[str, float]]]:
     with _adjacency_lock:
         if _adjacency["stamp"] == stamp and _adjacency["data"] is not None:
             return _adjacency["data"]
+    from vector_lake import retrieval_runtime as _runtime
+    _runtime.counter('adjacency_build')
     table: dict[str, list[tuple[str, float]]] = {}
     for source, target, weight in conn.execute(
         "SELECT source_key, target_key, weight FROM page_index_edges ORDER BY sequence"

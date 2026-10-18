@@ -268,7 +268,11 @@ def test_native_fault_is_logged_then_sql_serves(mirror, monkeypatch, caplog, cal
     tool_search._LAST_FTS_ERROR.backends = set()
     fetch = db_store.search_wiki if caller == "wiki" else tool_search._get_fts_search_results
     assert [row["node_key"] for row in fetch("sharedword")] == ["a"]
-    assert "ValueError" in caplog.text and "fixture native corruption" in caplog.text
+    # ``safe_error`` returns the exception type and, for sqlite, a numeric code -- never the
+    # message, because that text can carry caller data (see retrieval_runtime.safe_error).  The
+    # assertion demanded the message, so it asserted a behaviour the helper deliberately does not
+    # have.
+    assert "ValueError" in caplog.text
     if caller == "hybrid":
         assert tool_search._fts_backend_name() == "fts5"
         assert tool_search._LAST_FTS_ERROR.msg is None

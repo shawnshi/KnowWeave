@@ -1489,6 +1489,7 @@ def _search_scored_pages(
     allow_external_embedding: bool = True,
     profile: str = 'legacy',
     use_chunks: bool = False,
+    entry_point: str = 'search',
 ):
     """Ranked pages plus retrieval notes.
 
@@ -1544,6 +1545,7 @@ def _search_scored_pages(
         payload: dict = dict(
             query=query,
             mode="page",
+            entry_point=entry_point,
             top_k=top_k,
             returned=returned_rows,
             notes=notes,
@@ -2296,7 +2298,7 @@ def assemble_context(
     scored_pages, vector_notes, retrieval_error = _search_scored_pages(
         query, top_k=15, catalog=catalog, projection_note=projection_note,
         domain=domain, cluster=cluster, allow_external_embedding=allow_external_embedding,
-        profile=profile, use_chunks=use_chunks,
+        profile=profile, use_chunks=use_chunks, entry_point='context',
     )
     vector_notes.extend(memory_notes)
 

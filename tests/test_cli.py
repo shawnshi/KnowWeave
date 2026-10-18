@@ -23,18 +23,24 @@ class TestCLI(unittest.TestCase):
     @patch('vector_lake.tools.search_vector_lake')
     def test_search_command(self, mock_search):
         mock_search.return_value = "Search Results"
-        with patch('sys.argv', ['cli.py', 'search', 'test_query', '--top_k', '3']):
+        with patch('sys.argv', ['cli.py', 'search', 'test_query', '--top_k', '3', '--domain', 'Medical_IT']):
             result = cli_app.main()
         self.assertEqual(result, 0)
-        mock_search.assert_called_once_with('test_query', 3, domain=None, cluster=None, include_history=False, mode='page')
+        mock_search.assert_called_once_with(
+            'test_query', 3, domain='Medical_IT', cluster='', include_history=False, mode='page',
+            allow_external_embedding=False, profile='auto', use_chunks=False,
+        )
 
     @patch('vector_lake.tools.prepare_query_context')
     def test_query_command(self, mock_query):
         mock_query.return_value = "Query Completed"
-        with patch('sys.argv', ['cli.py', 'query', 'test_question', '--dry-run']):
+        with patch('sys.argv', ['cli.py', 'query', 'test_question', '--dry-run', '--domain', 'Medical_IT']):
             result = cli_app.main()
         self.assertEqual(result, 0)
-        mock_query.assert_called_once_with('test_question', True)
+        mock_query.assert_called_once_with(
+            'test_question', True, domain='Medical_IT', cluster=None,
+            allow_external_embedding=False, profile='auto', use_chunks=False,
+        )
 
 if __name__ == '__main__':
     unittest.main()

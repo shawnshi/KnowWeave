@@ -251,7 +251,9 @@ def search_vector_lake(
     Args:
         query: The semantic query string.
         top_k: Number of results to return (default 5).
-        mode: Search mode: 'page' (hybrid lexical + vector + PPR), 'memory' (operational memory), or 'claim' (facts).
+        mode: Search mode: 'page' (lexical FTS5 + graph PPR + local rerank by default; the vector
+            arm joins only when allow_external_embedding=True and the embedding provider is
+            configured), 'memory' (operational memory), or 'claim' (facts).
         domain: Exact subject filter, e.g. 'Medical_IT', 'Policy_and_Governance', 'General'.
             General is a literal category, not all domains. 'HIT' and 'Clinical' are not aliases.
             Keep retrieval within task-authorized domains; use separate queries for multiple domains.

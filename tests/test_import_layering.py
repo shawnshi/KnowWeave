@@ -182,4 +182,8 @@ def test_only_the_two_documented_pairs_are_deferred_and_upward():
     assert _deferred_upward_edges() == {
         ("wiki_utils", "mutation_coordinator"),
         ("db_store", "tool_timeline"),
+        # ``scoped_memory_search`` imports ``governance_store`` at module level (it is the store's
+        # scoped reader), so the store's own two call sites defer the import back to it.  Same
+        # shape as the two above: a recorded inversion, not an absorbed one.
+        ("governance_store", "scoped_memory_search"),
     }

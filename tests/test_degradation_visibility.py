@@ -70,10 +70,17 @@ def test_search_reports_vector_degradation_visibly(isolated_memory, monkeypatch)
     indexer.generate_index()
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    result = search_vector_lake("Acme HIS vendor", top_k=3)
+    # The key branch is only reachable when the caller opts in: with the default
+    # ``allow_external_embedding=False`` the note is the (informational) policy line, not a
+    # degradation, and a test that demanded [DEGRADED] without opting in was asserting a
+    # contract the tool does not have.
+    result = search_vector_lake("Acme HIS vendor", top_k=3, allow_external_embedding=True)
 
     assert "[DEGRADED]" in result
     assert "GEMINI_API_KEY" in result
+
+    default = search_vector_lake("Acme HIS vendor", top_k=3)
+    assert "External embedding disabled by request policy" in default
 
 
 def test_graph_expansion_respects_domain_filter(isolated_memory, monkeypatch):

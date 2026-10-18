@@ -80,6 +80,10 @@ def record(
     configuration: dict | None = None,
     timings: dict | None = None,
     status: str | None = None,
+    entry_point: str | None = None,
+    request_total_ms: float | None = None,
+    process: dict | None = None,
+    cache_events: dict | None = None,
 ) -> None:
     """Append one entry.  Never raises: a measurement must not break the thing it measures.
 
@@ -130,6 +134,19 @@ def record(
             entry["notes"] = [str(note) for note in notes]
         if elapsed_ms is not None:
             entry["ms"] = round(float(elapsed_ms), 1)
+        if entry_point is not None:
+            # Which surface produced this row: ``search`` and ``context`` used to be recorded as
+            # ``mode="page"`` alike, so a context assembly could not be told from a page search.
+            entry["entry_point"] = str(entry_point)
+        if request_total_ms is not None:
+            # The whole request scope, beside the stage's own ``ms``.  They differ exactly when the
+            # recorded stage ran nested inside a larger one.
+            entry["request_ms"] = round(float(request_total_ms), 1)
+        if process is not None:
+            entry["process"] = {key: process[key] for key in ('pid', 'token', 'uptime_ms') if key in process}
+        if cache_events:
+            # Structural work this request caused (a graph rebuild, a catalog parse, a cache hit).
+            entry["cache_events"] = {str(k): int(v) for k, v in cache_events.items()}
         if error:
             entry["error"] = str(error)
 

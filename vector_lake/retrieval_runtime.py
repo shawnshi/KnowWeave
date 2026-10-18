@@ -7,8 +7,35 @@ from dataclasses import dataclass, field
 from functools import wraps
 import inspect
 import logging
+import os
 from pathlib import Path
 import time
+
+#: Process identity, so a ledger entry can say which process answered and how old it was.  Without
+#: it a slow call cannot be told apart from a cold process: two restarts look like two slow queries.
+PROCESS_STARTED = time.monotonic()
+PROCESS_ID = os.getpid()
+PROCESS_TOKEN = f"{PROCESS_ID:x}-{int(PROCESS_STARTED):x}"
+
+#: Process-wide structural counters.  A request reports the delta it caused, which is what makes
+#: "did this call rebuild the graph" answerable from the ledger instead of inferred from a latency.
+_COUNTERS: dict[str, int] = {}
+
+
+def counter(name: str, amount: int = 1) -> None:
+    """Count one structural event (a rebuild, a parse, a cache hit)."""
+    _COUNTERS[name] = _COUNTERS.get(name, 0) + amount
+
+
+def counter_snapshot() -> dict[str, int]:
+    return dict(_COUNTERS)
+
+
+def counter_delta(before: dict[str, int]) -> dict[str, int]:
+    """Counters that moved since ``before``; unchanged ones are omitted."""
+    return {name: value - before.get(name, 0) for name, value in _COUNTERS.items()
+            if value - before.get(name, 0)}
+
 
 MAX_QUERY_CHARS = 4096
 MAX_TOP_K = 50
@@ -46,6 +73,7 @@ class RequestState:
     top_k: int = 0
     completion: str = 'complete'
     timings: dict[str, float] = field(default_factory=dict)
+    counters: dict[str, int] = field(default_factory=dict)
 
     def problem(self, message: str):
         if message not in self.problems:
@@ -178,6 +206,7 @@ def defer_record(payload: dict) -> bool:
 def _finish(state: RequestState):
     from vector_lake import search_ledger
     total = (time.monotonic() - state.started) * 1000
+    events = counter_delta(state.counters)
     if not state.pending:
         state.pending.append({'query': state.query, 'mode': state.mode, 'top_k': state.top_k,
                               'returned': [], 'notes': [], 'status': 'complete'})
@@ -196,7 +225,17 @@ def _finish(state: RequestState):
         payload['status'] = status
         if status == 'failed' and not payload.get('error'):
             payload['error'] = 'retrieval_failed'
-        payload['elapsed_ms'] = total
+        # The payload keeps the elapsed time of the stage that produced it; the whole request is
+        # recorded beside it.  Overwriting ``elapsed_ms`` here is what made a page search inside a
+        # context assembly report the assembly's duration, so a scoped memory packet and a page
+        # search were indistinguishable in the ledger.
+        payload.setdefault('elapsed_ms', total)
+        payload['request_total_ms'] = total
+        payload['entry_point'] = payload.get('entry_point') or state.mode
+        payload['process'] = {'pid': PROCESS_ID, 'token': PROCESS_TOKEN,
+                              'uptime_ms': round((time.monotonic() - PROCESS_STARTED) * 1000)}
+        if events:
+            payload['cache_events'] = events
         payload['timings'] = {**payload.get('timings', {}), **state.timings,
                               'endpoint_total': total}
         payload['index_generation'] = repr((payload.get('index_generation'), state.generations))
@@ -216,6 +255,7 @@ def request_scope(query, *, top_k=None, max_chars=None):
         return
     started = time.monotonic()
     state = RequestState(started, started + REQUEST_SECONDS, query=query, top_k=top_k or 0)
+    state.counters = counter_snapshot()
     token = _CURRENT.set(state)
     try:
         yield state
