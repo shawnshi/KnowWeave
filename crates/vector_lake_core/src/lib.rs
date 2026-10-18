@@ -24,6 +24,10 @@ fn vector_lake_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gram_index::unpack_postings, m)?)?;
     m.add_function(wrap_pyfunction!(gram_index::accumulate_postings, m)?)?;
     m.add_function(wrap_pyfunction!(gram_index::fast_accumulate_terms, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        gram_index::fast_fused_frequencies_and_relevance,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(gram_index::extract_grams, m)?)?;
     m.add_function(wrap_pyfunction!(gram_index::intersect_postings, m)?)?;
 

@@ -105,7 +105,7 @@ def scoped_sql(conn, domains=None, cluster=None, *, max_payload_bytes=None, incl
 
 
 def scoped_memory_scope_sql(conn, domains, cluster=None):
-    """``operational_memory_index`` row ids whose resolved scope matches.
+    """Document numbers whose resolved scope matches.
 
     The payload predicate resolves each axis independently -- the row's own ``$.domain`` when it
     states one, else its page's; likewise ``$.topic_cluster`` -- so a row can take its domain from
@@ -113,8 +113,9 @@ def scoped_memory_scope_sql(conn, domains, cluster=None):
     them answerable from columns: ``memory_domain``/``memory_cluster`` for the own half, ``page_key``
     joined to ``page_index_nodes.node_key`` for the page half.  Measured on the live corpus: 115-130
     ms for the 30 613-row Medical_IT scope against 285-470 ms for the JSON-expression form, and it
-    returns ids in the namespace the n-gram postings use, so nothing has to be translated between
-    ``operational_memory.rowid`` and ``operational_memory_index.rowid``.
+    returns numbers in the namespace the n-gram postings use -- the identity map's ``doc`` -- so
+    nothing has to be translated between ``operational_memory.rowid``,
+    ``operational_memory_index.rowid`` and a posting's document number.
 
     ``domains`` must already be lowercased and alias-expanded by the caller; ``cluster`` is matched
     exactly, as the payload predicate does.  Either may be omitted, not both.  Hints are applied
@@ -163,16 +164,26 @@ def scoped_memory_scope_sql(conn, domains, cluster=None):
                 # The page side drives the branch: a few thousand page rows seek the
                 # page_key index, instead of 74k index rows reaching for a page.
                 selects.append(
-                    'SELECT i.rowid FROM page_index_nodes p INDEXED BY idx_rsp_page_domain '
+                    'SELECT i.memory_id FROM page_index_nodes p INDEXED BY idx_rsp_page_domain '
                     f'JOIN operational_memory_index i{key_hint} ON i.page_key = p.node_key '
                     'WHERE ' + ' AND '.join(where)
                 )
             else:
                 selects.append(
-                    'SELECT i.rowid FROM operational_memory_index i WHERE ' + ' AND '.join(where)
+                    'SELECT i.memory_id FROM operational_memory_index i '
+                    'WHERE ' + ' AND '.join(where)
                 )
             params.extend(bound)
-    return ' UNION '.join(selects), params
+    # Wrap in a CTE to avoid 30k nested-loop B-tree seeks into operational_memory_gram_docs.
+    # The inner UNION compiles domain/page candidate memory_ids with covering indexes only,
+    # and the outer query joins g once over deduplicated candidate IDs.
+    union_sql = ' UNION '.join(selects)
+    cte_sql = (
+        f'WITH candidates AS ({union_sql}) '
+        'SELECT g.doc FROM candidates c '
+        'JOIN operational_memory_gram_docs g ON g.memory_id = c.memory_id'
+    )
+    return cte_sql, params
 
 
 def apply(conn, *, budget_seconds=60.0):

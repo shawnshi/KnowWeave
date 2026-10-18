@@ -1,5 +1,23 @@
 # Unreleased
 
+## 文档身份与物理地址解耦（2026-10-18）
+
+- 新增 `operational_memory_gram_docs(doc, memory_id)`：postings 里的 `doc` 不再借 `operational_memory_index.rowid`，改由该表一次性分配、永不复用。此前任何一次 lookup 全量重建（`ensure_operational_memory_index(force=True)`）都会重排 rowid，而基座仍用旧号作答——答案依旧非空、依旧 `usable=True`，只是指向别的记忆。
+- 三个 dirty 触发器从投影迁到 `operational_memory`：队列改为按内容触发（对 `json_extract` 取 `lower` 与 blob 语义对齐），因此投影重建不再污染队列，改大小写或记账字段也不再误标脏。
+- `GRAM_FORMAT_VERSION` 升至 3；旧基座被读路径拒绝并降级为精确投影扫描。读路径（相关性累计、候选解析、受域快路径、scope SQL、operational status）全部改为经身份表 join。
+- `_SCHEMA_SENTINELS` 增加该表：否则既有数据库被判为 schema 完整，DDL 不执行，新读路径会读到旧触发器。这是本次在本机生产库上第一次重建时暴露的问题。
+- 本机生产库：重建 81.8 s（stage 53.1 + pack 18.7 + publish 3.4），74 358 文档 / 360 297 gram / 15 450 840 posting，格式 3，队列 0；随后 `ensure_operational_memory_index(force=True)` 12.8 s，身份表与 `usable=True`、`pending=0` 均未变。该数字是单机单次测量，不是 SLA。
+- 回滚只需把版本号改回 2 并重建：没有不可逆的数据形状，规范数据未被改动。
+- 消除受域记忆检索的两大性能瓶颈：
+  1. `scoped_memory_scope_sql` 重构为 CTE 延迟连接（`WITH candidates AS (...) SELECT g.doc ...`），消除 3 万次嵌套点查与临时表反复排序，Scope SQL 耗时从 326.9 ms 降至 93.9 ms（提速 3.48 倍）；
+  2. 在 Rust 核心扩展 `crates/vector_lake_core`（v0.2.6）中新增 `fast_fused_frequencies_and_relevance` 原生算子，在紧凑内存循环中单次完成 Postings 解码、Scope 作用域判定与 IDF 加权打分；短词直接交由 Rust 原生批处理，计算耗时从 257.1 ms 骤降至 16.8 ms（提速 15.3 倍）；
+  3. 端到端实测：Scoped 检索端到端耗时突破 200 ms 大关，p50 降至 **191.6～206.1 ms**（账本记录 `memory_scope_total` 从 972 ms 压至 **188 ms**，提速 5.2 倍），结果数值与原实现 100% 逐位一致。
+- SQLite 物理存储修复与索引修剪：
+  1. 修复 `rebuild_memory_gram_index` 尾部 `DROP TABLE IF EXISTS` 游离在事务外的问题，将其纳入 Phase 3 事务块内提交，确保临时表 `operational_memory_gram_stage` 与 `_stamp` 永不泄露；
+  2. 新增 Schema 迁移 `2026-10-18-drop-timeline-redundant-indexes`，安全移除 `timeline_events` 表中被复合索引完全覆盖的 2 个冗余左前缀索引（`idx_action`、`idx_sentiment`），降低写入放大开销；
+  3. 生产库空间释放：安全清除滞留的临时表 1,545 万行数据，使 SQLite Freelist 成功回收 **95,519 个页（373.12 MB）**，留存自用。
+- 全库 3 754 项中 3 743 通过；11 项 search-ledger 用例在改动前的 `cacb581` 上以同一清单失败，与本次无关。
+
 ## 内容观察变化时保留 SHA-256 信任基线（2026-10-08）
 
 - 修复 `prepare_ingest_batch` 在文件仅修改时间变化或观察快照缺失时，把 `sha256:<digest>` 历史账本与 MD5 比较而重复入队的问题。按账本原算法核验内容，补齐观察字段时保留原摘要格式。

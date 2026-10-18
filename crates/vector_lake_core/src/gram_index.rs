@@ -197,6 +197,85 @@ pub fn fast_accumulate_terms(
     accumulator
 }
 
+/// 单次遍历完成 Postings 解码、DF 统计与 IDF 缩放打分 (支持可选的 scope_docs 与 skip_docs 过滤)
+#[pyfunction]
+#[pyo3(signature = (term_blobs, total_docs, skip_docs=None, scope_docs=None, weights=None))]
+pub fn fast_fused_frequencies_and_relevance(
+    term_blobs: Vec<(String, Vec<u8>)>,
+    total_docs: u32,
+    skip_docs: Option<HashSet<u32>>,
+    scope_docs: Option<HashSet<u32>>,
+    weights: Option<Vec<u32>>,
+) -> (HashMap<String, u32>, HashMap<u32, f64>) {
+    let w = match &weights {
+        Some(custom) if custom.len() >= 16 => {
+            let mut arr = [0u32; 16];
+            arr.copy_from_slice(&custom[..16]);
+            arr
+        }
+        _ => FIELD_WEIGHTS,
+    };
+
+    let total = (total_docs as f64).max(1.0);
+    let mut frequencies: HashMap<String, u32> = HashMap::with_capacity(term_blobs.len());
+    let mut decoded: Vec<(String, HashMap<u32, u32>, u32)> = Vec::with_capacity(term_blobs.len());
+
+    for (term, blob) in term_blobs {
+        if blob.len() % 4 != 0 {
+            frequencies.insert(term, 0);
+            continue;
+        }
+
+        let mut folded: HashMap<u32, u32> = HashMap::new();
+        let mut doc = 0u32;
+        let mut term_df = 0u32;
+
+        for chunk in blob.chunks_exact(4) {
+            let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            doc = doc.wrapping_add(value >> 4);
+
+            if let Some(ref skip) = skip_docs {
+                if skip.contains(&doc) {
+                    continue;
+                }
+            }
+
+            let mask = (value & 0x0F) as usize;
+            if mask > 0 {
+                let in_scope = match scope_docs {
+                    Some(ref scope) => scope.contains(&doc),
+                    None => true,
+                };
+
+                if in_scope {
+                    if folded.insert(doc, w[mask]).is_none() {
+                        term_df += 1;
+                    }
+                }
+            }
+        }
+
+        frequencies.insert(term.clone(), term_df);
+        decoded.push((term, folded, term_df));
+    }
+
+    let mut accumulator: HashMap<u32, f64> = HashMap::new();
+    for (_term, folded, df) in decoded {
+        if df == 0 || folded.is_empty() {
+            continue;
+        }
+        let factor = (1.0 + total / (df as f64)).ln();
+        if factor <= 0.0 {
+            continue;
+        }
+        for (doc, weight) in folded {
+            *accumulator.entry(doc).or_insert(0.0) += factor * (weight as f64);
+        }
+    }
+
+    (frequencies, accumulator)
+}
+
 /// Intersect document ids; exact substring verification still belongs to Python.
 #[pyfunction]
 pub fn intersect_postings(py: Python<'_>, mut blobs: Vec<Vec<u8>>) -> PyResult<Vec<u32>> {

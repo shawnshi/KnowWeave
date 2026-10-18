@@ -256,11 +256,16 @@ def maintain(db_path, directory, mode="dry-run", *, approved_count=None,
     selected = "memory_id IN (SELECT value FROM json_each(?))"
     unrelated_sql = "SELECT " + ", ".join(COLUMNS) + " FROM operational_memory WHERE NOT (" + selected + ") ORDER BY memory_id"
     index_unrelated_sql = "SELECT * FROM operational_memory_index WHERE NOT (" + selected + ") ORDER BY memory_id"
-    writable = {"operational_memory", "operational_memory_index", "operational_memory_gram_dirty"}
+    writable = {"operational_memory", "operational_memory_index", "operational_memory_gram_dirty",
+                # The gram index's identity map: the canonical insert trigger allocates one row
+                # for a memory that has never been indexed.  Append-only, and nothing here
+                # deletes from it -- a document number is never handed to a second identity.
+                "operational_memory_gram_docs"}
+    append_only = {"operational_memory_gram_dirty", "operational_memory_gram_docs"}
 
     def authorizer(action, table, _column, _database, _trigger):
         if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
-            if table not in writable or (table == "operational_memory_gram_dirty" and action != sqlite3.SQLITE_INSERT):
+            if table not in writable or (table in append_only and action != sqlite3.SQLITE_INSERT):
                 return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
@@ -286,13 +291,13 @@ def maintain(db_path, directory, mode="dry-run", *, approved_count=None,
             before_index = fingerprint(conn.execute(index_unrelated_sql, (ids_json,)), budget.check)
             before_markers = {row[0] for row in conn.execute("SELECT doc FROM operational_memory_gram_dirty")}
             before_tables = table_counts(conn)
-            docs = [row[0] for row in conn.execute("SELECT rowid FROM operational_memory_index WHERE " + selected, (ids_json,))]
+            projected = [row[0] for row in conn.execute("SELECT rowid FROM operational_memory_index WHERE " + selected, (ids_json,))]
             if mode == "apply":
                 live_positions = {row["memory_id"]: row["rowid"] for row in conn.execute(
                     "SELECT memory_id, rowid FROM operational_memory WHERE " + selected, (ids_json,))}
                 if live_positions != positions:
                     raise RuntimeError("Canonical rowids changed since the frozen snapshot")
-                if len(docs) != len(rows):
+                if len(projected) != len(rows):
                     raise RuntimeError("Target lookup projection is incomplete; refusing deletion")
                 deleted = conn.execute("DELETE FROM operational_memory WHERE " + selected, (ids_json,)).rowcount
                 if deleted != len(rows):
@@ -320,13 +325,18 @@ def maintain(db_path, directory, mode="dry-run", *, approved_count=None,
                     expected_rows.append(tuple(values))
                 if [tuple(row) for row in actual] != expected_rows:
                     raise RuntimeError("Restored lookup projection differs from its canonical records")
-                docs = [row[0] for row in conn.execute("SELECT rowid FROM operational_memory_index WHERE " + selected, (ids_json,))]
-            doc_json = json.dumps(docs)
+            # The gram queue is keyed on document identities, not on projection row ids.  Reading it
+            # through the projection would compare two namespaces: a memory re-derived by the
+            # lookup triggers gets a new row id but keeps the document number its postings name.
+            gram_docs = [row[0] for row in conn.execute(
+                "SELECT doc FROM operational_memory_gram_docs WHERE memory_id IN (SELECT value FROM json_each(?))",
+                (ids_json,))]
+            doc_json = json.dumps(gram_docs)
             retired = conn.execute("SELECT COUNT(*) FROM operational_memory_gram_dirty WHERE doc IN (SELECT value FROM json_each(?))", (doc_json,)).fetchone()[0]
-            if retired != len(docs):
+            if retired != len(gram_docs):
                 raise RuntimeError("Native gram retirement/dirty markers did not cascade")
             after_markers = {row[0] for row in conn.execute("SELECT doc FROM operational_memory_gram_dirty")}
-            if after_markers != before_markers | set(docs):
+            if after_markers != before_markers | set(gram_docs):
                 raise RuntimeError("Unrelated gram markers changed; rolling back")
             if fingerprint(conn.execute(unrelated_sql, (ids_json,)), budget.check) != before_other:
                 raise RuntimeError("Unrelated canonical memories changed; rolling back")
@@ -340,7 +350,7 @@ def maintain(db_path, directory, mode="dry-run", *, approved_count=None,
         cleanup_errors = cleanup_connection(conn, old_busy_timeout)
     receipt = {"state": "committed" if committed else "not-committed", "mode": mode,
                "connection_cleanup_errors": cleanup_errors, "affected": len(rows), "scope_sha256": manifest["scope_sha256"],
-               "native_index_cascade_verified": True, "gram_markers_verified": len(docs),
+               "native_index_cascade_verified": True, "gram_markers_verified": len(gram_docs),
                "unrelated_gram_markers_preserved": True, "recovery_rowids_verified": True,
                "unrelated_memories_and_lookup_preserved": True, "other_authority_writes_prohibited": True,
                "checked_authority_table_counts_preserved": True,

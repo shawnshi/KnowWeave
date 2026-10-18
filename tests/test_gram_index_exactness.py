@@ -141,7 +141,7 @@ def test_a_base_from_the_previous_release_is_not_trusted(one_doc):
     _put(conn, "mem_x", "影像 云平台 部署")
     with db_store.transaction():
         conn.execute("DELETE FROM operational_memory_gram_dirty WHERE doc IN "
-                     "(SELECT rowid FROM operational_memory_index)")
+                     "(SELECT doc FROM operational_memory_gram_docs)")
         conn.execute("UPDATE operational_memory_gram_state SET format_version = 1")
 
     assert memory_gram_index.live_dirty_doc_count() == 0

@@ -455,7 +455,7 @@ python cli.py anchor-backfill --only 1,2,5,9-14 --apply
 * `projection-rebuild-index`：从 canonical 重建页面索引、FTS 和 claim topology，保留已有向量。
 * `embedding-backfill`：按 RPM/TPM 限额断点补齐向量；`wiki-restore` 从 canonical 恢复缺失的 Markdown。
 * `timeline-repair`：就地修复事件投影 parity 与日期来源字段，不以入库日期代替事件日期。
-* `gram-index`：报告或重建精确 n-gram 倒排。脏基表不服务，检索退回精确扫描；重建分批 staging，最后经内容指纹校验发布。`--if-due` 根据基表可用性、500 个脏文档阈值、脏基线年龄、搜索成本摊销及交互式搜索阈值判断到期。守护进程提供定时维护；手工命令本身不要求守护进程运行。以实际 `due=` 和 `Watchdog Status` 判断维护状态。
+* `gram-index`：报告或重建精确 n-gram 倒排（Format 3）。基座 postings 文档编号采用独立的代理键映射表（`operational_memory_gram_docs`），将文档逻辑身份与物理表 `rowid` 彻底解耦，投影重建不再导致基座失效或指向错误记忆；脏队列挂在 `operational_memory` 上按内容变化触发，记账与大小写变更不误标脏；分批 staging 并在发布事务内原子清理临时表。检索链路采用 CTE 延迟连接并由 Rust 原生算子（`vector_lake_core`）单流水线融合处理，消除冗余解包。脏基表不服务，检索退回精确扫描。`--if-due` 根据基表可用性、500 个脏文档阈值、脏基线年龄、搜索成本摊销及交互式搜索阈值判断到期。守护进程提供定时维护；手工命令本身不要求守护进程运行。以实际 `due=` 和 `Watchdog Status` 判断维护状态。
 * `backup-retention`：只约束 `.meta/backups` 中的数据库副本，默认保留最新 3 份，其余受 12 GiB 预算约束；最新一份不会因超预算被删。`MEMORY/backup/` 中的页面恢复点不在此范围。
 * `idempotency-status` / `repair-idempotency`：检查唯一性等级，清理冗余幂等键以恢复完整唯一索引，不删除业务行。
 * `claim-pointer-report` / `claim-pointer-repair`：检查及摘除证据中的死 claim 指针，先记录回滚项；`--edges` 只修正可解析的目标页面键，不改边的出处页，不更新证据新鲜度。该入口不清理历史孤儿 operational memory，后者使用下述冻结范围维护脚本。

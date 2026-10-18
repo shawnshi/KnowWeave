@@ -757,12 +757,25 @@ def _create_page_index_tables(conn: sqlite3.Connection) -> None:
 def _create_memory_gram_tables(conn: sqlite3.Connection) -> None:
     """Schema for the exact n-gram index in ``vector_lake.memory_gram_index``.
 
-    The dirty queue is filled by triggers on the projection, so every writer of
-    ``operational_memory`` -- including ones outside this module -- marks its own
-    documents stale.  Nothing here computes grams: that needs Python, and replacing the
-    base is a maintenance step the operator or the scheduled block triggers (see
-    ``vector_lake.memory_gram_index``).  The overlay table an older release filled is
-    neither created nor read any more, and the prune below drops it where it survives.
+    The dirty queue is filled by triggers on ``operational_memory`` -- the canonical table,
+    not the projection -- so every writer marks its own documents stale *and* the queue
+    survives the projection being rebuilt.  Nothing here computes grams: that needs Python,
+    and replacing the base is a maintenance step the operator or the scheduled block
+    triggers (see ``vector_lake.memory_gram_index``).  The overlay table an older release
+    filled is neither created nor read any more, and the prune below drops it where it
+    survives.
+
+    ``operational_memory_gram_docs`` is what makes the queue survive that rebuild.  A
+    posting names its document by the integer ``doc``, and until version 3 that integer was
+    ``operational_memory_index.rowid`` -- a physical address.  The projection is rewritten
+    wholesale whenever it is re-derived (``ensure_operational_memory_index(force=True)``
+    deletes every row and inserts it again), which renumbers the addresses while the base
+    keeps the old ones, so after one such rebuild every posting silently names a different
+    memory: the index still answers, and its answers are wrong.  Suffix arrays and inverted
+    indexes generally need a stable document number for the same reason; this table is
+    that number.  Rows are allocated once and never deleted, so an integer is never reused
+    for a second identity -- a retired document keeps naming the memory it described, whose
+    postings the read path then drops for having no projection row.
     """
     conn.execute(
         """
@@ -786,6 +799,14 @@ def _create_memory_gram_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS operational_memory_gram_docs (
+            doc INTEGER PRIMARY KEY,
+            memory_id TEXT NOT NULL UNIQUE
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS operational_memory_gram_dirty (
             doc INTEGER PRIMARY KEY
         )
@@ -804,9 +825,9 @@ def _create_memory_gram_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    for trigger, event, doc, when in (
-        ("trg_om_gram_dirty_insert", "AFTER INSERT", "NEW.rowid", ""),
-        # Only a change to a gram-bearing column can make the base postings stale.  Firing on
+    for trigger, event, memory_id, when, allocate in (
+        ("trg_om_gram_dirty_insert", "AFTER INSERT", "NEW.memory_id", "", True),
+        # Only a change to a gram-bearing field can make the base postings stale.  Firing on
         # every update marked the index unusable for bookkeeping edits alone -- ``validity_state``,
         # ``memory_score``, ``updated_rank`` and ``source_updated_at`` churn constantly, and a
         # sample of 200 queued documents found 200 of them with postings that already matched
@@ -814,34 +835,56 @@ def _create_memory_gram_tables(conn: sqlite3.Connection) -> None:
         # document is queued, so a false marker is not merely wasted maintenance: it takes the
         # indexed path away from every search until the next rebuild, which the next bookkeeping
         # write then undoes again.
+        #
+        # The comparison is on the *blob* semantics, not on the raw JSON: the base is built from
+        # ``operational_memory_index.key_blob``/``text_blob``/``page_blob``, which are the same
+        # fields lowercased, so a change that only alters case cannot make a posting stale and
+        # must not queue the document.
         (
             "trg_om_gram_dirty_update",
             "AFTER UPDATE",
-            "NEW.rowid",
-            "WHEN OLD.key_blob IS NOT NEW.key_blob "
-            "OR OLD.text_blob IS NOT NEW.text_blob "
-            "OR OLD.page_blob IS NOT NEW.page_blob",
+            "NEW.memory_id",
+            "WHEN lower(COALESCE(json_extract(OLD.data_json, '$.memory_key'), '')) "
+            "IS NOT lower(COALESCE(json_extract(NEW.data_json, '$.memory_key'), '')) "
+            "OR lower(COALESCE(json_extract(OLD.data_json, '$.text'), '')) "
+            "IS NOT lower(COALESCE(json_extract(NEW.data_json, '$.text'), '')) "
+            "OR lower(COALESCE(json_extract(OLD.data_json, '$.source_page'), '')) "
+            "IS NOT lower(COALESCE(json_extract(NEW.data_json, '$.source_page'), ''))",
+            False,
         ),
-        ("trg_om_gram_dirty_delete", "AFTER DELETE", "OLD.rowid", ""),
+        # A delete never needs to allocate: every document the base can name already has its
+        # identity row, and a memory that never had one has no postings to retire.
+        ("trg_om_gram_dirty_delete", "AFTER DELETE", "OLD.memory_id", "", False),
     ):
-        # ``INSERT OR IGNORE``/``OR REPLACE`` are rejected here: this trigger runs
-        # nested inside the projection's own upsert, and SQLite raises the UNIQUE
-        # violation instead of applying the nested conflict resolution (verified
-        # with a minimal repro).  An explicit NOT EXISTS guard cannot conflict.
+        # ``INSERT OR IGNORE``/``OR REPLACE`` are rejected here: a trigger body is a nested
+        # statement, and SQLite raises the UNIQUE violation instead of applying the nested
+        # conflict resolution (verified with a minimal repro).  An explicit NOT EXISTS guard
+        # cannot conflict.
         #
         # Dropped rather than guarded with IF NOT EXISTS because a trigger body is
         # code, and an upgraded database would otherwise keep the previous, buggy
-        # body forever.
+        # body forever -- including the version that was attached to the projection and
+        # therefore derived the document number from a physical row id.
+        allocate_doc = (
+            f"""
+                INSERT INTO operational_memory_gram_docs (memory_id)
+                SELECT {memory_id} WHERE NOT EXISTS (
+                    SELECT 1 FROM operational_memory_gram_docs WHERE memory_id = {memory_id}
+                );"""
+            if allocate
+            else ""
+        )
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         conn.execute(
             f"""
             CREATE TRIGGER {trigger}
-            {event} ON operational_memory_index
+            {event} ON operational_memory
             {when}
-            BEGIN
+            BEGIN{allocate_doc}
                 INSERT INTO operational_memory_gram_dirty (doc)
-                SELECT {doc} WHERE NOT EXISTS (
-                    SELECT 1 FROM operational_memory_gram_dirty WHERE doc = {doc}
+                SELECT g.doc FROM operational_memory_gram_docs AS g
+                WHERE g.memory_id = {memory_id} AND NOT EXISTS (
+                    SELECT 1 FROM operational_memory_gram_dirty AS d WHERE d.doc = g.doc
                 );
             END
             """
@@ -1123,6 +1166,10 @@ _SCHEMA_SENTINELS: tuple[str, ...] = (
     "claim_index",
     "vec_embedding_projection",
     "vec_embedding_inputs",
+    # Added with document identities (gram format version 3).  Without it here, an existing
+    # database looks complete and keeps the triggers that numbered a document by the projection's
+    # row id -- while the new read path resolves those numbers through this table.
+    "operational_memory_gram_docs",
 )
 
 
@@ -1374,6 +1421,15 @@ def _restore_processed_files_observation_snapshot(conn: sqlite3.Connection) -> N
             conn.execute(f"ALTER TABLE processed_files ADD COLUMN {column} INTEGER")
 
 
+def _prune_timeline_redundant_indexes(conn: sqlite3.Connection) -> None:
+    """Drop legacy redundant single-column indexes on timeline_events subsumed by composite indexes."""
+    for statement in (
+        "DROP INDEX IF EXISTS idx_action",
+        "DROP INDEX IF EXISTS idx_sentiment",
+    ):
+        conn.execute(statement)
+
+
 _LEGACY_SCHEMA_PRUNES: tuple[
     tuple[str, tuple[Callable[[sqlite3.Connection], None], ...]], ...
 ] = (
@@ -1391,6 +1447,10 @@ _LEGACY_SCHEMA_PRUNES: tuple[
     (
         "2026-09-20-restore-processed-files-observation-snapshot",
         (_restore_processed_files_observation_snapshot,),
+    ),
+    (
+        "2026-10-18-drop-timeline-redundant-indexes",
+        (_prune_timeline_redundant_indexes,),
     ),
 )
 
@@ -1578,8 +1638,11 @@ def _om_source_rowid_is_stale(conn: sqlite3.Connection) -> bool:
     the triggers that would have rewritten it.  Found in the live lake by comparing the two tables:
     only 4 306 of 74 358 index rows named an existing source, because the memory table had been
     rebuilt after those index rows were written.  Nothing read it at the time, so no answer was
-    wrong -- but ``tests/test_memory_gram_index.py`` bridges posting doc ids to payloads through it,
-    and any future consumer would have silently scored the wrong row for 94% of the corpus.
+    wrong, and nothing reads it for an answer now either: the gram index bridges a posting to its
+    payload through ``operational_memory_gram_docs``, precisely because a physical address cannot
+    carry an identity across a rebuild.  ``source_rowid`` survives as a tie-break for the
+    projection's natural order, and any future consumer that treats it as identity would score the
+    wrong row for 94% of the corpus.
 
     Probed on a bounded sample rather than a full join: after a rebuild the drift is uniform, and
     200 primary-key lookups cost well under a millisecond.  ``source_rowid = 0`` is *unknown*, not

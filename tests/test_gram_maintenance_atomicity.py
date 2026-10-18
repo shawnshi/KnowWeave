@@ -82,13 +82,20 @@ def _run_hooked_at(monkeypatch, hook_name: str, target, on_call: int, during):
 
 
 def _touch_projection(memory_id: str) -> None:
-    """Write one projection row from another connection, as an external writer would."""
+    """Write one memory from another connection, as an external writer would.
+
+    The write goes to the canonical table, which is where every writer goes: the projection and
+    the gram queue are both derived from it by triggers.  Writing the projection directly would
+    now be a change no reader is told about -- the queue is keyed on content, not on the derived
+    row's shape.
+    """
     other = sqlite3.connect(db_store.get_db_path())
     try:
         other.execute("PRAGMA busy_timeout = 5000")
         other.execute("BEGIN IMMEDIATE")
         other.execute(
-            "UPDATE operational_memory_index SET text_blob = text_blob || ' changed' "
+            "UPDATE operational_memory SET data_json = json_set("
+            "data_json, '$.text', json_extract(data_json, '$.text') || ' changed') "
             "WHERE memory_id = ?",
             (memory_id,),
         )
@@ -134,7 +141,7 @@ def test_a_document_written_during_the_rebuild_keeps_its_marker(isolated_memory,
     conn = db_store.get_connection()
     marked = {row[0] for row in conn.execute("SELECT doc FROM operational_memory_gram_dirty")}
     staged_mem0 = conn.execute(
-        "SELECT rowid FROM operational_memory_index WHERE memory_id = 'mem_0'"
+        "SELECT doc FROM operational_memory_gram_docs WHERE memory_id = 'mem_0'"
     ).fetchone()[0]
     assert staged_mem0 in marked, "the fenced document lost its marker"
     assert memory_gram_index.gram_index_usable() is False, (
@@ -180,7 +187,7 @@ def test_a_document_staged_then_deleted_keeps_its_marker(isolated_memory, monkey
     """
     _seed(5)
     target_row = db_store.get_connection().execute(
-        "SELECT rowid FROM operational_memory_index WHERE memory_id = 'mem_0'"
+        "SELECT doc FROM operational_memory_gram_docs WHERE memory_id = 'mem_0'"
     ).fetchone()[0]
 
     def during():
@@ -188,7 +195,9 @@ def test_a_document_staged_then_deleted_keeps_its_marker(isolated_memory, monkey
         try:
             other.execute("PRAGMA busy_timeout = 5000")
             other.execute("BEGIN IMMEDIATE")
-            other.execute("DELETE FROM operational_memory_index WHERE memory_id = 'mem_0'")
+            # The canonical row, as every writer deletes it: the projection row goes with it through
+            # the native cascade, and the gram marker is queued by the trigger on this table.
+            other.execute("DELETE FROM operational_memory WHERE memory_id = 'mem_0'")
             other.commit()
         finally:
             other.close()

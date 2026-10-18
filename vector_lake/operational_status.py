@@ -18,6 +18,7 @@ READ_COLUMNS = {
     "claim_index": {"claim_id"}, "timeline_events": {"claim_id"},
     "governance_queue": set(), "wiki_search_index": set(),
     "operational_memory_gram_dirty": {"doc"}, "operational_memory_index": {"rowid"},
+    "operational_memory_gram_docs": {"doc", "memory_id"},
     "tantivy_mirror_queue": set(),
 }
 
@@ -227,7 +228,7 @@ def collect_status(db_path: str | Path, *, meta_dir: str | Path | None = None, b
         p["claim_index"] = probe(lambda: {"state": "degraded" if (missing := scalar("SELECT COUNT(*) FROM claims c WHERE NOT EXISTS (SELECT 1 FROM claim_index i WHERE i.claim_id=c.claim_id)")) else "healthy", "missing": missing, "scope": "key coverage only"})
         p["timeline_events"] = probe(lambda: {"state": "degraded" if (orphans := scalar("SELECT COUNT(*) FROM timeline_events e WHERE e.claim_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.claim_id=e.claim_id)")) else "healthy", "orphaned": orphans, "scope": "claim reference coverage only"})
         p["governance_queue"] = probe(lambda: {"state": "unknown", "items": scalar("SELECT COUNT(*) FROM governance_queue"), "reason": "count_not_topology_proof"})
-        p["memory_gram"] = probe(lambda: {"state": "degraded" if (dirty := scalar("SELECT COUNT(*) FROM operational_memory_gram_dirty d WHERE EXISTS (SELECT 1 FROM operational_memory_index i WHERE i.rowid=d.doc)")) else "unknown", "live_dirty": dirty, "reason": "index_format_not_verified"})
+        p["memory_gram"] = probe(lambda: {"state": "degraded" if (dirty := scalar("SELECT COUNT(*) FROM operational_memory_gram_dirty d WHERE EXISTS (SELECT 1 FROM operational_memory_gram_docs g JOIN operational_memory_index i ON i.memory_id=g.memory_id WHERE g.doc=d.doc)")) else "unknown", "live_dirty": dirty, "reason": "index_format_not_verified"})
         p["page_projection"] = {"state": "degraded" if report["outbox"].get("backlog", 0) else "unknown", "outbox_backlog": report["outbox"].get("backlog"), "reason": "filesystem_generation_not_verified"}
         p["tantivy_mirror"] = probe(lambda: {"state": "unknown", "queued": scalar("SELECT COUNT(*) FROM tantivy_mirror_queue"), "reason": "mirror_token_not_verified"})
 

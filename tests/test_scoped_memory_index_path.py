@@ -172,3 +172,27 @@ def test_cluster_owner_rows_win_over_the_page(indexed_scope, monkeypatch, memory
     scan = store.search_memory_packet_views("医院 电子病历 评级", active_top_k=12, history_top_k=12,
                                             domain="Medical_IT", cluster="target")
     assert [[m["memory_id"] for m in w] for w in fast] == [[m["memory_id"] for m in w] for w in scan]
+
+
+def test_fused_pipeline_matches_separate_frequencies_and_relevance(indexed_scope):
+    """The fused pass avoids decoding blobs twice; its output must be byte-for-byte identical."""
+    conn = indexed_scope
+    terms = store._query_terms("医院 电子病历 评级 DRG 支付")
+    skip = memory_gram_index.skip_doc_set(conn)
+    sql, params = indexes.scoped_memory_scope_sql(conn, ["medical_it"])
+    scope = {int(r[0]) for r in conn.execute(sql, params)}
+
+    # Separate calls
+    df_sep = memory_gram_index.term_document_frequencies(terms, skip_docs=skip, docs=scope)
+    rel_sep = memory_gram_index.accumulate_relevance(
+        terms, skip_docs=skip, total_docs=len(scope), df=df_sep, docs=scope
+    )
+
+    # Fused call
+    df_fused, rel_fused = memory_gram_index.fused_term_frequencies_and_relevance(
+        terms, skip_docs=skip, total_docs=len(scope), docs=scope
+    )
+
+    assert df_fused == df_sep
+    assert rel_fused == pytest.approx(rel_sep, abs=1e-12)
+

@@ -275,16 +275,18 @@ def _fetch_payloads_by_memory_id(memory_ids):
 MAX_INDEX_CANDIDATES = 4000
 
 
-def _index_rows(conn, rowids):
-    """Index columns the exact key needs, for the given row ids."""
+def _index_rows(conn, docs):
+    """Index columns the exact key needs, for the given document numbers."""
     rows: dict[int, tuple] = {}
-    ordered = sorted(int(rowid) for rowid in rowids)
+    ordered = sorted(int(doc) for doc in docs)
     for start in range(0, len(ordered), 400):
         chunk = ordered[start : start + 400]
         placeholders = ','.join('?' for _ in chunk)
         for row in conn.execute(
-            'SELECT rowid, memory_id, memory_type, validity_state, memory_score, updated_rank '
-            f'FROM operational_memory_index WHERE rowid IN ({placeholders})',
+            'SELECT g.doc, i.memory_id, i.memory_type, i.validity_state, i.memory_score, i.updated_rank '
+            'FROM operational_memory_gram_docs g JOIN operational_memory_index i '
+            'ON i.memory_id = g.memory_id '
+            f'WHERE g.doc IN ({placeholders})',
             chunk,
         ):
             rows[int(row[0])] = (str(row[1]), str(row[2]).lower(), str(row[3]).lower(),
@@ -341,10 +343,9 @@ def _index_views(terms, windows, domain, cluster, budget):
     from vector_lake import scoped_retrieval_index as indexes
 
     conn = store.get_connection()
-    # Cheapest gates first.  A full rebuild of ``operational_memory_index`` queues every document as
-    # gram-dirty (the postings name index rowids), so a schema migration takes the indexed path away
-    # until the next gram rebuild; asking the gram index before enumerating the scope keeps that
-    # state at "no work" instead of "30 613 rows read, then fall back".
+    # Cheapest gates first: a stale base costs one COUNT to refuse, while enumerating the scope
+    # costs a few hundred milliseconds.  Asking the gram index first keeps that state at "no work"
+    # instead of "30 613 rows read, then fall back".
     if not gram.ensure_memory_gram_index() or not gram.gram_index_usable():
         return None
     names = store._scope_domain_aliases(domain) if domain else []
@@ -362,13 +363,13 @@ def _index_views(terms, windows, domain, cluster, budget):
     skip = gram.skip_doc_set(conn)
     total = len(scope)
     with runtime.timed_stage('memory_scope_df'):
-        df = gram.term_document_frequencies(terms, skip_docs=skip, docs=scope)
+        df, relevance = gram.fused_term_frequencies_and_relevance(
+            terms, skip_docs=skip, total_docs=total, docs=scope
+        )
     with runtime.timed_stage('memory_scope_weights'):
         type_weights = _type_weight_factors(conn, terms, df, total)
         max_type_bonus = max(type_weights.values(), default=0.0)
     with runtime.timed_stage('memory_scope_rank'):
-        relevance = gram.accumulate_relevance(terms, skip_docs=skip, df=df,
-                                              total_docs=total, docs=scope)
         if not relevance:
             return [[] for _ in windows]
         ranked = sorted(relevance.items(), key=lambda item: (-item[1], item[0]))
@@ -379,15 +380,15 @@ def _index_views(terms, windows, domain, cluster, budget):
             ranked = [item for item in ranked if item[1] + max_type_bonus >= cutoff]
             if len(ranked) > MAX_INDEX_CANDIDATES * 2:
                 return None
-        index_rows = _index_rows(conn, [rowid for rowid, _ in ranked])
+        index_rows = _index_rows(conn, [doc for doc, _ in ranked])
     runtime.backend('memory_index')
     results = []
     for top_k, include_history, allowed_types in windows:
         view: list[dict] = []
         if top_k > 0 and index_rows:
             candidates = []
-            for rowid, score in relevance.items():
-                row = index_rows.get(rowid)
+            for doc, score in relevance.items():
+                row = index_rows.get(doc)
                 if row is None:
                     continue
                 memory_id, memory_type, validity_state, stored_score, updated_rank = row

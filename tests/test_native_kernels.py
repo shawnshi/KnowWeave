@@ -88,11 +88,13 @@ def composite_db(monkeypatch):
     }
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE operational_memory_index(key_blob TEXT, text_blob TEXT, page_blob TEXT)")
+    conn.execute("CREATE TABLE operational_memory_index(memory_id TEXT, key_blob TEXT, text_blob TEXT, page_blob TEXT)")
     conn.execute("CREATE TABLE operational_memory_gram(gram TEXT PRIMARY KEY, postings BLOB)")
+    conn.execute("CREATE TABLE operational_memory_gram_docs(doc INTEGER PRIMARY KEY, memory_id TEXT NOT NULL UNIQUE)")
     postings = defaultdict(list)
     for doc, blobs in fields.items():
-        conn.execute("INSERT INTO operational_memory_index(rowid, key_blob, text_blob, page_blob) VALUES (?, ?, ?, ?)", (doc, *blobs))
+        conn.execute("INSERT INTO operational_memory_index(rowid, memory_id, key_blob, text_blob, page_blob) VALUES (?, ?, ?, ?, ?)", (doc, f"mem_{doc}", *blobs))
+        conn.execute("INSERT INTO operational_memory_gram_docs(doc, memory_id) VALUES (?, ?)", (doc, f"mem_{doc}"))
         for token, mask in gram.extract_grams(*blobs).items():
             postings[token].append((doc, mask))
     conn.executemany("INSERT INTO operational_memory_gram VALUES (?, ?)",

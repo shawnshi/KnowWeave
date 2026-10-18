@@ -50,7 +50,7 @@ def test_delete_cascade_removes_claim_memory_and_retains_unrelated(isolated_memo
     seed_memory(conn, "mem_deleted", "claim_deleted", "Deleted_Page", live_claim=True)
     seed_memory(conn, "mem_keep", "claim_live", "Live_Page", live_claim=True)
     memory_gram_index.rebuild_memory_gram_index()
-    old_doc_id = conn.execute("SELECT rowid FROM operational_memory_index WHERE memory_id='mem_deleted'").fetchone()[0]
+    old_doc_id = conn.execute("SELECT doc FROM operational_memory_gram_docs WHERE memory_id='mem_deleted'").fetchone()[0]
 
     db_store.delete_node_cascade("Deleted_Page")
 
@@ -75,7 +75,7 @@ def test_delete_cascade_rolls_back_if_memory_cleanup_fails(isolated_memory):
 def test_frozen_cleanup_dry_run_apply_restore_and_index_markers(isolated_memory, tmp_path):
     conn = seed_scope()
     memory_gram_index.rebuild_memory_gram_index()
-    old_doc_id = conn.execute("SELECT rowid FROM operational_memory_index WHERE memory_id='mem_orphan'").fetchone()[0]
+    old_doc_id = conn.execute("SELECT doc FROM operational_memory_gram_docs WHERE memory_id='mem_orphan'").fetchone()[0]
     database = db_store.get_db_path()
     archive = tmp_path / "archive"
     freeze(database, archive, 1)
@@ -186,11 +186,22 @@ def test_missing_or_ineffective_gram_delete_trigger_rolls_back(isolated_memory, 
 
 
 def test_restore_checks_new_gram_markers(isolated_memory, tmp_path):
+    """A settled queue has to be re-marked by the restore, and the restore has to notice.
+
+    A document's number survives both halves of this maintenance, so the retirement marker an
+    ``apply`` queues is normally still there when its rows come back -- nothing new has to happen
+    for the base to stay honest.  The check still has to exist, because a queue is settled by a
+    rebuild: after one, the base holds those postings as current, and a restore that cannot queue
+    the documents it resurrected leaves them credited as current too.  Clearing the queue first is
+    that state; dropping the trigger is the failure the rollback is there for.
+    """
     conn = seed_scope()
     database = db_store.get_db_path()
     archive = tmp_path / "archive"
     freeze(database, archive, 1)
     maintain(database, archive, "apply", **approved(archive))
+    with db_store.transaction():
+        conn.execute("DELETE FROM operational_memory_gram_dirty")
     conn.execute("DROP TRIGGER trg_om_gram_dirty_insert")
     with pytest.raises(RuntimeError, match="gram retirement/dirty markers"):
         maintain(database, archive, "restore", **approved(archive))

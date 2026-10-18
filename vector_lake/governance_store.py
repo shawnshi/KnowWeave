@@ -1412,10 +1412,9 @@ def _gram_memory_candidates(
 
     if context is None:
         skip_docs = memory_gram_index.skip_doc_set(conn)
-        df = memory_gram_index.term_document_frequencies(terms, skip_docs=skip_docs)
         total_docs = int(memory_gram_index.gram_index_state().get("base_docs") or 0)
-        relevance = memory_gram_index.accumulate_relevance(
-            terms, skip_docs=skip_docs, df=df, total_docs=total_docs,
+        df, relevance = memory_gram_index.fused_term_frequencies_and_relevance(
+            terms, skip_docs=skip_docs, total_docs=total_docs,
         )
     else:
         df, total_docs, relevance = context
@@ -1452,18 +1451,22 @@ def _gram_memory_candidates(
         by_doc = dict(chunk)
         placeholders = ",".join("?" for _ in chunk)
         params: list = [doc for doc, _ in chunk]
+        # The scoring documents are ordered by identity, and the payload still lives in the
+        # projection: one more join, on a ``doc IN (...)`` list that is already 4 000 wide.
         sql = (
-            "SELECT rowid, memory_id, memory_type, memory_score, updated_rank, source_rowid "
-            f"FROM operational_memory_index WHERE rowid IN ({placeholders})"
+            "SELECT g.doc AS doc, i.memory_id, i.memory_type, i.memory_score, i.updated_rank "
+            "FROM operational_memory_gram_docs AS g "
+            "JOIN operational_memory_index AS i ON i.memory_id = g.memory_id "
+            f"WHERE g.doc IN ({placeholders})"
         )
         if allowed_types:
-            sql += " AND memory_type IN (%s)" % ",".join("?" for _ in allowed_types)
+            sql += " AND i.memory_type IN (%s)" % ",".join("?" for _ in allowed_types)
             params.extend(sorted(allowed_types))
         if not include_history:
-            sql += " AND validity_state NOT IN (%s)" % ",".join("?" for _ in HIDDEN_MEMORY_STATES)
+            sql += " AND i.validity_state NOT IN (%s)" % ",".join("?" for _ in HIDDEN_MEMORY_STATES)
             params.extend(sorted(HIDDEN_MEMORY_STATES))
         for row in get_connection().execute(sql, params):
-            doc = int(row["rowid"])
+            doc = int(row["doc"])
             memory_score = _memory_score_value(row["memory_score"])
             total = by_doc[doc] + type_weights.get(str(row["memory_type"]), 0)
             rows.append((
@@ -1797,11 +1800,12 @@ def gram_context(terms: list[str]) -> tuple | None:
         return None
     conn = get_connection()
     skip = memory_gram_index.skip_doc_set(conn)
-    df = memory_gram_index.term_document_frequencies(terms, skip_docs=skip)
     total = int(memory_gram_index.gram_index_state().get("base_docs") or 0)
     if not total:
         return None
-    relevance = memory_gram_index.accumulate_relevance(terms, skip_docs=skip, df=df, total_docs=total)
+    df, relevance = memory_gram_index.fused_term_frequencies_and_relevance(
+        terms, skip_docs=skip, total_docs=total
+    )
     return df, total, relevance
 
 

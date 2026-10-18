@@ -97,18 +97,19 @@ def test_gram_relevance_matches_the_sql_scorer(seeded):
 
         # Membership comes from the index and the value from the full-scan scorer.  This used to
         # be a SQL restatement of the formula, which meant a changed weight could leave the two
-        # paths disagreeing while the test passed.
-        memories = {
-            int(row["rowid"]): json.loads(row["data_json"])
-            for row in conn.execute("SELECT rowid, data_json FROM operational_memory")
+        # paths disagreeing while the test passed.  The bridge is the identity map, not a physical
+        # address: a posting names a document number, and only that table says which memory it is.
+        payloads = {
+            str(row["memory_id"]): json.loads(row["data_json"])
+            for row in conn.execute("SELECT memory_id, data_json FROM operational_memory")
         }
-        source_of = {
-            int(row["rowid"]): int(row["source_rowid"] or 0)
-            for row in conn.execute("SELECT rowid, source_rowid FROM operational_memory_index")
+        memory_of_doc = {
+            int(row["doc"]): str(row["memory_id"])
+            for row in conn.execute("SELECT doc, memory_id FROM operational_memory_gram_docs")
         }
-        total = len(memories)
+        total = len(payloads)
         reference = {
-            doc: governance_store._memory_relevance(memories[source_of[doc]], terms, df, total)
+            doc: governance_store._memory_relevance(payloads[memory_of_doc[doc]], terms, df, total)
             for doc in indexed
         }
         assert indexed == reference, query
@@ -158,8 +159,8 @@ def test_a_deleted_document_is_exact_without_a_rebuild(seeded):
 
     assert memory_gram_index.retired_doc_count() == 1
     # The counts are what witness the skip; the equality below is an end-to-end smoke
-    # that cannot fail from a missing one, because the deleted document's rowid is
-    # dropped by the projection join and the result window is wider than the corpus.
+    # that cannot fail from a missing one, because the deleted document's identity resolves
+    # to no projection row and the result window is wider than the corpus.
     assert _ids("gram", "DRG 医保支付 合规", top_k=6) == _ids("legacy", "DRG 医保支付 合规", top_k=6)
     assert memory_gram_index.pending_doc_count() == 1
 
@@ -358,13 +359,30 @@ def test_a_bookkeeping_edit_is_not_content_drift(seeded):
     with db_store.transaction():
         conn.execute("DELETE FROM operational_memory_gram_dirty")
         conn.execute(
-            "UPDATE operational_memory_index SET memory_score = memory_score + 0.1, "
-            "validity_state = 'archived', updated_rank = updated_rank + 1 WHERE memory_id = 'mem_a'"
+            "UPDATE operational_memory SET data_json = json_set(data_json, "
+            "'$.memory_score', json_extract(data_json, '$.memory_score') + 0.1, "
+            "'$.validity_state', 'archived', "
+            "'$.updated_at', '2026-07-15T00:00:00+00:00') WHERE memory_id = 'mem_a'"
         )
 
     total, live, retired = memory_gram_index.dirty_breakdown(conn)
 
     assert (total, live, retired) == (0, 0, 0), "a bookkeeping edit is not content drift"
+
+
+def test_a_case_only_edit_is_not_content_drift(seeded):
+    """The base is built from the lowercased blobs, so case cannot make a posting stale."""
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        conn.execute("DELETE FROM operational_memory_gram_dirty")
+        conn.execute(
+            "UPDATE operational_memory SET data_json = json_set(data_json, '$.memory_key', 'MEM_A') "
+            "WHERE memory_id = 'mem_a'"
+        )
+
+    assert memory_gram_index.dirty_breakdown(conn) == (0, 0, 0), (
+        "a case-only change must not queue the document"
+    )
 
 
 def test_a_content_edit_still_queues_the_document(seeded):
@@ -373,7 +391,8 @@ def test_a_content_edit_still_queues_the_document(seeded):
     with db_store.transaction():
         conn.execute("DELETE FROM operational_memory_gram_dirty")
         conn.execute(
-            "UPDATE operational_memory_index SET text_blob = text_blob || ' 新结论' "
+            "UPDATE operational_memory SET data_json = json_set("
+            "data_json, '$.text', json_extract(data_json, '$.text') || ' 新结论') "
             "WHERE memory_id = 'mem_a'"
         )
 

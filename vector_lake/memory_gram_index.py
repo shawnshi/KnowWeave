@@ -34,13 +34,22 @@ Layout
     and every reader of it are gone; the schema prune that drops it is recorded in
     ``db_store._LEGACY_SCHEMA_PRUNES`` so existing databases converge too.
 
+``operational_memory_gram_docs(doc, memory_id)``
+    The identity map a posting's ``doc`` number names.  A document number has to outlive
+    the row it was derived from: ``operational_memory_index`` is deleted and rewritten
+    wholesale whenever it is re-derived, so a ``doc`` that happened to be that table's
+    rowid would silently start naming a different memory afterwards -- the index would
+    keep answering, from another memory's postings.  Rows here are allocated once and
+    never deleted, which also means an integer is never handed to a second identity.
+
 ``operational_memory_gram_dirty(doc)``
     Documents whose base postings cannot be trusted.  A dirty document is skipped
-    outright, so its stale base entries credit nothing, and a deleted document -- which
-    has no projection row and therefore no way to be listed -- is skipped the same way.
+    outright, so its stale base entries credit nothing, and a deleted document -- whose
+    postings are still in the base under its old number -- is skipped the same way.
     Skipping is *all* that happens: a document leaves this queue only when a rebuild
     replaces the base, which is why the index reports itself unusable while a live
-    document is queued.
+    document is queued.  The queue is written by triggers on ``operational_memory``, so
+    it is keyed on content rather than on the projection and survives a rebuild of it.
 
 Correctness
 -----------
@@ -83,7 +92,13 @@ log = logging.getLogger("vector-lake-memory-gram-index")
 #: posting grams it dropped, which is indistinguishable from a clean base by counters
 #: alone.  Raising the version turns every such database into a visible ``ready=False``
 #: and one rebuild.
-GRAM_FORMAT_VERSION = 2
+#:
+#: Version 3 changed what a posting's ``doc`` means (see ``operational_memory_gram_docs``):
+#: it is an identity allocated in that table, not ``operational_memory_index.rowid``.  A
+#: version-2 base is still internally consistent, but its numbers are physical addresses of
+#: the projection, so it cannot be read through the identity map and must be rebuilt once.
+#: The queue shares the base's namespace and is cleared by that rebuild for the same reason.
+GRAM_FORMAT_VERSION = 3
 
 #: Gram *groups* packed per committed chunk in the rebuild's second pass.  Groups are whole, so
 #: the chunk is bounded by the primary-key range and a commit never straddles one.
@@ -353,7 +368,9 @@ def live_dirty_doc_count(conn=None) -> int:
     conn = conn or get_connection()
     return conn.execute(
         "SELECT COUNT(*) FROM operational_memory_gram_dirty AS d "
-        "WHERE EXISTS (SELECT 1 FROM operational_memory_index AS i WHERE i.rowid = d.doc)"
+        "WHERE EXISTS (SELECT 1 FROM operational_memory_gram_docs AS g "
+        "JOIN operational_memory_index AS i ON i.memory_id = g.memory_id "
+        "WHERE g.doc = d.doc)"
     ).fetchone()[0]
 
 
@@ -374,7 +391,9 @@ def dirty_breakdown(conn=None) -> tuple[int, int, int]:
     row = conn.execute(
         "SELECT COUNT(*), "
         "COALESCE(SUM(EXISTS ("
-        "SELECT 1 FROM operational_memory_index AS i WHERE i.rowid = d.doc"
+        "SELECT 1 FROM operational_memory_gram_docs AS g "
+        "JOIN operational_memory_index AS i ON i.memory_id = g.memory_id "
+        "WHERE g.doc = d.doc"
         ")), 0) "
         "FROM operational_memory_gram_dirty AS d"
     ).fetchone()
@@ -450,10 +469,11 @@ def _drop_markers_whose_snapshot_is_current(conn) -> tuple[int, int]:
     stamps = dict(conn.execute("SELECT doc, digest FROM operational_memory_gram_stamp"))
     rows = conn.execute(
         "SELECT d.doc AS doc, "
-        "       (SELECT 1 FROM operational_memory_index AS i WHERE i.rowid = d.doc) AS alive, "
+        "       i.memory_id AS memory_id, "
         "       i.key_blob AS key_blob, i.text_blob AS text_blob, i.page_blob AS page_blob "
         "FROM operational_memory_gram_dirty AS d "
-        "LEFT JOIN operational_memory_index AS i ON i.rowid = d.doc"
+        "LEFT JOIN operational_memory_gram_docs AS g ON g.doc = d.doc "
+        "LEFT JOIN operational_memory_index AS i ON i.memory_id = g.memory_id"
     ).fetchall()
     if not rows:
         return 0, 0
@@ -461,7 +481,7 @@ def _drop_markers_whose_snapshot_is_current(conn) -> tuple[int, int]:
     for row in rows:
         doc = row["doc"]
         stamp = stamps.get(doc)
-        if not row["alive"]:
+        if row["memory_id"] is None:
             if stamp is None:
                 clean.append(doc)
             continue
@@ -526,6 +546,25 @@ def rebuild_memory_gram_index(dry_run: bool = False, batch_docs: int = 2000) -> 
 
     for scratch in scratch_tables:
         conn.execute(f"DROP TABLE IF EXISTS {scratch}")
+    # Every document in the base needs an identity before it can be staged, and a rebuild is the
+    # only place that can allocate the missing ones in bulk: a write allocates its own through
+    # the insert trigger, but a database written by a release that had no identity table has
+    # none for its existing corpus.  ``INSERT OR IGNORE`` rather than the trigger's ``NOT EXISTS``
+    # guard because this is a top-level statement, not a nested trigger body.
+    #
+    # The queue is then cleared when it was written under a different format version: its numbers
+    # name the *previous* base's document namespace, and this rebuild discards that base whole, so
+    # every marker in it is moot.  Keeping them would resolve them against identities they were
+    # never about -- over-conservatively at best, and this is the one rebuild that cannot afford
+    # to leave the index unusable afterwards, since the operator has to run it by hand.
+    previous_format = gram_index_state().get("format_version")
+    with transaction():
+        conn.execute(
+            "INSERT OR IGNORE INTO operational_memory_gram_docs (memory_id) "
+            "SELECT memory_id FROM operational_memory"
+        )
+        if previous_format != GRAM_FORMAT_VERSION:
+            conn.execute("DELETE FROM operational_memory_gram_dirty")
     conn.execute(
         "CREATE TABLE operational_memory_gram_stage ("
         "gram TEXT NOT NULL, doc INTEGER NOT NULL, mask INTEGER NOT NULL, "
@@ -550,9 +589,13 @@ def rebuild_memory_gram_index(dry_run: bool = False, batch_docs: int = 2000) -> 
     last_doc = 0
     _started = time.perf_counter()
     while True:
+        # Keyset pagination on the *identity* number, not on the projection's rowid: the projection
+        # can be re-derived while this runs, which renumbers its rows but not a document's identity.
         rows = conn.execute(
-            "SELECT rowid AS doc, key_blob, text_blob, page_blob FROM operational_memory_index "
-            "WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            "SELECT g.doc AS doc, i.key_blob, i.text_blob, i.page_blob "
+            "FROM operational_memory_gram_docs AS g "
+            "JOIN operational_memory_index AS i ON i.memory_id = g.memory_id "
+            "WHERE g.doc > ? ORDER BY g.doc LIMIT ?",
             (last_doc, max(1, int(batch_docs))),
         ).fetchall()
         if not rows:
@@ -644,10 +687,9 @@ def rebuild_memory_gram_index(dry_run: bool = False, batch_docs: int = 2000) -> 
         conn.execute("DROP TABLE operational_memory_gram")
         conn.execute("ALTER TABLE operational_memory_gram_new RENAME TO operational_memory_gram")
         _record_state(conn, staged_docs, gram_count, postings_count, staged_docs)
+        for scratch in ("operational_memory_gram_stage", "operational_memory_gram_stamp"):
+            conn.execute(f"DROP TABLE IF EXISTS {scratch}")
     _phase("publish", _started)
-
-    for scratch in scratch_tables:
-        conn.execute(f"DROP TABLE IF EXISTS {scratch}")
     try:
         conn.execute(f"PRAGMA wal_autocheckpoint={int(previous_autocheckpoint or 1000)}")
     except sqlite3.Error as exc:  # noqa: BLE001 - a lost pragma only costs I/O later
@@ -970,6 +1012,99 @@ def accumulate_relevance(
     return accumulator
 
 
+def fused_term_frequencies_and_relevance(
+    terms: list[str],
+    skip_docs: set[int] | None = None,
+    total_docs: int | None = None,
+    docs: set[int] | None = None,
+) -> tuple[dict[str, int], dict[int, float]]:
+    """Compute (df, relevance) in a single pass over postings without redundant decoding.
+
+    Delegates short term postings decoding, scope filtering, and IDF accumulation directly
+    to vector_lake_core.fast_fused_frequencies_and_relevance when available.
+    """
+    conn = get_connection()
+    weights = _FIELD_WEIGHTS
+    total = int(total_docs or gram_index_state().get("base_docs") or 0)
+
+    # Separate short terms (len <= 2) and composite long terms (len > 2)
+    short_terms = [t for t in terms if t and len(t) <= 2]
+    long_terms = [t for t in terms if t and len(t) > 2]
+
+    frequencies: dict[str, int] = {}
+    accumulator: dict[int, float] = {}
+
+    if HAVE_CORE and hasattr(vector_lake_core, "fast_fused_frequencies_and_relevance"):
+        term_blobs: list[tuple[str, bytes]] = []
+        for t in short_terms:
+            blob = _term_base(t, conn)
+            if blob is not None:
+                term_blobs.append((t, blob))
+            else:
+                frequencies[t] = 0
+        if term_blobs:
+            df_rust, rel_rust = vector_lake_core.fast_fused_frequencies_and_relevance(
+                term_blobs, total, skip_docs or None, docs or None, list(weights)
+            )
+            frequencies.update(df_rust)
+            accumulator.update(rel_rust)
+            for t in short_terms:
+                if t not in frequencies:
+                    frequencies[t] = 0
+    else:
+        # Fallback pure-Python fused pass
+        decoded_blobs: dict[str, dict[int, int] | None] = {}
+        for term in short_terms:
+            if term in decoded_blobs:
+                continue
+            blob = _term_base(term, conn)
+            if blob is None:
+                decoded_blobs[term] = None
+                frequencies[term] = 0
+                continue
+            if HAVE_CORE:
+                decoded_blobs[term] = vector_lake_core.accumulate_postings(blob, weights, skip_docs or None)
+            else:
+                d: dict[int, int] = {}
+                _accumulate(blob, weights, d, skip_docs)
+                decoded_blobs[term] = d
+
+            if docs is not None:
+                frequencies[term] = sum(1 for doc in decoded_blobs[term] if doc in docs)
+            else:
+                frequencies[term] = len(decoded_blobs[term])
+
+        for term in short_terms:
+            folded = decoded_blobs.get(term)
+            if not folded:
+                continue
+            factor = idf_weight(frequencies.get(term, 0), total)
+            if factor <= 0.0:
+                continue
+            for doc, weight in folded.items():
+                if docs is None or doc in docs:
+                    accumulator[doc] = accumulator.get(doc, 0.0) + factor * weight
+
+    # Composite terms (length > 2) verified via bigrams
+    for term in long_terms:
+        d = {}
+        _accumulate_composite([term], weights, d)
+        if term not in frequencies:
+            df = sum(1 for doc in d if doc in docs) if docs is not None else len(d)
+            frequencies[term] = df
+        else:
+            df = frequencies[term]
+
+        factor = idf_weight(df, total)
+        if factor <= 0.0:
+            continue
+        for doc, weight in d.items():
+            if docs is None or doc in docs:
+                accumulator[doc] = accumulator.get(doc, 0.0) + factor * weight
+
+    return frequencies, accumulator
+
+
 def _composite_candidates(term: str, conn) -> set[int]:
     """Documents that could contain ``term`` (every constituent bigram present)."""
     bigrams = {term[i : i + 2] for i in range(len(term) - 1)}
@@ -1009,11 +1144,13 @@ def _accumulate_composite(terms: list[str], weights: list[int], accumulator: dic
         chunk = ordered[start : start + 4000]
         placeholders = ",".join("?" for _ in chunk)
         for row in conn.execute(
-            f"SELECT rowid, key_blob, text_blob, page_blob FROM operational_memory_index "
-            f"WHERE rowid IN ({placeholders})",
+            f"SELECT g.doc AS doc, i.key_blob, i.text_blob, i.page_blob "
+            f"FROM operational_memory_gram_docs AS g "
+            f"JOIN operational_memory_index AS i ON i.memory_id = g.memory_id "
+            f"WHERE g.doc IN ({placeholders})",
             chunk,
         ):
-            blobs[int(row["rowid"])] = (row["key_blob"], row["text_blob"], row["page_blob"])
+            blobs[int(row["doc"])] = (row["key_blob"], row["text_blob"], row["page_blob"])
     for term in terms:
         for doc in candidates[term]:
             fields = blobs.get(doc)

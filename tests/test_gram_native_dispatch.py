@@ -35,10 +35,14 @@ def postings_db(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE operational_memory_gram(gram TEXT PRIMARY KEY, postings BLOB)")
-    conn.execute("CREATE TABLE operational_memory_index(key_blob TEXT, text_blob TEXT, page_blob TEXT)")
+    conn.execute("CREATE TABLE operational_memory_index(memory_id TEXT, key_blob TEXT, text_blob TEXT, page_blob TEXT)")
+    # A posting names a document number, and this table is what that number means; the projection's
+    # row id is a physical address and is deliberately not used as identity.
+    conn.execute("CREATE TABLE operational_memory_gram_docs(doc INTEGER PRIMARY KEY, memory_id TEXT NOT NULL UNIQUE)")
     postings: dict[str, list[tuple[int, int]]] = {}
     for doc, blobs in docs.items():
-        conn.execute("INSERT INTO operational_memory_index(rowid, key_blob, text_blob, page_blob) VALUES (?, ?, ?, ?)", (doc, *blobs))
+        conn.execute("INSERT INTO operational_memory_index(rowid, memory_id, key_blob, text_blob, page_blob) VALUES (?, ?, ?, ?, ?)", (doc, f"mem_{doc}", *blobs))
+        conn.execute("INSERT INTO operational_memory_gram_docs(doc, memory_id) VALUES (?, ?)", (doc, f"mem_{doc}"))
         for token, mask in _reference_grams(*blobs).items():
             postings.setdefault(token, []).append((doc, mask))
     conn.executemany("INSERT INTO operational_memory_gram VALUES (?, ?)",
@@ -206,3 +210,39 @@ def test_native_errors_are_not_silenced(postings_db, monkeypatch):
         gram.accumulate_relevance(["研究"], df={"研究": 3})
     with pytest.raises(ValueError, match="injected native failure"):
         gram.extract_grams("研究", "数据", "")
+
+
+def test_native_fast_fused_frequencies_and_relevance_matches_oracle(postings_db):
+    """The fused Rust operator must calculate exact DF and exact relevance matching oracle."""
+    if not gram.HAVE_CORE or not hasattr(gram.vector_lake_core, "fast_fused_frequencies_and_relevance"):
+        pytest.skip("Requires fast_fused_frequencies_and_relevance in native core")
+
+    conn = gram.get_connection()
+    terms = ["研", "研究", "数据", "ab", "z", "研"]
+    term_blobs = [(t, gram._term_base(t, conn)) for t in terms if gram._term_base(t, conn) is not None]
+    total = len(postings_db)
+
+    # 1. Unscoped test
+    df_rust, rel_rust = gram.vector_lake_core.fast_fused_frequencies_and_relevance(
+        term_blobs, total, None, None, list(gram.FIELD_WEIGHTS)
+    )
+    df_expected = gram.term_document_frequencies(terms)
+    rel_expected = _oracle(postings_db, terms)
+
+    assert df_rust == {t: df_expected[t] for t in df_rust}
+    assert rel_rust == pytest.approx(rel_expected, abs=1e-12)
+
+    # 2. Scoped + Skip test
+    skip = {2}
+    scope = {1, 3, 4}
+    df_scoped, rel_scoped = gram.vector_lake_core.fast_fused_frequencies_and_relevance(
+        term_blobs, len(scope), skip, scope, list(gram.FIELD_WEIGHTS)
+    )
+    df_scope_expected = gram.term_document_frequencies(terms, skip_docs=skip, docs=scope)
+    rel_scope_expected = gram.accumulate_relevance(
+        terms, skip_docs=skip, total_docs=len(scope), df=df_scope_expected, docs=scope
+    )
+
+    assert df_scoped == {t: df_scope_expected[t] for t in df_scoped}
+    assert rel_scoped == pytest.approx(rel_scope_expected, abs=1e-12)
+

@@ -11,6 +11,7 @@ import json
 import pytest
 
 from vector_lake import db_store, governance_store
+from vector_lake import memory_gram_index
 from vector_lake import tool_search
 
 
@@ -266,3 +267,89 @@ def test_an_unset_source_rowid_is_unknown_not_stale(seeded_memory):
     with db_store.transaction():
         conn.execute("UPDATE operational_memory_index SET source_rowid = 0")
     assert db_store._om_source_rowid_is_stale(conn) is False
+
+
+def test_a_database_from_before_the_identity_map_converges(seeded_memory):
+    """The DDL has to run on an existing database, not only on a fresh one.
+
+    ``init_db`` skips its whole schema transaction when the sentinels are present, which is what
+    keeps a reader from waiting behind a writer's lock on every start.  A release that adds a table
+    is therefore invisible to it unless the table is a sentinel -- and the read path that resolves
+    document numbers through it would then meet the previous release's triggers on a database that
+    looks complete.  Dropping the table and the triggers is that database.
+    """
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        conn.execute("DROP TABLE operational_memory_gram_docs")
+        for trigger in ("trg_om_gram_dirty_insert", "trg_om_gram_dirty_update",
+                        "trg_om_gram_dirty_delete"):
+            conn.execute(f"DROP TRIGGER {trigger}")
+
+    db_store._INITIALIZED_DB_PATHS.clear()
+    db_store.init_db()
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='operational_memory_gram_docs'"
+    ).fetchone()[0] == 1
+    attached = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_om_gram_dirty_%'"
+        )
+    }
+    assert attached == {"operational_memory"}, attached
+
+
+def test_rebuilding_the_index_keeps_the_gram_base_usable(seeded_memory):
+    """The gram index must not be invalidated by a rebuild of the projection under it.
+
+    This is the acceptance evidence for separating a document's identity from its address.  The
+    postings name document numbers; while those numbers *were* ``operational_memory_index.rowid``,
+    re-deriving the projection deleted and re-inserted every row, so the base kept numbers that now
+    named other memories -- and the index reported itself usable the whole time.  One force rebuild
+    restored rowids, one migration left them shifted, and either way the answers came from the
+    wrong document with nothing to notice it by.
+
+    With the identity map in place the numbers are allocated once and never reused, so the same
+    force rebuild leaves the base addressable and current.
+    """
+    conn = db_store.get_connection()
+    assert memory_gram_index.rebuild_memory_gram_index().startswith("Rebuilt")
+    assert memory_gram_index.gram_index_usable() is True
+    before = {row[0] for row in conn.execute("SELECT doc FROM operational_memory_gram_docs")}
+
+    with db_store.transaction():
+        db_store.ensure_operational_memory_index(conn, force=True)
+
+    assert {row[0] for row in conn.execute("SELECT doc FROM operational_memory_gram_docs")} == before, (
+        "a projection rebuild must not renumber an identity"
+    )
+    assert memory_gram_index.gram_index_usable() is True, (
+        "the base went stale behind a projection rebuild"
+    )
+    assert memory_gram_index.pending_doc_count(conn) == 0
+
+
+def test_a_projection_rebuild_leaves_the_answers_unchanged(seeded_memory, monkeypatch):
+    """Same acceptance, read as a result rather than as a predicate.
+
+    ``gram_index_usable()`` is a count of markers; what has to survive is the answer.  Moving every
+    projection row id is precisely what a re-derived projection does -- the canonical table's row
+    ids were in the tens of millions on the live lake while the projection's were 1..N -- and a base
+    addressed by rowid would now score other memories' payloads, which is a *plausible* answer, not
+    an empty one, and therefore invisible without the oracle to compare it to.
+    """
+    conn = db_store.get_connection()
+    assert memory_gram_index.rebuild_memory_gram_index().startswith("Rebuilt")
+    query = "信创 医院 集成平台"
+    monkeypatch.setenv("VECTOR_LAKE_MEMORY_SEARCH", "legacy")
+    oracle = [item["memory_id"] for item in governance_store.search_operational_memory(query, top_k=8)]
+    monkeypatch.setenv("VECTOR_LAKE_MEMORY_SEARCH", "gram")
+    before = [item["memory_id"] for item in governance_store.search_operational_memory(query, top_k=8)]
+    assert before and before == oracle
+
+    with db_store.transaction():
+        conn.execute("UPDATE operational_memory_index SET rowid = rowid + 1000000")
+
+    after = [item["memory_id"] for item in governance_store.search_operational_memory(query, top_k=8)]
+    assert after == before == oracle, "the indexed path changed its answer when addresses moved"

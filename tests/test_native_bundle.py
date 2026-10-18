@@ -22,12 +22,12 @@ def native_build(tmp_path):
     native = directory / 'python/vector_lake_core/vector_lake_core.pyd'
     native.parent.mkdir(parents=True)
     native.write_bytes(b'synthetic-not-executable')
-    wheel = directory / 'wheels/vector_lake_core-0.2.5-cp38-abi3-win_amd64.whl'
+    wheel = directory / 'wheels/vector_lake_core-0.2.6-cp38-abi3-win_amd64.whl'
     wheel.parent.mkdir()
     with zipfile.ZipFile(wheel, 'w') as archive:
         archive.writestr('vector_lake_core/__init__.py', 'from .vector_lake_core import *\n')
         archive.writestr('vector_lake_core/vector_lake_core.pyd', native.read_bytes())
-        archive.writestr('vector_lake_core-0.2.5.dist-info/METADATA', 'Metadata-Version: 2.1\nName: vector_lake_core\nVersion: 0.2.5\n')
+        archive.writestr('vector_lake_core-0.2.6.dist-info/METADATA', 'Metadata-Version: 2.1\nName: vector_lake_core\nVersion: 0.2.6\n')
     receipt = {'source_hashes': NATIVE.ci_core._crate_inputs(), 'maturin': '1.15.0', 'cargo_locked': True,
                'native_hashes': {'vector_lake_core/vector_lake_core.pyd': NATIVE.digest(native)}, 'wheel_sha256': NATIVE.digest(wheel)}
     (directory / 'build-receipt.json').write_text(json.dumps(receipt), encoding='utf-8')
@@ -43,7 +43,7 @@ def ready_bundle(native_build, tmp_path):
 
 def test_export_validates_payload_and_refuses_existing_output(native_build, ready_bundle):
     manifest, wheel = NATIVE.validate_bundle(ready_bundle)
-    assert manifest['version'] == '0.2.5' and wheel.suffix == '.whl'
+    assert manifest['version'] == '0.2.6' and wheel.suffix == '.whl'
     assert manifest['distribution_clearance'].startswith('not_granted')
     before = wheel.read_bytes()
     with pytest.raises(FileExistsError):
@@ -68,9 +68,9 @@ def test_bundle_faults_fail_before_install(ready_bundle, monkeypatch, fault):
 
 @pytest.mark.parametrize('fault', ['escape', 'hook', 'dependency', 'symlink'])
 def test_unsafe_wheel_rejected_before_code_execution(tmp_path, fault):
-    wheel = tmp_path / 'vector_lake_core-0.2.5-cp38-abi3-win_amd64.whl'
+    wheel = tmp_path / 'vector_lake_core-0.2.6-cp38-abi3-win_amd64.whl'
     with zipfile.ZipFile(wheel, 'w') as archive:
-        archive.writestr('vector_lake_core-0.2.5.dist-info/METADATA', 'Name: vector_lake_core\nVersion: 0.2.5\n' + ('Requires-Dist: example\n' if fault == 'dependency' else ''))
+        archive.writestr('vector_lake_core-0.2.6.dist-info/METADATA', 'Name: vector_lake_core\nVersion: 0.2.6\n' + ('Requires-Dist: example\n' if fault == 'dependency' else ''))
         archive.writestr('vector_lake_core/vector_lake_core.pyd', b'not-executable')
         if fault == 'escape': archive.writestr('../escape', 'unsafe')
         if fault == 'hook': archive.writestr('vector_lake_core/hook.pth', 'unsafe')
@@ -110,7 +110,7 @@ def test_install_is_offline_hashed_binary_only_and_never_calls_a_compiler(ready_
                 assert flag in argv
             assert argv[argv.index('--prefix') + 1] == str(prefix)
             return SimpleNamespace(returncode=0)
-        return SimpleNamespace(stdout=json.dumps({'version': '0.2.5', 'prefix': str(prefix)}))
+        return SimpleNamespace(stdout=json.dumps({'version': '0.2.6', 'prefix': str(prefix)}))
     monkeypatch.setattr(NATIVE.subprocess, 'run', run)
     result = NATIVE.install(ready_bundle)
     assert result['compiler_invoked'] is False and len(calls) == 2
@@ -130,7 +130,7 @@ def test_failed_pip_never_generates_a_successful_receipt(ready_bundle, tmp_path,
 def test_receipt_cannot_modify_immutable_bundle(ready_bundle):
     with pytest.raises(ValueError, match='outside the immutable bundle'):
         NATIVE.main(['install', '--bundle', str(ready_bundle), '--receipt', str(ready_bundle / 'native-bundle.json')])
-    assert NATIVE.validate_bundle(ready_bundle)[0]['version'] == '0.2.5'
+    assert NATIVE.validate_bundle(ready_bundle)[0]['version'] == '0.2.6'
 
 
 def test_prebuilt_workflow_compiles_but_never_auto_publishes():
