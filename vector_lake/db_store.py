@@ -320,6 +320,19 @@ _OM_INDEX_VALUE_COLUMNS = (
     "key_blob",
     "text_blob",
     "page_blob",
+    # ``page_key`` is the source page key with ``.md`` stripped and **case preserved**, which is
+    # what ``page_index_nodes.node_key`` is; ``page_blob`` is the same value lowercased, so it can
+    # never join to that key.  A scoped memory read is "the rows whose page is in this domain", and
+    # without this column the only way to answer it was to evaluate the domain expression over
+    # every row of ``operational_memory`` (measured 285-310 ms for one domain on the live corpus,
+    # before the rows are even read).
+    "page_key",
+    # ``memory_domain`` is the row's own ``$.domain`` override, lowercased, '' when absent.  It has
+    # to be a column as well: the scope predicate is "the row's own domain, else its page's", and
+    # the first half is a JSON path the scope query would otherwise have to evaluate per row.
+    "memory_domain",
+    # Same shape for ``cluster=``: the row's own ``$.topic_cluster``, else its page's.
+    "memory_cluster",
     "source_updated_at",
 )
 
@@ -328,6 +341,7 @@ _OM_INDEX_COLUMNS = ("memory_id",) + _OM_INDEX_VALUE_COLUMNS + ("source_rowid",)
 
 def _om_index_value_expr(source: str) -> str:
     """Newline-joined projection value expressions bound to ``source`` (``NEW``/``src``)."""
+    page = f"json_extract({source}.data_json, '$.source_page')"
     return (
         f"            lower(COALESCE(json_extract({source}.data_json, '$.memory_type'), 'fact')),\n"
         f"            lower(COALESCE(json_extract({source}.data_json, '$.validity_state'), 'active')),\n"
@@ -335,7 +349,11 @@ def _om_index_value_expr(source: str) -> str:
         f"            COALESCE(unixepoch(NULLIF(json_extract({source}.data_json, '$.updated_at'), ''), 'subsec'), 0.0),\n"
         f"            lower(COALESCE(json_extract({source}.data_json, '$.memory_key'), '')),\n"
         f"            lower(COALESCE(json_extract({source}.data_json, '$.text'), '')),\n"
-        f"            lower(COALESCE(json_extract({source}.data_json, '$.source_page'), '')),\n"
+        f"            lower(COALESCE({page}, '')),\n"
+        f"            COALESCE(CASE WHEN lower(substr({page}, -3)) = '.md' "
+        f"THEN substr({page}, 1, length({page}) - 3) ELSE {page} END, ''),\n"
+        f"            lower(COALESCE(json_extract({source}.data_json, '$.domain'), '')),\n"
+        f"            lower(COALESCE(json_extract({source}.data_json, '$.topic_cluster'), '')),\n"
         f"            COALESCE(json_extract({source}.data_json, '$.updated_at'), ''),\n"
         f"            {source}.rowid"
     )
@@ -354,6 +372,9 @@ def _create_operational_memory_index(conn: sqlite3.Connection) -> None:
             key_blob TEXT NOT NULL,
             text_blob TEXT NOT NULL,
             page_blob TEXT NOT NULL,
+            page_key TEXT NOT NULL DEFAULT '',
+            memory_domain TEXT NOT NULL DEFAULT '',
+            memory_cluster TEXT NOT NULL DEFAULT '',
             source_updated_at TEXT NOT NULL DEFAULT '',
             source_rowid INTEGER NOT NULL DEFAULT 0
         )
@@ -371,12 +392,35 @@ def _create_operational_memory_index(conn: sqlite3.Connection) -> None:
         stale_format = True
     except sqlite3.OperationalError:
         stale_format = False
+    # ``page_key``/``memory_domain`` serve the scoped read.  A database written before them answers
+    # the scope question by evaluating JSON per row; the tolerated ALTER below forces the one rebuild
+    # that fills them in, exactly as ``source_rowid`` above does.
+    for column, declaration in (("page_key", "TEXT NOT NULL DEFAULT ''"),
+                                ("memory_domain", "TEXT NOT NULL DEFAULT ''"),
+                                ("memory_cluster", "TEXT NOT NULL DEFAULT ''")):
+        try:
+            conn.execute(f"ALTER TABLE operational_memory_index ADD COLUMN {column} {declaration}")
+            stale_format = True
+        except sqlite3.OperationalError:
+            pass
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_om_index_type_state "
         "ON operational_memory_index (memory_type, validity_state)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_om_index_type ON operational_memory_index (memory_type)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_om_index_page_key "
+        "ON operational_memory_index (page_key)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_om_index_memory_domain "
+        "ON operational_memory_index (memory_domain)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_om_index_memory_cluster "
+        "ON operational_memory_index (memory_cluster)"
     )
     columns = ", ".join(_OM_INDEX_COLUMNS)
     upsert = ", ".join(
@@ -421,7 +465,9 @@ def _create_operational_memory_index(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE page_index_state ADD COLUMN edge_digest TEXT")
     except sqlite3.OperationalError:
         pass
-    ensure_operational_memory_index(conn, force=stale_format)
+    # ``force`` also when the recorded source row no longer resolves: a memory-table rebuild moves
+    # every rowid and bypasses the trigger, and only a re-derivation rewrites ``source_rowid``.
+    ensure_operational_memory_index(conn, force=stale_format or _om_source_rowid_is_stale(conn))
 
 
 _CLAIM_INDEX_VALUE_COLUMNS = (
@@ -1485,7 +1531,36 @@ def _om_index_format_is_stale(conn: sqlite3.Connection) -> bool:
     whether the write transaction is needed at all.  A missing table reports
     stale, which sends the caller down the full initialisation path.
     """
-    return "source_rowid" not in _table_columns(conn, "operational_memory_index")
+    columns = _table_columns(conn, "operational_memory_index")
+    return not {"source_rowid", "page_key", "memory_domain", "memory_cluster"} <= columns
+
+
+def _om_source_rowid_is_stale(conn: sqlite3.Connection) -> bool:
+    """Read-only: does ``operational_memory_index.source_rowid`` still name its source row?
+
+    The column is ``NEW.rowid`` of ``operational_memory``, and a rowid is a *physical* identity: a
+    table rebuild (``CREATE new`` / ``INSERT`` / ``DROP`` / ``RENAME``) moves every row and bypasses
+    the triggers that would have rewritten it.  Found in the live lake by comparing the two tables:
+    only 4 306 of 74 358 index rows named an existing source, because the memory table had been
+    rebuilt after those index rows were written.  Nothing read it at the time, so no answer was
+    wrong -- but ``tests/test_memory_gram_index.py`` bridges posting doc ids to payloads through it,
+    and any future consumer would have silently scored the wrong row for 94% of the corpus.
+
+    Probed on a bounded sample rather than a full join: after a rebuild the drift is uniform, and
+    200 primary-key lookups cost well under a millisecond.  ``source_rowid = 0`` is *unknown*, not
+    stale -- rows written by the legacy trigger never had the column -- so it is excluded, which also
+    keeps the legacy-upgrade path in ``tests/test_orphan_memory_repair.py`` intact.
+    """
+    probe = conn.execute(
+        "SELECT COUNT(*) AS checked, "
+        "SUM(CASE WHEN m.memory_id = i.memory_id THEN 1 ELSE 0 END) AS found "
+        "FROM (SELECT memory_id, source_rowid FROM operational_memory_index "
+        "WHERE source_rowid > 0 LIMIT 200) i "
+        "LEFT JOIN operational_memory m ON m.rowid = i.source_rowid"
+    ).fetchone()
+    checked = int(probe[0] or 0)
+    found = int(probe[1] or 0)
+    return checked > 0 and found < checked
 
 
 def _entities_format_is_stale(conn: sqlite3.Connection) -> bool:
@@ -1629,6 +1704,7 @@ def init_db():
         if (
             _schema_is_complete(db_path)
             and not _om_index_format_is_stale(get_connection())
+            and not _om_source_rowid_is_stale(get_connection())
             and not _page_index_state_format_is_stale(get_connection())
             and not _entities_format_is_stale(get_connection())
             and not _om_probability_format_is_stale(get_connection())

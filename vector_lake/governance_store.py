@@ -1200,14 +1200,17 @@ def _memory_term_frequencies(memories, terms: list[str]) -> dict[str, int]:
 
 
 def _memory_relevance(
-    memory: dict, terms: list[str], df: dict[str, int] | None = None, total: int | None = None
+    memory: dict, terms: list[str], df: dict[str, int] | None = None, total: int | None = None,
+    *, idf_weights: dict[str, float] | None = None,
 ) -> float:
     """Field-weighted term overlap, each term scaled by its inverse document frequency.
 
     ``df`` / ``total`` must be the same numbers the n-gram index uses (see
     :func:`memory_gram_index.term_document_frequencies`) or the two scorers stop agreeing.  Without
     them the weights fall back to 1.0, which is the pre-IDF behaviour -- used by callers that score
-    a handful of records outside any corpus.
+    a handful of records outside any corpus. Scoped streaming may supply request-local
+    ``idf_weights`` prepared from the same DF/total; field checks and float addition order stay
+    unchanged. Callers without prepared weights retain the original formula.
     """
     if not terms:
         return 0.0
@@ -1221,7 +1224,8 @@ def _memory_relevance(
     }
     score = 0.0
     for term in terms:
-        weight = idf_weight(df.get(term, 0), total or 0) if df else 1.0
+        weight = (idf_weights[term] if idf_weights is not None
+                  else idf_weight(df.get(term, 0), total or 0) if df else 1.0)
         if term in haystacks["key"]:
             score += weight * FIELD_WEIGHTS[1]
         if term in haystacks["text"]:
@@ -1364,6 +1368,7 @@ def _gram_memory_candidates(
     allowed_types: set[str] | None,
     include_history: bool,
     window: int,
+    context: tuple | None = None,
 ) -> list[str] | None:
     """Exact relevance from the n-gram index, ordered by the documented key.
 
@@ -1372,6 +1377,11 @@ def _gram_memory_candidates(
     corpus size, because a postings blob that still holds a document's dropped grams
     cannot be told apart from an exact one, and no read-side drain restores that.
     Settling the debt is maintenance's job, not a search's.
+
+    ``context`` is ``(df, total_docs, relevance)`` from :func:`_gram_context`, so a caller that needs
+    two windows over one corpus pays for the postings once.  Measured on the live lake: a document
+    frequency pass and a relevance pass are ~200 ms each for a 33-term query, and the Memory Packet
+    runs both windows on every request.
     """
     from vector_lake import memory_gram_index
 
@@ -1400,11 +1410,15 @@ def _gram_memory_candidates(
         )
         return [str(row[0]) for row in conn.execute(sql, params)]
 
-    skip_docs = memory_gram_index.skip_doc_set(conn)
-    df = memory_gram_index.term_document_frequencies(terms, skip_docs=skip_docs)
-    relevance = memory_gram_index.accumulate_relevance(
-        terms, skip_docs=skip_docs, df=df
-    )
+    if context is None:
+        skip_docs = memory_gram_index.skip_doc_set(conn)
+        df = memory_gram_index.term_document_frequencies(terms, skip_docs=skip_docs)
+        total_docs = int(memory_gram_index.gram_index_state().get("base_docs") or 0)
+        relevance = memory_gram_index.accumulate_relevance(
+            terms, skip_docs=skip_docs, df=df, total_docs=total_docs,
+        )
+    else:
+        df, total_docs, relevance = context
     if not relevance:
         return []
 
@@ -1414,7 +1428,6 @@ def _gram_memory_candidates(
     # weigh nothing in the body does not re-enter through the type name.
     from vector_lake.memory_gram_index import idf_weight
 
-    total_docs = int(memory_gram_index.gram_index_state().get("base_docs") or 0)
     type_factors = {term: idf_weight(df.get(term, 0), total_docs) for term in terms if term}
     type_weights: dict[str, float] = {}
     for memory_type in _distinct_memory_types():
@@ -1423,7 +1436,17 @@ def _gram_memory_candidates(
             type_weights[memory_type] = weight
 
     rows: list[tuple] = []
-    ordered = sorted(relevance.items())
+    # Highest relevance first: the window is filled from the top, so the hydration below can stop
+    # once nothing left can still enter it.  It used to be ordered by document id and every matching
+    # document was hydrated before the window was taken -- measured on the live corpus, 20 277
+    # documents carried through six ``IN (...)`` batches to return 24 (253 ms p50 for the whole
+    # search, ~200 ms of it here).
+    ordered = sorted(relevance.items(), key=lambda item: (-item[1], item[0]))
+    # A document's final total is its relevance plus a per-type constant, so a lower-relevance
+    # document can still outrank one already retained.  The bound makes the early exit exact rather
+    # than approximate: it only stops when no remaining document could reach the window even with
+    # the largest possible type bonus.
+    max_bonus = max(type_weights.values(), default=0.0)
     for start in range(0, len(ordered), 4000):
         chunk = ordered[start : start + 4000]
         by_doc = dict(chunk)
@@ -1449,6 +1472,11 @@ def _gram_memory_candidates(
                 float(row["updated_rank"] or 0.0),
                 str(row["memory_id"]),
             ))
+        remaining = start + len(chunk)
+        if len(rows) >= window and remaining < len(ordered):
+            worst_kept = sorted(rows, key=lambda item: (-item[0], -item[1], -item[2], item[3]))[window - 1][0]
+            if ordered[remaining][1] + max_bonus < worst_kept:
+                break
     # ``memory_id`` ascending as the last key, matching the full-scan scorer's tie-break.
     rows.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
     return [row[3] for row in rows[:window]]
@@ -1578,8 +1606,27 @@ def _memory_payloads(memory_ids: list[str]) -> list[dict]:
     return [by_id[memory_id] for memory_id in memory_ids if memory_id in by_id]
 
 
-def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, *, max_payload_bytes):
-    """Stream (bounded JSON, byte length) in row order on the caller's read snapshot."""
+def _scope_domain_aliases(domain: str) -> list[str]:
+    """Canonical domain plus its aliases, lowercased: the set the scope predicate matches."""
+    from vector_lake.schema_validator import DOMAIN_ALIASES, canonical_domain
+
+    canonical = canonical_domain(domain).lower()
+    return sorted({canonical} | {
+        alias.lower() for alias, target in DOMAIN_ALIASES.items()
+        if target.lower() == canonical
+    })
+
+
+def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, *, max_payload_bytes,
+                                 with_rowid: bool = False):
+    """Stream (bounded JSON, byte length[, rowid]) in row order on the caller's read snapshot.
+
+    ``with_rowid`` adds the row's own identity as a third element.  A caller that keeps only masks
+    has no payload to hand back and must name its winners to fetch them again; ``data_json``'s
+    ``memory_id`` is caller content that is neither guaranteed present nor unique, so the row id is
+    the identity that actually holds.  Default is off so the payload shape every other caller and
+    test unpacks stays exactly as it was.
+    """
     from vector_lake.schema_validator import DOMAIN_ALIASES, canonical_domain
 
     source = "json_extract(m.data_json, '$.source_page')"
@@ -1589,11 +1636,7 @@ def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, 
     )
     predicates, params, names = [], [], []
     if domain:
-        canonical = canonical_domain(domain).lower()
-        names = sorted({canonical} | {
-            alias.lower() for alias, target in DOMAIN_ALIASES.items()
-            if target.lower() == canonical
-        })
+        names = _scope_domain_aliases(domain)
         placeholders = ','.join('?' for _ in names)
         predicates.append(
             "lower(COALESCE(NULLIF(json_extract(m.data_json, '$.domain'), ''), p.domain, '')) "
@@ -1606,8 +1649,10 @@ def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, 
             "p.topic_cluster, '')) = ?"
         )
         params.append(cluster.lower())
+    projection = 'm.rowid, ' if with_rowid else ''
     sql = (
-        "SELECT CASE WHEN length(CAST(m.data_json AS BLOB)) <= ? THEN m.data_json END, "
+        f"SELECT {projection}"
+        "CASE WHEN length(CAST(m.data_json AS BLOB)) <= ? THEN m.data_json END, "
         "length(CAST(m.data_json AS BLOB)) FROM operational_memory m LEFT JOIN page_index_nodes p "
         f"ON p.node_key = {source_key} WHERE " + " AND ".join(predicates)
         + " ORDER BY m.rowid"
@@ -1617,6 +1662,7 @@ def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, 
     retrieval_runtime.track_connection(conn)
     accelerated = scoped_retrieval_index.scoped_sql(
         conn, names if domain else None, cluster, max_payload_bytes=max_payload_bytes,
+        include_rowid=with_rowid,
     )
     if accelerated is not None:
         sql, params = accelerated
@@ -1626,7 +1672,10 @@ def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, 
     try:
         for row in cursor:
             retrieval_runtime.checkpoint()
-            yield row[0], row[1]
+            if with_rowid:
+                yield int(row[0]), row[1], row[2]
+            else:
+                yield row[0], row[1]
     finally:
         cursor.close()
 
@@ -1638,7 +1687,15 @@ def search_operational_memory(
     include_history: bool = False,
     domain: str | None = None,
     cluster: str | None = None,
+    _gram_context: tuple | None = None,
 ) -> list[dict]:
+    """Rank operational memory for ``query``.
+
+    ``_gram_context`` is ``(df, total_docs, relevance)`` from :func:`gram_context`, for a caller that
+    runs several windows over one corpus: the Memory Packet asks for the active and the
+    history-inclusive window on every request, and each pass over the postings is ~200 ms for a
+    33-term query on the live lake.
+    """
     if top_k <= 0:
         raise ValueError('top_k must be positive')
     allowed_types = _normalize_memory_types(memory_types)
@@ -1675,7 +1732,8 @@ def search_operational_memory(
         initialize_meta_store()
         ensure_operational_memory_index_cheap()
         if backend == "gram":
-            memory_ids = _gram_memory_candidates(terms, allowed_types, include_history, window)
+            memory_ids = _gram_memory_candidates(terms, allowed_types, include_history, window,
+                                                 context=_gram_context)
             if memory_ids is not None:
                 if not memory_ids:
                     return []
@@ -1725,6 +1783,28 @@ def search_operational_memory(
     )
 
 
+def gram_context(terms: list[str]) -> tuple | None:
+    """``(df, total_docs, relevance)`` for ``terms``, or ``None`` when the index cannot answer.
+
+    Shared by the two Memory Packet windows.  Never cached across requests: the corpus, the dirty
+    set and therefore the weights belong to one read.
+    """
+    if not terms:
+        return None
+    from vector_lake import memory_gram_index
+
+    if not memory_gram_index.ensure_memory_gram_index():
+        return None
+    conn = get_connection()
+    skip = memory_gram_index.skip_doc_set(conn)
+    df = memory_gram_index.term_document_frequencies(terms, skip_docs=skip)
+    total = int(memory_gram_index.gram_index_state().get("base_docs") or 0)
+    if not total:
+        return None
+    relevance = memory_gram_index.accumulate_relevance(terms, skip_docs=skip, df=df, total_docs=total)
+    return df, total, relevance
+
+
 def search_memory_packet_views(
     query: str,
     active_top_k: int = 24,
@@ -1763,9 +1843,14 @@ def search_memory_packet_views(
                 memories, terms, history_top_k, include_history=True, df=df, total=total
             ),
         )
+    # One pass over the postings serves both windows: the packet runs them on every request, and
+    # each document-frequency + relevance pass is ~200 ms for a 33-term query on the live corpus.
+    context = gram_context(terms) if _memory_search_backend() == "gram" else None
     return (
-        search_operational_memory(query, top_k=active_top_k, include_history=False),
-        search_operational_memory(query, top_k=history_top_k, include_history=True),
+        search_operational_memory(query, top_k=active_top_k, include_history=False,
+                                  _gram_context=context),
+        search_operational_memory(query, top_k=history_top_k, include_history=True,
+                                  _gram_context=context),
     )
 
 

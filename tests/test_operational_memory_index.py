@@ -231,3 +231,38 @@ def test_query_embedding_failure_is_not_cached(monkeypatch):
     assert vector == []
     assert "no vector" in reason
     assert tool_search._cached_query_embedding("transient failure") is None
+
+
+def test_a_stale_source_rowid_is_detected_and_repaired(seeded_memory):
+    """A table rebuild moves every memory rowid and bypasses the trigger that records it.
+
+    The column is a physical identity, so it can rot without any content change.  A bounded sample
+    has to notice, and the next initialisation has to restore it -- otherwise the bridge from
+    posting doc ids to payloads silently names the wrong row.
+    """
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        db_store.ensure_operational_memory_index(conn, force=True)
+    assert db_store._om_source_rowid_is_stale(conn) is False
+
+    with db_store.transaction():
+        conn.execute("UPDATE operational_memory_index SET source_rowid = source_rowid + 1000000")
+
+    assert db_store._om_source_rowid_is_stale(conn) is True
+    db_store._INITIALIZED_DB_PATHS.clear()
+    db_store.init_db()
+
+    assert db_store._om_source_rowid_is_stale(conn) is False
+    mismatched = conn.execute(
+        "SELECT COUNT(*) FROM operational_memory_index i "
+        "JOIN operational_memory m ON m.memory_id = i.memory_id WHERE i.source_rowid <> m.rowid"
+    ).fetchone()[0]
+    assert mismatched == 0
+
+
+def test_an_unset_source_rowid_is_unknown_not_stale(seeded_memory):
+    """Rows written before the column existed carry 0; that is not evidence of drift."""
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        conn.execute("UPDATE operational_memory_index SET source_rowid = 0")
+    assert db_store._om_source_rowid_is_stale(conn) is False

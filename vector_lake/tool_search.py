@@ -559,6 +559,51 @@ _LAST_FTS_ERROR = threading.local()
 _LAST_RERANK_NOTE = threading.local()
 
 
+RESCUE_TERM_PROBES = 16
+#: How many matching documents the rescue is allowed to sort.  FTS5 ranks with bm25, which scores
+#: every match, so the disjunction's cost is its match set: 4 764 pages measured 124-535 ms, a few
+#: hundred measured 10-20 ms.  Terms are taken rarest first until this budget is spent, so the
+#: rescue answers the natural-language shape without ever sorting the corpus.
+RESCUE_MATCH_BUDGET = 1500
+
+
+def _rescue_terms(conn, terms: list[str]) -> list[str]:
+    """The rarest qualifiers that fit the rescue's match budget.
+
+    A plain disjunction over every qualifier can match most of the corpus: measured on the live
+    lake, "医疗人工智能在医院的落地路径与风险" matched 7 202 of 7 418 pages and the bm25 sort plus
+    the domain join cost 240-535 ms to return 25 rows.  Terms are therefore taken rarest first, up
+    to half of them, while the sum of their document frequencies stays inside
+    ``RESCUE_MATCH_BUDGET`` -- an upper bound on the disjunction's match set, so the sort is
+    bounded.  The probe itself costs 7-45 ms for the whole query and at least one term is always
+    kept, so a query whose every qualifier is common still gets an answer.
+    """
+    if len(terms) <= 2 or len(terms) > RESCUE_TERM_PROBES:
+        return terms
+    counts: dict[str, int] = {}
+    try:
+        for term in terms:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM wiki_search_index WHERE wiki_search_index MATCH ?",
+                (f'"{term}"',),
+            ).fetchone()
+            counts[term] = int(row[0]) if row is not None else 0
+    except sqlite3.Error:
+        return terms
+    keep = (len(terms) + 1) // 2
+    selected: list[str] = []
+    spent = 0
+    for term in sorted(terms, key=lambda term: (counts.get(term, 0), terms.index(term))):
+        if len(selected) >= keep:
+            break
+        cost = counts.get(term, 0)
+        if selected and spent + cost > RESCUE_MATCH_BUDGET:
+            break
+        selected.append(term)
+        spent += cost
+    return [term for term in terms if term in selected]
+
+
 def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
     from vector_lake import tokenizer as _tokenizer
 
@@ -611,38 +656,72 @@ def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
                 log.warning("Tantivy query failed (%s); using FTS5", runtime.safe_error(exc))
 
         clean_toks = [t.replace('"', '') for t in query_tok.split()]
-        query_esc = " ".join(f'"{t}"' for t in clean_toks if t.strip())
-        if not query_esc:
+        terms = [term for term in clean_toks if term.strip()]
+        # Every token used to be a mandatory conjunct, function words included.
+        # On the live corpus that made "电子病历系统应用水平分级评价六级" an
+        # all-token AND with no match at all, while its disjunction matched 4 764
+        # pages; 31 of 112 recorded production searches returned nothing for the
+        # same reason, because the queries people type carry 在/的/与/对 and
+        # the/of/and as if they were evidence.  Recall is tiered now: the
+        # stopword-free conjunction first (it is the precise arm and answers
+        # whenever it can), then the disjunction ordered by bm25 and appended
+        # behind the conjunction's rows.  A single-term query is unchanged.
+        recall_terms = [term for term in terms if term.casefold() not in STOP_WORDS] or terms
+        if not recall_terms:
             _LAST_FTS_ERROR.msg = None
             return []
 
         state = runtime.current()
         scope = state.fts_scope if state is not None else None
-        clauses, params = ['wiki_search_index MATCH ?'], [query_esc]
-        join = ''
-        if scope is not None:
-            join = ' JOIN page_index_nodes p ON p.node_key=wiki_search_index.node_key'
-            if scope['domain']:
-                # Connection-local, read-only UDF: exactly the Python selector's alias,
-                # case and Unicode-whitespace semantics, not a schema installation.
-                conn.create_function('vl_canonical_domain', 1, lambda value: canonical_domain(value).lower(), deterministic=True)
-                clauses.append('vl_canonical_domain(p.domain)=?')
-                params.append(canonical_domain(scope['domain']).lower())
-            if scope['cluster']:
-                clauses.append('lower(p.topic_cluster)=?')
-                params.append(scope['cluster'].lower())
-            if not scope['include_history']:
-                clauses.append("lower(COALESCE(p.status,'')) NOT IN ('deprecated','archived')")
-        cur = conn.execute(
-            'SELECT wiki_search_index.node_key, wiki_search_index.title, wiki_search_index.summary, '
-            'bm25(wiki_search_index) AS rank FROM wiki_search_index' + join +
-            ' WHERE ' + ' AND '.join(clauses) + ' ORDER BY rank LIMIT ?', [*params, limit],
-        )
-        rows = [dict(row) for row in cur.fetchall()]
+
+        def _run(match_expression: str) -> list[dict]:
+            clauses, params = ['wiki_search_index MATCH ?'], [match_expression]
+            join = ''
+            if scope is not None:
+                join = ' JOIN page_index_nodes p ON p.node_key=wiki_search_index.node_key'
+                if scope['domain']:
+                    # Connection-local, read-only UDF: exactly the Python selector's alias,
+                    # case and Unicode-whitespace semantics, not a schema installation.
+                    conn.create_function('vl_canonical_domain', 1, lambda value: canonical_domain(value).lower(), deterministic=True)
+                    clauses.append('vl_canonical_domain(p.domain)=?')
+                    params.append(canonical_domain(scope['domain']).lower())
+                if scope['cluster']:
+                    clauses.append('lower(p.topic_cluster)=?')
+                    params.append(scope['cluster'].lower())
+                if not scope['include_history']:
+                    clauses.append("lower(COALESCE(p.status,'')) NOT IN ('deprecated','archived')")
+            cur = conn.execute(
+                'SELECT wiki_search_index.node_key, wiki_search_index.title, wiki_search_index.summary, '
+                'bm25(wiki_search_index) AS rank FROM wiki_search_index' + join +
+                ' WHERE ' + ' AND '.join(clauses) + ' ORDER BY rank LIMIT ?', [*params, limit],
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+        rows = _run(' '.join(f'"{t}"' for t in recall_terms))
+        if not rows and len(recall_terms) > 1:
+            # The disjunction is a rescue, not a second opinion.  Qualifiers are still
+            # conjunctive -- a page that matches one of them is not an answer to a query that
+            # states all of them -- so it runs only when the conjunction matched *nothing at
+            # all*, which on the live corpus is exactly the natural-language shape: "电子病历
+            # 系统 应用 水平 分级 评价 六级" has no page carrying every qualifier while its
+            # disjunction matches 4 764.  It is over the rarer half of the qualifiers, so the
+            # sort stays bounded (measured 89-239 ms against 342-535 ms for the full set); bm25
+            # ranks a page matching more of them higher.  A conjunction of that rarer half was
+            # tried in front of this and removed: for the very shape it was meant to rescue the
+            # rare terms do not co-occur, so it only added one more miss before this query ran.
+            seen = {row['node_key'] for row in rows}
+            for row in _run(' OR '.join(f'"{t}"' for t in _rescue_terms(conn, recall_terms))):
+                key = row['node_key']
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
         _LAST_FTS_ERROR.msg = None
         _LAST_FTS_ERROR.backend = "fts5"
         _LAST_FTS_ERROR.backends.add("fts5")
-        return rows
+        return rows[:limit]
     except Exception as e:
         msg = f"FTS5 query failed ({runtime.safe_error(e)})"
         log.warning(msg)

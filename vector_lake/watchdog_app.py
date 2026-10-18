@@ -432,6 +432,7 @@ def canonicalise_manual_edits(filenames) -> tuple[int, list[tuple[str, str]]]:
 # this interval rather than at loop frequency.
 PROJECTION_HEAL_INTERVAL_SECONDS = 15.0
 _last_projection_heal = 0.0
+_last_timeline_heal = 0.0
 
 
 def heal_page_index_projection(force: bool = False) -> dict:
@@ -474,6 +475,44 @@ def heal_page_index_projection(force: bool = False) -> dict:
             component="projection",
         )
     return report
+
+
+def heal_timeline_projection(force: bool = False) -> dict:
+    """Close ``timeline_events`` drift in place, in the process that owns writes.
+
+    Drift is not a one-off cost.  While the projection is out of parity every timeline query
+    answers from the canonical ``claims`` table instead of the indexed row -- measured 120-211 ms
+    against 1-7 ms -- and the reader cannot repair it, because a reader holds no write lock and
+    must not take one (the same reason ``heal_page_index_projection`` exists).  ``runtime_health``
+    reports the drift and the CLI can repair it, but a report nobody acts on leaves the slow path
+    in place indefinitely, so the owner repairs it and logs what it closed.
+
+    Throttled before the parity proof runs: the proof is ~79 ms cold on the live 7 816-claim corpus,
+    cheap once per interval but not free on every cycle.
+    """
+    global _last_timeline_heal
+    from vector_lake.tool_timeline import repair_timeline_projection, timeline_projection_parity
+
+    now = time.monotonic()
+    if not force and (now - _last_timeline_heal) < PROJECTION_HEAL_INTERVAL_SECONDS:
+        return {"healed": False, "reason": "throttled"}
+    # Stamped for a forced heal too: a manual repair must not immediately re-run the proof.
+    _last_timeline_heal = now
+
+    parity = timeline_projection_parity()
+    if not parity["missing"] and not parity["extra"]:
+        return {"healed": False, "reason": "parity", "parity": parity}
+    report = repair_timeline_projection(dry_run=False)
+    log.warning("timeline_events drift repaired: %s (parity before: %s)", report, parity)
+    write_status(
+        "idle",
+        0,
+        index_queue.qsize(),
+        f"Timeline projection: {report}",
+        "",
+        component="timeline_projection",
+    )
+    return {"healed": True, "report": report, "parity": parity}
 
 
 def process_tantivy_mirror_step() -> dict:
@@ -553,6 +592,9 @@ def index_worker_loop():
 
             # The projection is this process's responsibility, never a reader's.
             heal_page_index_projection()
+            # Same rule for the timeline projection: drift left in place makes every timeline
+            # query answer from canonical claims instead of the indexed row.
+            heal_timeline_projection()
 
             # Manual filesystem edits are bounded so they cannot starve durable outbox work.
             pending_legacy = set()

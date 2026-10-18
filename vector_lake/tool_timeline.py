@@ -162,18 +162,98 @@ def _timeline_claims_fingerprint(conn=None) -> str:
     extra=0`` -- the most expensive way to learn nothing.  A content rewrite still moves the
     id set and is still caught: it is an ``INSERT OR REPLACE``, which raises ``MAX(rowid)``
     unless the row replaced was the highest one (then the projection's id extremes move).
+
+    The five aggregates are subselects of one statement rather than two ``execute`` calls:
+    the gate runs on every timeline query, and a round trip that produces one row costs less
+    than two that produce two.
     """
     conn = conn or get_connection()
-    count, highest = conn.execute(
-        "SELECT COUNT(*), COALESCE(MAX(rowid), 0) "
-        "FROM claims WHERE f_claim_type = 'timeline-event'"
+    row = conn.execute(
+        "SELECT "
+        "(SELECT COUNT(*) FROM claims WHERE f_claim_type = 'timeline-event'), "
+        "(SELECT COALESCE(MAX(rowid), 0) FROM claims WHERE f_claim_type = 'timeline-event'), "
+        "(SELECT COUNT(*) FROM timeline_events), "
+        "(SELECT COALESCE(MIN(id), '') FROM timeline_events), "
+        "(SELECT COALESCE(MAX(id), '') FROM timeline_events)"
     ).fetchone()
-    projected, lowest_id, highest_id = conn.execute(
-        "SELECT COUNT(*), COALESCE(MIN(id), ''), COALESCE(MAX(id), '') FROM timeline_events"
-    ).fetchone()
+    count, highest, projected, lowest_id, highest_id = row
     from vector_lake.db_store import get_db_path
 
     return f"{get_db_path()}|{count}:{highest}|{projected}:{lowest_id}:{highest_id}"
+
+
+#: JSON kinds that make ``str()`` of a full ``json.loads`` differ from the extracted value
+#: (``true`` becomes ``'True'`` in Python and ``1`` through ``json_extract``), or that are not a
+#: date at all.  Rows carrying them are decoded the long way in :func:`_expected_event_ids`.
+_LEAN_HOSTILE_KINDS = frozenset({"true", "object", "array"})
+
+
+def _expected_event_ids(conn) -> set[str]:
+    """The canonical event ids, without decoding every timeline claim's payload.
+
+    Event identity is ``sha256(claim_id, event_date, text)`` and the date comes from one of two
+    JSON fields or the entry's ``[date]`` prefix.  The parity proof used to run
+    :func:`_event_from_claim_row` over every timeline claim, which ``json.loads`` the whole
+    payload to read two strings -- measured 292 ms for 7 816 claims on the live corpus, paid by
+    whichever request first noticed the fingerprint move after an ingest.
+
+    ``json_extract`` reads the same two paths in SQL, so the decode is skipped; only a row whose
+    value is a boolean, object or array is decoded in full, because there ``str()`` of the Python
+    value and of the extracted one differ.
+    """
+    expected: set[str] = set()
+    # One ``json_extract`` call with both paths: SQLite parses the document per call, and the two
+    # dates used to be two parses of a payload that is often a few kilobytes.  ``json_type`` is then
+    # asked once per *suspicious* row rather than twice per row: the only values whose ``str()``
+    # differs between ``json.loads`` and ``json_extract`` are a JSON boolean (``'True'`` vs ``'1'``)
+    # and a container (Python repr vs JSON text).  A container arrives here as a string starting
+    # with ``{``/``[`` -- no date does -- and a boolean is the one case an integer value cannot be
+    # told apart from, so that row gets its type probed and, if it is one, is decoded in full.
+    for row in conn.execute(
+        "SELECT claim_id, claim_text, "
+        "json_extract(data_json, '$.temporal_anchor', '$.event_date') AS dates "
+        "FROM claims WHERE f_claim_type = 'timeline-event'"
+    ):
+        dates = json.loads(row["dates"] or "[]")
+        if len(dates) != 2:
+            expected.add(_event_from_claim_row(_full_claim_row(conn, row["claim_id"]))["id"])
+            continue
+        event_date = dates[0] or dates[1]
+        if isinstance(event_date, str) and event_date[:1] in {"{", "["}:
+            expected.add(_event_from_claim_row(_full_claim_row(conn, row["claim_id"]))["id"])
+            continue
+        if isinstance(event_date, int) and _claim_date_is_boolean(conn, row["claim_id"], dates):
+            expected.add(_event_from_claim_row(_full_claim_row(conn, row["claim_id"]))["id"])
+            continue
+        if event_date:
+            stable = str(event_date)
+        else:
+            match = _TEXT_EVENT_DATE.match(str(row["claim_text"] or ""))
+            stable = match.group(1) if match else ""
+        stable_raw = "\0".join([str(row["claim_id"]), stable, str(row["claim_text"])])
+        expected.add(hashlib.sha256(stable_raw.encode("utf-8")).hexdigest()[:24])
+    return expected
+
+
+def _claim_date_is_boolean(conn, claim_id, dates) -> bool:
+    """Whether a numeric date value is really a JSON boolean for this claim.
+
+    Asked only for rows whose selected date extracted as an integer -- the one shape ``str()`` cannot
+    settle on its own.  Probes the path that actually supplied the value.
+    """
+    path = '$.temporal_anchor' if dates[0] else '$.event_date'
+    kind = conn.execute(
+        "SELECT json_type(data_json, ?) FROM claims WHERE claim_id = ?", (path, claim_id)
+    ).fetchone()[0]
+    return kind in {"true", "false"}
+
+
+def _full_claim_row(conn, claim_id):
+    """The row shape :func:`_event_from_claim_row` reads, for the rare hostile-kind claim."""
+    return conn.execute(
+        "SELECT claim_id, claim_text, data_json, updated_at FROM claims WHERE claim_id = ?",
+        (claim_id,),
+    ).fetchone()
 
 
 def _timeline_parity_disk_path():
@@ -273,12 +353,8 @@ def timeline_projection_parity() -> dict:
         except Exception:
             pass
 
-    claim_rows = conn.execute(
-        "SELECT claim_id, claim_text, data_json, updated_at FROM claims "
-        "WHERE f_claim_type = 'timeline-event'"
-    ).fetchall()
-    expected_ids = {_event_from_claim_row(row)["id"] for row in claim_rows}
-    actual_ids = {str(row["id"]) for row in conn.execute("SELECT id FROM timeline_events")}
+    expected_ids = _expected_event_ids(conn)
+    actual_ids = {str(row[0]) for row in conn.execute("SELECT id FROM timeline_events")}
     result = {
         "canonical": len(expected_ids),
         "projection": len(actual_ids),
@@ -471,7 +547,7 @@ def _sql_stable_date_expr() -> str:
     )
 
 
-def search_timeline_events(entity_name: str = None, action: str = None, limit: int = 10) -> str:
+def search_timeline_events(entity_name: str | None = None, action: str | None = None, limit: int = 10) -> str:
     """Query the timeline_events projection; fall back to timeline-event claims if it drifts.
 
     ``sentiment`` is deliberately not a parameter.  The projection still stores the column

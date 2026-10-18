@@ -41,6 +41,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 
 from vector_lake.db_store import get_connection, get_db_path, init_db, transaction
 from vector_lake.link_resolution import build_link_map, declared_names_from_nodes, resolve_link_target
@@ -573,11 +574,17 @@ class ProjectionNote(str):
         return instance
 
 
-def _fallback_note() -> ProjectionNote:
+def _fallback_note(served_from_cache_for: float | None = None) -> ProjectionNote:
     note = (
         "page index projection is behind index.json; node and edge reads fell back to "
         "index.json itself (results are current; the outbox consumer rebuilds the projection)"
     )
+    if served_from_cache_for is not None:
+        # Say which file the answer came from, not just that a fallback is in play: inside the
+        # re-parse window this is the parse of an *earlier* stamp.
+        note += (f"; served from the cached parse of an earlier stamp ({served_from_cache_for:.0f} s "
+                 "old) to keep a busy index.json rewrite from re-parsing the whole file on every "
+                 "query")
     marker = projection_stale()
     reason = None
     if marker is not None:
@@ -595,8 +602,25 @@ def _fallback_note() -> ProjectionNote:
 # single entry rather than an LRU: the module's objection to holding the parsed
 # object graph in a long-lived process stands, so the cache is bounded to one and
 # dropped the moment the projection can answer again.
-_CATALOG_CACHE: dict[str, object] = {"key": None, "catalog": None}
+#
+# The stamp alone is not enough while a writer is active: every page commit rewrites
+# ``index.json``, so every stamp move makes the *next* reader pay for the whole parse
+# again -- measured 408 ms for the live 12.7 MB file.  ``VECTOR_LAKE_FALLBACK_REPARSE_SECONDS``
+# bounds that: set above 0, a re-parse is rate limited and the previous parse keeps
+# answering inside the window, with the note saying which stamp answered.  It defaults
+# to 0 (re-parse on every stamp move) because that is the contract the suite pins:
+# ``test_a_changed_index_json_invalidates_the_cached_catalog`` and
+# ``test_stale_projection_is_served_from_index_json`` both state that an edited file wins
+# on the next read.  Trading that away is an operator decision, not a side effect of a fix.
+_CATALOG_CACHE: dict[str, object] = {"key": None, "catalog": None, "at": 0.0}
 _CATALOG_LOCK = threading.Lock()
+
+
+def _fallback_reparse_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("VECTOR_LAKE_FALLBACK_REPARSE_SECONDS", "0")))
+    except ValueError:
+        return 0.0
 
 
 def _catalog_cache_key():
@@ -613,6 +637,7 @@ def reset_catalog_cache() -> None:
     with _CATALOG_LOCK:
         _CATALOG_CACHE["key"] = None
         _CATALOG_CACHE["catalog"] = None
+        _CATALOG_CACHE["at"] = 0.0
 
 
 def read_catalog():
@@ -638,6 +663,10 @@ def read_catalog():
     with _CATALOG_LOCK:
         if _CATALOG_CACHE["key"] == key and _CATALOG_CACHE["catalog"] is not None:
             return _CATALOG_CACHE["catalog"], _fallback_note()
+        cached = _CATALOG_CACHE["catalog"]
+        age = time.monotonic() - float(_CATALOG_CACHE.get("at") or 0.0)
+        if cached is not None and age < _fallback_reparse_seconds():
+            return cached, _fallback_note(served_from_cache_for=age)
 
     index_data = _load_index_json()
     if index_data is None:
@@ -648,6 +677,7 @@ def read_catalog():
         # catalog with the wrong stamp; the loser simply rebuilds next time.
         _CATALOG_CACHE["key"] = key
         _CATALOG_CACHE["catalog"] = catalog
+        _CATALOG_CACHE["at"] = time.monotonic()
     return catalog, _fallback_note()
 
 
@@ -744,8 +774,21 @@ def adjacency() -> dict[str, list[tuple[str, float]]]:
     order-sensitive for zero-mass candidates -- stays bit-identical.
     """
     conn = get_connection()
-    edge_count = conn.execute("SELECT COUNT(*) FROM page_index_edges").fetchone()[0]
-    stamp = (str(get_index_path()), index_file_stamp(), int(edge_count or 0))
+    # Keyed on the recorded edge-content digest, not on the ``index.json`` stamp.  The stamp is
+    # ``(mtime, size)`` and moves on every rewrite, including the ones that leave the topology
+    # untouched (a page edit with no link change, a governance pass, a decay tick).  Measured on the
+    # live 20 146-edge graph: rebuilding this table costs 84 ms and rebuilding the prepared PPR index
+    # on top of it another 89 ms, and the walk that follows is 5 ms -- so an unrelated rewrite used
+    # to add ~173 ms to the next query and to drop a structure that had not gone stale.  The digest
+    # is written only after the edge rows are committed (see ``refresh_page_index_projection``), and
+    # it covers edge order, so it answers "is this the same graph" rather than "was this the same
+    # file".  A database without the column keeps the file stamp.
+    stored = _stored_edge_state(conn)
+    if stored is not None and stored[1]:
+        stamp = ("edge_digest", str(stored[1]), int(stored[0] or 0))
+    else:
+        edge_count = conn.execute("SELECT COUNT(*) FROM page_index_edges").fetchone()[0]
+        stamp = (str(get_index_path()), index_file_stamp(), int(edge_count or 0))
     with _adjacency_lock:
         if _adjacency["stamp"] == stamp and _adjacency["data"] is not None:
             return _adjacency["data"]

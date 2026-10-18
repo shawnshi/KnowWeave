@@ -876,12 +876,17 @@ def _term_base(gram: str, conn) -> bytes | None:
     return row[0] if row else None
 
 
-def term_document_frequencies(terms: list[str], skip_docs: set[int] | None = None) -> dict[str, int]:
+def term_document_frequencies(terms: list[str], skip_docs: set[int] | None = None,
+                              docs: set[int] | None = None) -> dict[str, int]:
     """How many documents contain each term, counted over the three indexed fields.
 
     ``memory_type`` is deliberately excluded: the postings carry no type bit, so a df that counted
     type matches would be one the index cannot reproduce -- and the full-scan oracle has to produce
     the same factor for the two paths to stay equal.
+
+    ``docs`` restricts the count to a document set (an authorized scope).  A scoped search needs
+    document frequency *inside its scope* -- that is the number the payload-based oracle computes --
+    and the postings are corpus-wide, so the matched set is intersected before it is counted.
     """
     conn = get_connection()
     frequencies: dict[str, int] = {}
@@ -895,7 +900,10 @@ def term_document_frequencies(terms: list[str], skip_docs: set[int] | None = Non
                 _accumulate(blob, _FIELD_WEIGHTS, folded, skip_docs)
         else:
             _accumulate_composite([term], _FIELD_WEIGHTS, folded)
-        frequencies[term] = len(folded)
+        if docs is not None:
+            frequencies[term] = sum(1 for doc in folded if doc in docs)
+        else:
+            frequencies[term] = len(folded)
     return frequencies
 
 
@@ -904,12 +912,17 @@ def accumulate_relevance(
     skip_docs: set[int] | None = None,
     total_docs: int | None = None,
     df: dict[str, int] | None = None,
+    docs: set[int] | None = None,
 ) -> dict[int, float]:
-    """Exact relevance per document id for ``terms``.
+    """Exact relevance per document id for ``terms``, optionally restricted to ``docs``.
 
     ``skip_docs`` holds dirty documents whose base postings are stale.  They are credited
     nothing, not corrected: the queue suppresses them, so a search that finds any live
     dirty document is refused before it gets here (see :func:`gram_index_usable`).
+
+    ``docs`` keeps only the given document ids.  The accumulation runs corpus-wide and the result
+    is filtered, which is exact because a document's score is a function of its own postings and
+    the weights: nothing in it depends on which other documents are admitted.
     """
     conn = get_connection()
     weights = _FIELD_WEIGHTS
@@ -927,7 +940,8 @@ def accumulate_relevance(
         # The native batch omits zero-IDF documents; the legacy scorer retains them.
         # Mixed long terms also keep their existing per-term reduction order.
         if all(factor > 0.0 for factor in factors.values()):
-            return vector_lake_core.fast_accumulate_terms(term_blobs, factors, skip_docs, weights)
+            scored = vector_lake_core.fast_accumulate_terms(term_blobs, factors, skip_docs, weights)
+            return {doc: value for doc, value in scored.items() if docs is None or doc in docs}
     accumulator: dict[int, float] = {}
 
     def _fold(term: str, folded: dict[int, int]) -> None:
@@ -951,6 +965,8 @@ def accumulate_relevance(
             # matches; folding several together would apply one factor to all of them.
             _accumulate_composite([term], weights, folded)
         _fold(term, folded)
+    if docs is not None:
+        return {doc: value for doc, value in accumulator.items() if doc in docs}
     return accumulator
 
 

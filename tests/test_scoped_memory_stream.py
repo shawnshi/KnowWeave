@@ -106,19 +106,21 @@ def test_reader_preserves_schema_connection_flags_and_caller_transaction(monkeyp
         c.close()
 
 
-def test_both_views_share_df_and_have_independent_returned_payloads(monkeypatch):
+def test_both_views_come_from_one_scope_read_and_have_independent_returned_payloads(monkeypatch):
     c = database()
     monkeypatch.setattr(store, 'get_connection', lambda: c)
-    original = store._memory_term_frequencies
-    calls = []
-    def count_df(*args, **kwargs):
-        calls.append(1)
-        return original(*args, **kwargs)
-    monkeypatch.setattr(store, '_memory_term_frequencies', count_df)
+    original = store._iter_scoped_memory_payloads
+    reads = []
+    def count_scan(*args, **kwargs):
+        reads.append(1)
+        yield from original(*args, **kwargs)
+    monkeypatch.setattr(store, '_iter_scoped_memory_payloads', count_scan)
     try:
         active, history = store.search_memory_packet_views('scarce', active_top_k=12,
                                                          history_top_k=12, domain='Medical_IT')
-        assert calls == [1]
+        # One read of the scope serves the corpus DF and both windows.  The second pass this
+        # replaces cost 1.2-2.4 s of a 2.4-5.4 s scoped search on the live Medical_IT domain.
+        assert reads == [1]
         common = set(m['memory_id'] for m in active) & set(m['memory_id'] for m in history)
         assert common
         key = sorted(common)[0]
@@ -130,23 +132,26 @@ def test_both_views_share_df_and_have_independent_returned_payloads(monkeypatch)
         c.close()
 
 
-def test_df_and_rank_use_one_snapshot_while_another_connection_commits(monkeypatch, tmp_path):
+def test_one_scope_read_cannot_be_split_by_a_concurrent_commit(monkeypatch, tmp_path):
     path = tmp_path / 'snapshot.sqlite3'
     c = database(path=path)
     c.execute('PRAGMA journal_mode=WAL')
     expected = reference(c, 'scarce')
     monkeypatch.setattr(store, 'get_connection', lambda: c)
-    original = store._memory_term_frequencies
-    def concurrent_commit(*args, **kwargs):
-        df = original(*args, **kwargs)
+    original = store._iter_scoped_memory_payloads
+    def commit_after_first_row(*args, **kwargs):
         other = sqlite3.connect(str(path))
         try:
-            other.execute("UPDATE operational_memory SET data_json=json_set(data_json,'$.text','concurrent mutation')")
-            other.commit()
+            for index, row in enumerate(original(*args, **kwargs)):
+                yield row
+                if index == 0:
+                    # A writer lands mid-read: DF and ranking come from one pass, so there is no
+                    # window in which half the answer describes one corpus and half another.
+                    other.execute("UPDATE operational_memory SET data_json=json_set(data_json,'$.text','concurrent mutation')")
+                    other.commit()
         finally:
             other.close()
-        return df
-    monkeypatch.setattr(store, '_memory_term_frequencies', concurrent_commit)
+    monkeypatch.setattr(store, '_iter_scoped_memory_payloads', commit_after_first_row)
     try:
         assert store.search_operational_memory('scarce', top_k=12, domain='Medical_IT') == expected
         assert not c.in_transaction
@@ -176,7 +181,8 @@ def test_budget_exhaustion_is_explicit_not_truncated_or_unscoped(monkeypatch, li
     monkeypatch.setattr(store, 'get_connection', lambda: c)
     monkeypatch.setattr(store, '_load_memory_items', lambda: pytest.fail('unscoped fallback'))
     if limit == 'rows':
-        monkeypatch.setattr(stream, 'MAX_SCANNED_ROWS', 8)
+        # The scan is one pass now, so the row cap has to bite inside it rather than after two.
+        monkeypatch.setattr(stream, 'MAX_SCANNED_ROWS', 4)
     elif limit == 'bytes':
         monkeypatch.setattr(stream, 'MAX_SCANNED_BYTES', 10)
     elif limit == 'result_rows':
@@ -196,7 +202,7 @@ def test_budget_exhaustion_is_explicit_not_truncated_or_unscoped(monkeypatch, li
 
 @pytest.mark.parametrize('borrowed', [False, True])
 @pytest.mark.parametrize('failure', [ValueError, KeyboardInterrupt])
-def test_df_failure_closes_streams_and_preserves_transaction_ownership(monkeypatch, borrowed, failure):
+def test_a_failing_scan_closes_streams_and_preserves_transaction_ownership(monkeypatch, borrowed, failure):
     c = database(count=6)
     monkeypatch.setattr(store, 'get_connection', lambda: c)
     original = store._iter_scoped_memory_payloads
@@ -204,19 +210,16 @@ def test_df_failure_closes_streams_and_preserves_transaction_ownership(monkeypat
     def observed(*args, **kwargs):
         source = original(*args, **kwargs)
         try:
-            yield from source
+            yield next(source)
+            raise failure('synthetic scan failure')
         finally:
             source.close()
             closed.append(True)
-    def fail_df(memories, terms):
-        next(iter(memories))
-        raise failure('synthetic DF failure')
     monkeypatch.setattr(store, '_iter_scoped_memory_payloads', observed)
-    monkeypatch.setattr(store, '_memory_term_frequencies', fail_df)
     if borrowed:
         c.execute('BEGIN')
     try:
-        with pytest.raises(failure, match='synthetic DF failure'):
+        with pytest.raises(failure, match='synthetic scan failure'):
             store.search_operational_memory('scarce', domain='Medical_IT')
         assert closed == [True]
         assert c.in_transaction is borrowed
@@ -225,17 +228,20 @@ def test_df_failure_closes_streams_and_preserves_transaction_ownership(monkeypat
         c.close()
 
 
-def test_caller_transaction_cannot_be_mutated_between_the_two_passes(monkeypatch):
+def test_caller_transaction_cannot_be_mutated_by_the_scan(monkeypatch):
     c = database(count=6)
     c.execute('BEGIN')
     c.execute("UPDATE operational_memory SET data_json=json_set(data_json,'$.memory_score',0.88)")
     monkeypatch.setattr(store, 'get_connection', lambda: c)
-    original = store._memory_term_frequencies
-    def mutate_after_df(*args, **kwargs):
-        df = original(*args, **kwargs)
-        c.execute("UPDATE operational_memory SET data_json=json_set(data_json,'$.text','wrong generation')")
-        return df
-    monkeypatch.setattr(store, '_memory_term_frequencies', mutate_after_df)
+    original = store._iter_scoped_memory_payloads
+    def write_during_scan(*args, **kwargs):
+        for index, row in enumerate(original(*args, **kwargs)):
+            yield row
+            if index == 0:
+                # The reader holds the caller's transaction open read-only; a write attempted
+                # mid-scan must be refused by the flag, not silently committed.
+                c.execute("UPDATE operational_memory SET data_json=json_set(data_json,'$.text','wrong generation')")
+    monkeypatch.setattr(store, '_iter_scoped_memory_payloads', write_during_scan)
     try:
         with pytest.raises(sqlite3.OperationalError, match='readonly'):
             store.search_operational_memory('scarce', domain='Medical_IT')
@@ -248,37 +254,31 @@ def test_caller_transaction_cannot_be_mutated_between_the_two_passes(monkeypatch
         c.close()
 
 
-def test_retracks_sql_timeout_after_frequency_pass(monkeypatch):
+def test_the_scan_never_holds_a_busy_timeout_past_the_request_budget(monkeypatch):
     from vector_lake import retrieval_runtime as runtime
     c = database(count=6)
     monkeypatch.setattr(store, 'get_connection', lambda: c)
-    clock = [100.0]
-    monkeypatch.setattr(runtime.time, 'monotonic', lambda: clock[0])
-    original_df, original_track = store._memory_term_frequencies, runtime.track_connection
+    original_track = runtime.track_connection
     timeouts = []
-    def delayed_df(*args, **kwargs):
-        result = original_df(*args, **kwargs)
-        clock[0] += 13.5
-        return result
     def track(conn):
         result = original_track(conn)
         timeouts.append(conn.execute('PRAGMA busy_timeout').fetchone()[0])
         return result
-    monkeypatch.setattr(store, '_memory_term_frequencies', delayed_df)
     monkeypatch.setattr(runtime, 'track_connection', track)
     before = c.execute('PRAGMA busy_timeout').fetchone()[0]
     try:
         with runtime.request_scope('scarce'):
             assert store.search_operational_memory('scarce', domain='Medical_IT')
-        assert timeouts[0] == before
-        assert timeouts[-1] <= 1500
+        # There is no longer a stage after the read to re-track for; the read itself must never
+        # park a SQL call past the request budget, and the caller's timeout comes back untouched.
+        assert timeouts and timeouts[0] <= runtime.REQUEST_SECONDS * 1000
         assert c.execute('PRAGMA busy_timeout').fetchone()[0] == before
         assert not c.in_transaction
     finally:
         c.close()
 
 
-def test_deadline_after_df_reports_failure_and_releases_snapshot(monkeypatch):
+def test_deadline_during_the_scan_reports_failure_and_releases_snapshot(monkeypatch):
     from vector_lake import retrieval_runtime as runtime, search_ledger
     c = database(count=6)
     monkeypatch.setattr(store, 'get_connection', lambda: c)
@@ -286,12 +286,13 @@ def test_deadline_after_df_reports_failure_and_releases_snapshot(monkeypatch):
     monkeypatch.setattr(runtime.time, 'monotonic', lambda: clock[0])
     records = []
     monkeypatch.setattr(search_ledger, 'record', lambda **kwargs: records.append(kwargs))
-    original = store._memory_term_frequencies
-    def expired_df(*args, **kwargs):
-        result = original(*args, **kwargs)
-        clock[0] += 16
-        return result
-    monkeypatch.setattr(store, '_memory_term_frequencies', expired_df)
+    original = store._iter_scoped_memory_payloads
+    def slow_scan(*args, **kwargs):
+        for row in original(*args, **kwargs):
+            clock[0] += 8
+            yield row
+            clock[0] += 8
+    monkeypatch.setattr(store, '_iter_scoped_memory_payloads', slow_scan)
     try:
         with pytest.raises(runtime.RetrievalBudgetExceeded), runtime.request_scope('scarce'):
             store.search_operational_memory('scarce', domain='Medical_IT')

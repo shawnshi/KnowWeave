@@ -815,3 +815,109 @@ def test_init_db_adds_event_date_source_to_a_complete_schema_that_lacks_it(isola
     assert row["event_date"] == "2026-09-17T00:00:00+00:00"
     # NULL is what tells repair this row's ``event_date`` still means "ingestion time".
     assert row["event_date_source"] is None
+
+
+def _put_timeline_claim(conn, claim_id: str, text: str, anchor: str) -> None:
+    payload = {
+        "claim_type": "timeline-event",
+        "temporal_anchor": anchor,
+        "subject_entity_ids": ["Vendor_Test"],
+        "source_ids": ["Source_Test"],
+        "action": "Release",
+    }
+    conn.execute(
+        "INSERT INTO claims (claim_id, claim_text, status, data_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (claim_id, text, "active", json.dumps(payload), f"{anchor}T00:00:00+00:00"),
+    )
+
+
+def test_the_watchdog_closes_timeline_drift_in_place(isolated_memory):
+    """Drift makes every timeline query answer from claims (120-211 ms); the owner repairs it."""
+    from vector_lake import watchdog_app
+
+    db_store.init_db()
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        _put_timeline_claim(conn, "claim_drift_1", "Vendor_Test shipped release one.", "2026-07-13")
+    assert rebuild_timeline_events_from_claims(dry_run=False).startswith("Rebuilt 1")
+
+    with db_store.transaction():
+        # An out-of-band write that removes the projected row: the id set loses a member.
+        conn.execute("DELETE FROM timeline_events")
+    assert timeline_projection_parity()["missing"] == 1
+
+    healed = watchdog_app.heal_timeline_projection(force=True)
+
+    assert healed["healed"] is True
+    assert healed["parity"]["missing"] == 1
+    after = timeline_projection_parity()
+    assert after["missing"] == 0 and after["extra"] == 0
+    assert "release one" in search_timeline_events(limit=5)
+
+
+def test_the_watchdog_leaves_a_parity_projection_alone(isolated_memory):
+    from vector_lake import watchdog_app
+
+    db_store.init_db()
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        _put_timeline_claim(conn, "claim_ok_1", "Vendor_Test shipped release one.", "2026-07-13")
+    rebuild_timeline_events_from_claims(dry_run=False)
+
+    healed = watchdog_app.heal_timeline_projection(force=True)
+
+    assert healed == {"healed": False, "reason": "parity",
+                      "parity": {"canonical": 1, "projection": 1, "missing": 0, "extra": 0}}
+
+
+def test_a_second_heal_inside_the_interval_is_throttled_before_the_parity_proof(isolated_memory, monkeypatch):
+    """The proof is 79 ms cold on the live corpus; it must not run every cycle."""
+    from vector_lake import watchdog_app, tool_timeline
+
+    db_store.init_db()
+    watchdog_app.heal_timeline_projection(force=True)  # establishes the throttle stamp
+    calls = []
+    monkeypatch.setattr(tool_timeline, "timeline_projection_parity",
+                        lambda: calls.append(1) or {"canonical": 0, "projection": 0, "missing": 0, "extra": 0})
+
+    assert watchdog_app.heal_timeline_projection()["reason"] == "throttled"
+    assert calls == []
+
+
+def test_lean_parity_ids_match_the_full_decode(isolated_memory):
+    """The lean id set must be the same set the payload-decoding path produces."""
+    from vector_lake import tool_timeline
+
+    db_store.init_db()
+    conn = db_store.get_connection()
+    with db_store.transaction():
+        _put_timeline_claim(conn, "claim_a", "Vendor_Test shipped release one.", "2026-07-13")
+        _put_timeline_claim(conn, "claim_b", "Vendor_Test shipped release two.", "2026-08-01")
+        # No temporal_anchor and no event_date: identity comes from the text prefix.
+        conn.execute(
+            "INSERT INTO claims (claim_id, claim_text, status, data_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("claim_c", "[2026-09-09] [Release] Vendor_Test shipped release three.", "active",
+             json.dumps({"claim_type": "timeline-event"}), "2026-09-09T00:00:00+00:00"),
+        )
+        # A boolean anchor: the one shape ``str()`` settles differently on the two paths.
+        conn.execute(
+            "INSERT INTO claims (claim_id, claim_text, status, data_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("claim_d", "Vendor_Test shipped release four.", "active",
+             json.dumps({"claim_type": "timeline-event", "temporal_anchor": True}),
+             "2026-09-10T00:00:00+00:00"),
+        )
+        # A container anchor, which arrives from json_extract as JSON text rather than repr.
+        conn.execute(
+            "INSERT INTO claims (claim_id, claim_text, status, data_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("claim_e", "Vendor_Test shipped release five.", "active",
+             json.dumps({"claim_type": "timeline-event", "temporal_anchor": {"y": 1}}),
+             "2026-09-11T00:00:00+00:00"),
+        )
+
+    full = {
+        tool_timeline._event_from_claim_row(row)["id"]
+        for row in conn.execute(
+            "SELECT claim_id, claim_text, data_json, updated_at FROM claims WHERE f_claim_type = 'timeline-event'"
+        ).fetchall()
+    }
+    assert tool_timeline._expected_event_ids(conn) == full

@@ -139,7 +139,8 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 * `VECTOR_LAKE_STALE_TASK_MAX_AGE_SECONDS`：兜底把多旧的摄取任务视为陈旧（默认 `86400` 秒）。
 * `VECTOR_LAKE_RUNNER_STALE_SECONDS`：Runner / 监督器心跳过期阈值，默认 `2400` 秒。
 * `VECTOR_LAKE_RUNNER_STRICT=1`：把 Runner 告警从 `warnings` 升入 `degraded`（两者都不阻断写入）。
-* `VECTOR_LAKE_FTS`：词法检索后端，默认 `fts5`；`tantivy` 使用派生镜像。两者接收项目分词器的预切词串，每条查询内部采用 AND，并沿用负数 rank 约定。页面检索先保留原始查询命中；未填满召回深度时，最多执行 8 条保留其他限定词的词典替换查询，去重后补位（sum 模式的补充 BM25 贡献减半；RRF 中补充项排在原始命中之后）。不把全部扩展词拼成一个 AND。FTS5 仍是权威投影，dirty 或无效镜像回退 SQL。可用 `python cli.py projections --reconcile --only tantivy_mirror --apply` 请求有界重建；deferred 不代表完成，后续由现有 watchdog 续接。具体持久队列、读门禁、资源界限与回退见[运维指南的 Tantivy 写入约束](OPERATIONS.md#tantivy-写入约束)。切换后端前需验证相关性，不能仅凭吞吐量替换默认值。
+* `VECTOR_LAKE_FTS`：词法检索后端，默认 `fts5`；`tantivy` 使用派生镜像。两者接收项目分词器的预切词串，并沿用负数 rank 约定。页面检索的提取分两档：先用去掉停用词（`的`/`在`/`与`/`对`/`the`/`of` 等）后的全部限定词做 AND，只要它返回任何命中即为答案；仅当 AND 命中为零时，才用其中词频较低的一半限定词做 OR 补位（bm25 排序），Bm25 仍决定顺序，且不引入只命中单个限定词的页作为“答案”。这样 `电子病历系统应用水平分级评价六级` 这类自然语言长查询从 0 条变为可答，而 `大模型 部署` 仍然不会召回只命中 `部署` 的页。未填满召回深度时，最多再执行 8 条保留其他限定词的词典替换查询，去重后补位（sum 模式的补充 BM25 贡献减半；RRF 中补充项排在原始命中之后）。FTS5 仍是权威投影，dirty 或无效镜像回退 SQL。可用 `python cli.py projections --reconcile --only tantivy_mirror --apply` 请求有界重建；deferred 不代表完成，后续由现有 watchdog 续接。具体持久队列、读门禁、资源界限与回退见[运维指南的 Tantivy 写入约束](OPERATIONS.md#tantivy-写入约束)。切换后端前需验证相关性，不能仅凭吞吐量替换默认值。
+* `VECTOR_LAKE_FALLBACK_REPARSE_SECONDS`：投影落后于 `index.json` 时，页面目录回落解析该文件的限频窗口，默认 `0`（每次戳变化都重新解析，即“文件优先”的既有契约）。设为正数后，窗口内继续用上一次解析结果作答并在检索备注里注明是哪一次归档、已过期多久，避免写入活跃期每次重写 `index.json` 都让下一个请求付整文件解析（实测 12.7 MB / 408 ms）。代价是窗口内新建/改名的页最迟一个窗口后才可见，故不默认开启。
 * `VECTOR_LAKE_CLAIM_BLOCKS`：claim 块提取器，默认 `rust`（`vector_lake_core.fast_extract_blocks`）；`python` 使用 mistune。含 NUL 或 U+FFFD 的正文走 mistune，避免解析器差异改变 claim 文本与标识。
 * `VECTOR_LAKE_RERANK_WEIGHT`：同池重排权重，默认 `0.4`，混合上游归一化分与 Rust BM25 分；`0` 禁用重排。缺少 `fast_bm25_rerank` 时保留上游顺序并告警，没有 Python 重排回退。重排不增加候选，也不等于经过人工相关性验收。
 * `VECTOR_LAKE_ENTITY_NAME_PRIORITY`：是否优先提升被查询点名的实体页，默认 `0`；开启后按实体名在查询中的位置分层，层内按混合分排序。点名某实体不一定意味着想要它的主体页，故不默认开启。
@@ -190,7 +191,7 @@ SQL-backed 词法节点在可选向量工作前完成物化。到期后上下文
 * `VECTOR_LAKE_EMBEDDING_MAX_RETRIES`：单次重试上限，默认 `5`。
 * `VECTOR_LAKE_EMBEDDING_MAX_CONSECUTIVE_FAILURES`：连续失败批次上限，默认 `3`。
 * `VECTOR_LAKE_EMBEDDING_RUN_STALE_SECONDS`：embedding run 的租约过期时间，默认 `3600`（下限 `60`）秒。
-* `VECTOR_LAKE_MEMORY_SEARCH`：运行态记忆检索后端，默认 `gram`（精确 n-gram 倒排）；其他取值回退到投影扫描；`legacy` 强制旧路径。
+* `VECTOR_LAKE_MEMORY_SEARCH`：运行态记忆检索后端，默认 `gram`（精确 n-gram 倒排）；其他取值回退到投影扫描；`legacy` 强制旧路径。受域检索（`domain=`）不枚举整域 payload：域范围由 `operational_memory_index.memory_domain` 与 `page_key`→`page_index_nodes.node_key` 两段合取，语料 DF 与逐文档相关性来自倒排，胜出条目再交给 `score_memory_items` 精确重排，因此与 payload 扫描同解、只差开销（活体实测 Medical_IT 30 613 行：177 ms 对 857 ms）。三个前提任一不成立时自动回退 payload 扫描且不加缓存：加速器索引不存在、gram 基座不可用（有 dirty 文档或未建）、或指定了 `cluster=`（簇的“自有 `$.topic_cluster` 优先”这一半尚无索引列）。
 * `VECTOR_LAKE_IGNORE_SCHEDULED_LINT_STATE`：设值（非空）时忽略已完成的定时 lint 标记，用于强制重跑一次。
 * `VECTOR_LAKE_OUTBOX_MAX_PENDING_AGE_SECONDS`：outbox 最老待处理行的年龄阈值，默认 `300` 秒。
 * `VECTOR_LAKE_WRITE_LOCK_CONTENTION_WINDOW_SECONDS`：判定写锁争用是否仍属「当前」的滑动窗口，默认 `600` 秒。
@@ -214,7 +215,7 @@ SQL-backed 词法节点在可选向量工作前完成物化。到期后上下文
 ```json
 {
   "mcpServers": {
-    "mentat-mind-mcp": {
+    "Reson-KnowWeave-mcp": {
       "command": "C:/path/to/KnowWeave/.venv/Scripts/python.exe",
       "args": [
         "-m",
@@ -244,4 +245,4 @@ Pi 的文件配置位于 `~/.pi/agent/mcp.json`；其他客户端使用各自的
 }
 ```
 
-这是 Pi 的工具暴露配置，不应直接复制到其他 MCP 客户端。修改 Pi 的 MCP 配置后，使用 `/reload` 重新加载配置；服务代码变更后，常驻 Python 进程仍需重连或重启，可用 `/mcp reconnect mentat-mind-mcp`。在实际连接上调用 `runtime_identity`，核对 PID、加载路径与选定函数身份；`doctor` 的新进程检查、配置文件修改或独立临时客户端都不能替代实际宿主连接验收。
+这是 Pi 的工具暴露配置，不应直接复制到其他 MCP 客户端。修改 Pi 的 MCP 配置后，使用 `/reload` 重新加载配置；服务代码变更后，常驻 Python 进程仍需重连或重启，可用 `/mcp reconnect Reson-KnowWeave-mcp`。在实际连接上调用 `runtime_identity`，核对 PID、加载路径与选定函数身份；`doctor` 的新进程检查、配置文件修改或独立临时客户端都不能替代实际宿主连接验收。
