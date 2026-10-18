@@ -31,7 +31,7 @@ description: 'Validate runtime dependencies and filesystem layout health of Vect
   </workflow>
 
   <tool_dispatch>
-    - `doctor_vector_lake` (via `mentat-mind-mcp`): Required to execute the actual system validation and health checks.
+    - `doctor_vector_lake` (via `Reson-KnowWeave-mcp`): Required to execute the actual system validation and health checks.
   </tool_dispatch>
 
   <checkpoint_rules>

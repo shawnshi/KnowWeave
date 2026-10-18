@@ -6,6 +6,7 @@ import inspect
 import os
 import sys
 import logging
+from typing import Any
 
 # A stdio MCP server must not do startup network I/O: fastmcp's default version
 # check calls pypi.org on every host start.  This has to be set before fastmcp is
@@ -36,6 +37,9 @@ def registered_tool_names(server=None) -> list[str]:
     server = server if server is not None else mcp
     lister = getattr(server, "list_tools", None)
     if callable(lister):
+        # Framework implementations may return a sync iterable or an awaitable.
+        # Runtime materialization below still validates the dynamic result.
+        result: Any
         try:
             result = lister()
         except Exception:
@@ -46,8 +50,13 @@ def registered_tool_names(server=None) -> list[str]:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
+                pending = result
+
+                async def collect_listing() -> Any:
+                    return await pending
+
                 try:
-                    result = asyncio.run(result)
+                    result = asyncio.run(collect_listing())
                 except Exception:
                     result = None
             else:
@@ -206,6 +215,23 @@ def embedding_backfill(dry_run: bool = True, limit: int = 0, include_existing: b
 def wiki_restore(dry_run: bool = True, limit: int = 10) -> str:
     """[MAINTENANCE / DISASTER RECOVERY] Restore missing Wiki Markdown pages from canonical metadata. Prefer CLI 'cli.py wiki-restore'."""
     return tools.restore_missing_wiki_from_canonical(dry_run=dry_run, limit=limit)
+
+@mcp.tool()
+def get_query_evidence(query: str, node_keys: list[str], domain: str, cluster: str = '') -> str:
+    """Optionally read exact passages from 1-8 already located Source nodes.
+
+    Strict existing canonical Source-version/Raw-byte binding is required; legacy
+    or ambiguous binding returns explicit refusal, NOT source absence. This is
+    not a replacement for the existing authorized original-reading workflow and
+    never repairs metadata or silently labels weaker evidence verified.
+    Pilot domains: Artificial_Intelligence and Medical_IT. A verified result
+    covers exact selected bytes/binding only, not truth, authorship/date, full
+    document/images, publication or authorization. Trusted host configuration
+    supplies root, dedicated read-only snapshot and a cooperative 15s budget;
+    those resources and embedding/index/write controls are not tool inputs.
+    """
+    return tools.get_query_evidence(query, node_keys, domain=domain, cluster=cluster or None)
+
 
 @mcp.tool()
 def search_vector_lake(
@@ -620,8 +646,8 @@ def expire_ingest_tasks(max_age_seconds: int = 86400) -> str:
 
 # [CLI-only / Internal]
 def finalize_ingest(
-    files_written: list = None,
-    processed_data: dict = None,
+    files_written: list | None = None,
+    processed_data: dict | None = None,
     files_written_payload_file: str = "",
     raw_files_payload_file: str = "",
 ) -> str:
@@ -659,7 +685,7 @@ def check_duplicate_entity(candidate_title: str, candidate_type: str, candidate_
     return tools.check_duplicate_entity(candidate_title, candidate_type, candidate_summary)
 
 @mcp.tool()
-def visualize_vector_lake(output_dir: str = None) -> str:
+def visualize_vector_lake(output_dir: str | None = None) -> str:
     """Visualize the LLM-Wiki topology as an interactive 3D HTML dashboard.
 
     ``output_dir`` is an *output* directory, not an input sandbox: this call

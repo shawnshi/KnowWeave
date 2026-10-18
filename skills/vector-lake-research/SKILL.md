@@ -37,7 +37,7 @@ triggers: 'Triggered when the user asks to research graph gaps, explore knowledg
 
   <tool_dispatch>
     - `bash`: `python cli.py research [--dry-run]` to scan gaps; `python cli.py ingest` to ingest.
-    - `mentat-mind-mcp`: `review_governance_list` to inspect pending gaps.
+    - `Reson-KnowWeave-mcp`: `review_governance_list` to inspect pending gaps.
     - `invoke_subagent`: MUST be used to orchestrate heavy background operations for the actual research.
   </tool_dispatch>
 

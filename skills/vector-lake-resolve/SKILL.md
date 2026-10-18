@@ -21,7 +21,7 @@ triggers: 'User requests to resolve a pending Vector Lake governance item.'
 
 <task_context>
   <context>The user wants to resolve a governance item (e.g., merge, create, skip, acknowledge) in the Vector Lake queue.</context>
-  <request>Analyze the item, formulate a resolution strategy, and execute it using the mentat-mind-mcp server.</request>
+  <request>Analyze the item, formulate a resolution strategy, and execute it using the Reson-KnowWeave-mcp server.</request>
 </task_context>
 
 <execution_workflow>
@@ -33,9 +33,9 @@ triggers: 'User requests to resolve a pending Vector Lake governance item.'
   </workflow>
 
   <tool_dispatch>
-    - `resolve_governance_item` (from `mentat-mind-mcp` server): Used to apply the final resolution strategy to the governance item.
+    - `resolve_governance_item` (from `Reson-KnowWeave-mcp` server): Used to apply the final resolution strategy to the governance item.
     - `invoke_subagent`: Must be used for concurrent tasks if researching context for the resolution.
-    - `mentat-mind-mcp`: Required for knowledge registry and managing governance state.
+    - `Reson-KnowWeave-mcp`: Required for knowledge registry and managing governance state.
   </tool_dispatch>
 
   <checkpoint_rules>

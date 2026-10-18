@@ -32,7 +32,7 @@ triggers: "Visualize graph, show topology, render vector lake, 3d network graph"
 
   <tool_dispatch>
     Mandatory Tools:
-    - mentat-mind-mcp (Tool: `visualize_vector_lake`) for retrieving graph topology and generating the dashboard.
+    - Reson-KnowWeave-mcp (Tool: `visualize_vector_lake`) for retrieving graph topology and generating the dashboard.
     - invoke_subagent (for delegating parallel graph tasks if necessary).
   </tool_dispatch>
 

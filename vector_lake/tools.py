@@ -18,6 +18,7 @@ from vector_lake.tool_ingest import (
     prepare_ingest_batch,
 )
 from vector_lake.tool_query import prepare_query_context, preview_query_context, finalize_query_synthesis
+from vector_lake.query_evidence_host import configured_query_evidence as get_query_evidence
 from vector_lake.tool_review import review_vector_lake
 from vector_lake.tool_search import assemble_context, search_vector_lake
 from vector_lake.tool_sync import sync_vector_lake
@@ -57,6 +58,7 @@ from vector_lake.anchor_backfill import backfill_anchors, draft_anchors
 
 __all__ = [
     "assemble_context",
+    "get_query_evidence",
     "audit_graph",
     "check_duplicate_entity",
     "claim_ingest_tasks",

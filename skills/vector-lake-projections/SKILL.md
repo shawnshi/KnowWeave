@@ -35,7 +35,7 @@ triggers: When the user asks to check projection health, inspect index drift, tr
 
 <execution_workflow>
   <workflow>
-    1. Inspect current projection status via the `inspect_projections` MCP tool from `mentat-mind-mcp`, or run `python cli.py projections` in bash.
+    1. Inspect current projection status via the `inspect_projections` MCP tool from `Reson-KnowWeave-mcp`, or run `python cli.py projections` in bash.
     2. Analyze the report:
        - Identify which projections are `HEALTHY` and which are `DEGRADED`.
        - For any degraded projection, identify whether it is `[auto]` repairable or `[manual]` entry.
@@ -48,7 +48,7 @@ triggers: When the user asks to check projection health, inspect index drift, tr
   </workflow>
 
   <tool_dispatch>
-    - `mentat-mind-mcp` (Tool: `inspect_projections`): Unified read-only check of all 8 projections.
+    - `Reson-KnowWeave-mcp` (Tool: `inspect_projections`): Unified read-only check of all 8 projections.
     - `bash`: To execute targeted CLI reconciliation (`python cli.py projections ...`).
   </tool_dispatch>
 

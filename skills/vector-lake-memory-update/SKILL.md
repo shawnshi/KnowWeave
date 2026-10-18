@@ -39,7 +39,7 @@ triggers: When the user requests to save a preference, decision, fact, or task s
   </workflow>
 
   <tool_dispatch>
-    - `update_operational_memory` (from `mentat-mind-mcp`): Mandatory for updating the knowledge registry and preserving the Dual-Schema layout.
+    - `update_operational_memory` (from `Reson-KnowWeave-mcp`): Mandatory for updating the knowledge registry and preserving the Dual-Schema layout.
     - `invoke_subagent`: Used for concurrent tasks if extracting the memory context requires parallel log processing.
   </tool_dispatch>
 
@@ -66,6 +66,6 @@ triggers: When the user requests to save a preference, decision, fact, or task s
 
   <validation_gate>
     - Ensure intermediate artifacts are contained within the `scratch/` sandbox.
-    - Validate that the `mentat-mind-mcp` tool call completes without schema violation errors.
+    - Validate that the `Reson-KnowWeave-mcp` tool call completes without schema violation errors.
   </validation_gate>
 </delivery_standards>

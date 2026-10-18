@@ -121,7 +121,7 @@ def unapplied_merge_items(queue: dict | None = None) -> list[str]:
     return outstanding
 
 
-def resolve_governance_item(item_id: str, resolution: str = "skip", change_manifest: dict = None) -> dict | None:
+def resolve_governance_item(item_id: str, resolution: str = "skip", change_manifest: dict | None = None) -> dict | None:
     """Resolve one governance item, committing the item and its effect together.
 
     The queue lock is taken *before* the database transaction: the documented lock
@@ -135,7 +135,7 @@ def resolve_governance_item(item_id: str, resolution: str = "skip", change_manif
         return _resolve_locked(item_id, resolution, change_manifest)
 
 
-def _resolve_locked(item_id: str, resolution: str = "skip", change_manifest: dict = None) -> dict | None:
+def _resolve_locked(item_id: str, resolution: str = "skip", change_manifest: dict | None = None) -> dict | None:
     queue = governance_store.load_governance_queue()
     for item in queue["items"]:
         if item.get("item_id") != item_id:

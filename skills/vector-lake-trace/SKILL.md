@@ -27,13 +27,13 @@ triggers: 'Show provenance trace for a query or identifier to see where knowledg
   <workflow>
     1. Analyze the request to extract the exact `query_or_id` to trace.
     2. Write intermediate analysis or trace plans to `scratch/` for Sandbox Isolation if complex parsing is needed.
-    3. Call the `trace_vector_lake` MCP tool from `mentat-mind-mcp` to retrieve the lineage.
+    3. Call the `trace_vector_lake` MCP tool from `Reson-KnowWeave-mcp` to retrieve the lineage.
     4. [Fable 5 Checkpoint] 必须在此定义强制阻断点，要求人类 Approve。呈现查找到的溯源链，确保数据符合预期，等待人类审批。
     5. Format the retrieved trace data and present it to the user.
   </workflow>
 
   <tool_dispatch>
-    - `mentat-mind-mcp`: Use `trace_vector_lake` to query lineage and register queries with the Vector Lake.
+    - `Reson-KnowWeave-mcp`: Use `trace_vector_lake` to query lineage and register queries with the Vector Lake.
     - `invoke_subagent`: Use for concurrent tasks if complex cross-referencing is needed for the trace results.
   </tool_dispatch>
 

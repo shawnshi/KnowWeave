@@ -33,7 +33,7 @@ triggers:
   </workflow>
 
   <tool_dispatch>
-    - `mentat-mind-mcp`: Call the `merge_suggestions_vector_lake` tool to detect merge candidates.
+    - `Reson-KnowWeave-mcp`: Call the `merge_suggestions_vector_lake` tool to detect merge candidates.
     - `invoke_subagent`: Use for delegating concurrent deduplication analysis if the list is massive.
   </tool_dispatch>
 

@@ -26,13 +26,13 @@ triggers:
 <execution_workflow>
   <workflow>
     1. **Pre-Audit Preparation**: Set up the `scratch/` directory for Sandbox Isolation to store temporary logs and audit reports.
-    2. **Execution**: Use the `mentat-mind-mcp` tools to run the linting audit on Wiki nodes. Determine if `auto_fix=True` is required.
+    2. **Execution**: Use the `Reson-KnowWeave-mcp` tools to run the linting audit on Wiki nodes. Determine if `auto_fix=True` is required.
     3. **Checkpoint Evaluation**: Evaluate findings and hit the Fable 5 Checkpoint before applying mass fixes.
-    4. **Finalization**: Complete the audit and register the health status using `mentat-mind-mcp`.
+    4. **Finalization**: Complete the audit and register the health status using `Reson-KnowWeave-mcp`.
   </workflow>
 
   <tool_dispatch>
-    - `mentat-mind-mcp` (tool: `lint_vector_lake`): Mandated for knowledge registry and executing the self-healing audit.
+    - `Reson-KnowWeave-mcp` (tool: `lint_vector_lake`): Mandated for knowledge registry and executing the self-healing audit.
     - `invoke_subagent`: Use for concurrent tasks if delegating extensive lint reports analysis.
   </tool_dispatch>
 

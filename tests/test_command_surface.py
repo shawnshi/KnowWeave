@@ -10,7 +10,7 @@ from vector_lake import mcp_server
 ROOT = Path(__file__).resolve().parents[1]
 
 #: The published MCP server key, shared by both host manifests and the README example.
-EXPECTED_MCP_SERVER = "mentat-mind-mcp"
+EXPECTED_MCP_SERVER = "Reson-KnowWeave-mcp"
 
 
 def test_query_and_timeline_mcp_tools_are_registered():
@@ -125,10 +125,11 @@ def test_no_slash_command_compat_layer_ships():
 
 
 def test_mcp_server_registers_its_tool_surface():
-    """The server registers the inline preview alongside its proposal tools."""
+    """The server registers the optional strict facade and inline preview."""
     names = mcp_server.registered_tool_names(mcp_server.mcp)
 
-    assert len(names) == 20, f"expected exactly 20 core tools, got {len(names)}: {names}"
+    assert len(names) == 21, f"expected exactly 21 core tools, got {len(names)}: {names}"
+    assert "get_query_evidence" in names
     assert "preview_query_context" in names
     assert "search_vector_lake" in names
     assert "query_logic_lake" in names
@@ -232,7 +233,9 @@ def _documented_skill_arguments(name):
 
 def test_query_skill_requires_explicit_authorized_domain():
     arguments = _documented_skill_arguments("vector-lake-query")
-    assert arguments["query_str"] == "<task-query>"
+    assert arguments["query"] == "<core-concepts-and-necessary-aliases>"
+    assert arguments["mode"] == "page"
+    assert arguments["use_chunks"] is False
 
 
 def test_search_skill_requires_explicit_authorized_domain():

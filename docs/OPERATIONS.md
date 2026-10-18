@@ -69,6 +69,21 @@ python cli.py retrieval-indexes --db "<existing-db-path>"
 回退优先只撤回本次清单中的派生加速对象。恢复整库会影响备份后的合法写入，必须另行核准并协调 writers，不能因有备份就直接覆盖活动数据库。
 
 
+## 域内记忆检索计时
+
+检索 ledger 的 `timings_ms` 增加粗粒度阶段：`memory_scope_df`（完整域内 DF 扫描）、`memory_scope_weights`（请求内 IDF 权重准备）、`memory_scope_rank`（第二遍扫描、评分及窗口维护）、`memory_scope_total`（整个域内读取快照及结果整理）。DF 和 rank 均包含各自的 SQL 读取与 JSON 解码，**不是纯 CPU 评分或独立解码耗时**。total 包含这些子阶段，不能再与子阶段相加；同一请求内多次域内检索会累计同名阶段。
+
+这些阶段在成功或异常退出时记录，不吞掉原始失败；不做逐行计时或开启 cProfile。现有 `index_generation` 中的 `memory_scope` 保留扫描行数/字节、遍数与保留量。IDF 只在同一请求、同一固定快照的 DF 上复用，不跨域或跨请求缓存，不截断语料、改变排名规则、扩大预算或由 reader 安装 Schema。未执行的阶段可以缺省。
+
+代码验收、原生只读探针、驻留 MCP 重连和 Pi 当前会话 `/reload` 是不同层次。磁盘更新或合成测试通过不证明当前驻留查询函数、模型查询策略已生效；MCP ledger 仍可能来自旧进程。
+
+
+## 可选严格 Source 证据读取
+
+`get_query_evidence(query, node_keys, domain, cluster='')` 为 Windows 试点的可选 MCP 门面，仅支持已有 canonical Source 版本/Raw 摘要绑定的记录，拒绝任意路径、连接和上下文参数。域仍限 `Artificial_Intelligence`／`Medical_IT`，不存在全域 fallback；缺少绑定明确拒绝，不解释为原文不存在，不从磁盘补字段。普通 Source-first 原文阅读继续走已有授权路径，不能标成严格 verified。细节见 [QUERY_EVIDENCE.md](QUERY_EVIDENCE.md)。
+
+宿主使用固定 canonical 位置和每请求专用只读快照；非标准 DB 覆盖拒绝。配置阶段计入同一不延长的合作式期限。个人用户已选择暂不实施严格权限隔离，仍需承认 WAL/辅助文件竞态与非零物理协调风险。新工具的磁盘登记、实际客户端调用和活动 Pi 模型可见性分别核验；不得为加载新工具重启无关 Watchdog/runner、改变模型或写知识内容。
+
 ## 核心机制与运行时防护 (Core Runtime & Defense Systems)
 
 > **运行前提**：完整摄取需要 **① 单机数据根 ② 常驻 `python watchdog_sync.py`（Windows 可由计划任务 `VectorLake-Watchdog` 托管）③ 已安装、已认证的 Pi / Gemini / Codex CLI 后端**。`cli.py sync` 只准备任务包，统一 Runner 执行模型调用并经 `finalize_ingest` 发布。守护进程自动拉起并看护 `scripts/ingest_runner_service.py`，可用 `VECTOR_LAKE_RUNNER_AUTOSTART=0` 关闭；通常无需另开手工监督器。MCP 客户端身份不决定摄取后端，Pi 的 subagent 要求也不适用于 Gemini/Codex。只启动 MCP server 而不启动守护进程时，写入会在 5 分钟后进入 outbox 积压告警状态。

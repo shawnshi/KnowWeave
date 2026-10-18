@@ -33,7 +33,7 @@ description: 'Trigger a 2-step CoT sync of all raw sources into the Vector Lake 
 
   <tool_dispatch>
     - `invoke_subagent`: MUST be used to spawn the subagent for concurrent tasks.
-    - `mentat-mind-mcp`: `prepare_ingest_batch` (or the `sync_vector_lake` wrapper) queues unprocessed sources. The host Runner claims packets via `claim_ingest_tasks`; its read-only model subagent returns `files_written` plus an explicit `integration` disposition. Only the host controller invokes `finalize_ingest` after validation; the model subagent never writes Wiki pages or finalizes directly.
+    - `Reson-KnowWeave-mcp`: `prepare_ingest_batch` (or the `sync_vector_lake` wrapper) queues unprocessed sources. The host Runner claims packets via `claim_ingest_tasks`; its read-only model subagent returns `files_written` plus an explicit `integration` disposition. Only the host controller invokes `finalize_ingest` after validation; the model subagent never writes Wiki pages or finalizes directly.
   </tool_dispatch>
 
   <checkpoint_rules>
@@ -51,7 +51,7 @@ description: 'Trigger a 2-step CoT sync of all raw sources into the Vector Lake 
       4. Verify `invoke_subagent` and `sync_vector_lake` tool usage.
     </thought>
     - Status update confirming the background subagent has been dispatched.
-    - Prompt used for the orchestration subagent: "Please use the `sync_vector_lake` MCP tool from `mentat-mind-mcp` to queue pending sources; the host Runner owns model output validation and finalization."
+    - Prompt used for the orchestration subagent: "Please use the `sync_vector_lake` MCP tool from `Reson-KnowWeave-mcp` to queue pending sources; the host Runner owns model output validation and finalization."
   </output_format>
 
   <metrics>

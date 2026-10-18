@@ -45,6 +45,7 @@ class RequestState:
     mode: str = 'page'
     top_k: int = 0
     completion: str = 'complete'
+    timings: dict[str, float] = field(default_factory=dict)
 
     def problem(self, message: str):
         if message not in self.problems:
@@ -112,6 +113,25 @@ def generation(name: str, revision):
         state.generations[name] = revision
 
 
+@contextmanager
+def timed_stage(name: str):
+    """Accumulate coarse inclusive wall time; no request means no clock/ledger work.
+
+    Nested stages overlap and must not be summed with their parent. Timing failures
+    are not caught here: the original body exception and terminal status survive.
+    """
+    state = current()
+    if state is None:
+        yield
+        return
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = max(0.0, (time.perf_counter() - started) * 1000)
+        state.timings[name] = state.timings.get(name, 0.0) + elapsed
+
+
 def track_connection(conn):
     state = current()
     if state is not None and id(conn) not in state.connections:
@@ -177,7 +197,8 @@ def _finish(state: RequestState):
         if status == 'failed' and not payload.get('error'):
             payload['error'] = 'retrieval_failed'
         payload['elapsed_ms'] = total
-        payload['timings'] = {**payload.get('timings', {}), 'endpoint_total': total}
+        payload['timings'] = {**payload.get('timings', {}), **state.timings,
+                              'endpoint_total': total}
         payload['index_generation'] = repr((payload.get('index_generation'), state.generations))
         payload['configuration'] = {**payload.get('configuration', {}),
                                     'actual_vector_backends': sorted(b for b in state.backends if b in {'ram', 'exact_sql', 'two_stage'}),

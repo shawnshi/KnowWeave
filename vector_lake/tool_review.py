@@ -72,7 +72,7 @@ def _format_combined_report(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _resolve_combined_item(identifier, resolution: str = "skip", change_manifest: dict = None):
+def _resolve_combined_item(identifier, resolution: str = "skip", change_manifest: dict | None = None):
     pending = _combined_pending_items()
     target = None
     if isinstance(identifier, str) and not identifier.isdigit():
@@ -88,7 +88,7 @@ def _resolve_combined_item(identifier, resolution: str = "skip", change_manifest
     return governance_service.resolve_governance_item(target["item_id"], resolution, change_manifest=change_manifest)
 
 
-def review_vector_lake(action: str = "list", index="-1", resolution: str = "skip", change_manifest: dict = None):
+def review_vector_lake(action: str = "list", index="-1", resolution: str = "skip", change_manifest: dict | None = None):
     if action == "list":
         return _format_combined_report(_combined_pending_items())
     if action == "ground":

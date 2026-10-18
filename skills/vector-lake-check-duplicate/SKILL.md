@@ -36,8 +36,8 @@ triggers: 'Triggered when preparing to create a new entity or concept in the Vec
 
   <tool_dispatch>
     Mandatory Tools:
-    - `mentat-mind-mcp`: `check_duplicate_entity` (Executes the core similarity match)
-    - `mentat-mind-mcp`: `write_wiki_page` (If proceeding with new creation)
+    - `Reson-KnowWeave-mcp`: `check_duplicate_entity` (Executes the core similarity match)
+    - `Reson-KnowWeave-mcp`: `write_wiki_page` (If proceeding with new creation)
     - `invoke_subagent` (If delegation to other capabilities is needed)
   </tool_dispatch>
 

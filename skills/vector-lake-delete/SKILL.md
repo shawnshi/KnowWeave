@@ -36,7 +36,7 @@ triggers: 'When the user requests to cascade-delete a raw source or remove a sou
 
   <tool_dispatch>
     - `bash`: `python cli.py delete-source <raw_path> [--apply]` for safe preview and destructive deletion.
-    - `mentat-mind-mcp`: `inspect_projections` to verify projection health after deletion.
+    - `Reson-KnowWeave-mcp`: `inspect_projections` to verify projection health after deletion.
     - `invoke_subagent`: Mandatory for concurrent tasks or validation sweeps if needed.
   </tool_dispatch>
 

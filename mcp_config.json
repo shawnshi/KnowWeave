@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "mentat-mind-mcp": {
+    "Reson-KnowWeave-mcp": {
       "command": "python",
       "args": [
         "-m",

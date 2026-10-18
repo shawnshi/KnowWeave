@@ -27,12 +27,12 @@ description: 'Show governance debt metrics.'
     1. **Data Retrieval**: Call the `get_governance_debt` MCP tool to fetch current metrics.
     2. **Sandbox Isolation**: If writing detailed reports or raw output, save the intermediate payload to the `scratch/` directory to prevent global path pollution.
     3. **Evaluation**: [Fable 5 Checkpoint] Analyze the retrieved debt metrics for critical thresholds.
-    4. **Vector Lake Registry**: If historical tracking is needed, use `invoke_subagent` or `mentat-mind-mcp` tools (like `update_operational_memory`), or the `vector-lake-memory-update` skill, to register the current debt state.
+    4. **Vector Lake Registry**: If historical tracking is needed, use `invoke_subagent` or `Reson-KnowWeave-mcp` tools (like `update_operational_memory`), or the `vector-lake-memory-update` skill, to register the current debt state.
   </workflow>
 
   <tool_dispatch>
-    - `get_governance_debt` (from `mentat-mind-mcp`)
-    - `mentat-mind-mcp` (for knowledge registry)
+    - `get_governance_debt` (from `Reson-KnowWeave-mcp`)
+    - `Reson-KnowWeave-mcp` (for knowledge registry)
     - `invoke_subagent` (for concurrent tasks if necessary)
   </tool_dispatch>
 

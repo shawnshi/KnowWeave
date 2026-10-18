@@ -417,7 +417,7 @@ def _build_graph_payload(
 
 
 def visualize_vector_lake(
-    output_dir: str = None,
+    output_dir: str | None = None,
     max_edges: int = DEFAULT_MAX_PAGE_EDGES,
     min_edge_weight: float = 0.0,
     lock_timeout_seconds: float = DEFAULT_INDEX_LOCK_TIMEOUT_SECONDS,

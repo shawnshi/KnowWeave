@@ -28,12 +28,12 @@ triggers: User requests to search timeline events, chronologically ordered data,
     1. Parse the user's query to identify the target `entity_name`, `action` (the ledger event tag, e.g. `Release`, `Observation`), and any time constraints. There is no sentiment dimension to filter on.
     2. [Fable 5 Checkpoint] Request approval before dispatching heavy temporal queries if parameters are overly broad.
     3. Initialize a sandbox space in `scratch/` to temporarily hold raw event logs if aggregation is necessary.
-    4. Call the `search_timeline` tool from `mentat-mind-mcp` with the extracted parameters.
+    4. Call the `search_timeline` tool from `Reson-KnowWeave-mcp` with the extracted parameters.
     5. Analyze the returned chronologically ordered events and synthesize a cohesive timeline narrative.
   </workflow>
 
   <tool_dispatch>
-    - mentat-mind-mcp: `search_timeline` (To query chronologically ordered events)
+    - Reson-KnowWeave-mcp: `search_timeline` (To query chronologically ordered events)
     - invoke_subagent: Use for concurrent fetching if tracing multiple disconnected entities.
   </tool_dispatch>
 
