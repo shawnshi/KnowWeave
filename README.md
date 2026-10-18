@@ -184,6 +184,7 @@ flowchart LR
 - 明确的会议年份参与候选资格与有界扩召回；创建、摄入或核验时间不冒充事件时间。无法核验年份的材料会标注缺口，不承诺已经识别事件身份。
 - 分块融合 `use_chunks` 默认关闭；普通查询不自动构建侧车或调用外部 embedding。构建、索引维护与外部 embedding 分别授权。
 - `auto`/`ram` 无法取得 RAM 候选时回退精确 SQL；只有显式 `two_stage` 使用二值近似预筛。
+- 每次检索写一条审计账本（`search_ledger.jsonl`），其中 `entry_point` 区分 `search` 与 `context`（上下文组装会把页面检索嵌在更大的请求里，两者的耗时不可混为一谈），`ms` 是该阶段的耗时、`request_ms` 是整请求，`process` 记录 pid/进程 token/uptime，`cache_events` 记录本次请求造成的结构性工作（图重建、PPR 索引重建、目录解析、缓存命中）。没有这几项时，"慢"与"刚重启"、"每次都重建"无法区分。
 - 完成状态区分 `complete`、`partial`、`failed`。可选阶段到期后保留已取得的词法证据；正文不可读时明确标注元数据摘要。请求预算是协作式限制，不是对原生、文件系统或传输的物理硬取消。
 - 默认保留 Decayed 页面并降权，排除 Deprecated/Archived；`include_history` 可显式纳入历史状态。域、专题和这些开关都不是认证 ACL。
 
@@ -264,7 +265,7 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 
 |职责分类|工具|说明|
 |-|-|-|
-|**混合检索与时序**|`search_vector_lake` · `search_timeline` · `trace_vector_lake`|按已记录的模型与维度执行向量、FTS5 和 PPR 混合检索；时间线查询与事实溯源|
+|**检索与时序**|`search_vector_lake` · `search_timeline` · `trace_vector_lake`|默认 FTS5 + 图 PPR + 本地重排；显式授权外部 embedding 时向量臂才加入（需模型与维度一致）；时间线查询与事实溯源|
 |**严格原文证据（可选）**|`get_query_evidence`|Windows 试点：仅为已有 canonical Source/Raw 绑定的记录返回有界逐字片段；缺失绑定明确拒绝，不代表原文不存在，不替代既有原文阅读。见 [证据边界](docs/QUERY_EVIDENCE.md)|
 |**推演上下文与记忆**|`preview_query_context` · `query_logic_lake` · `finalize_query_synthesis` · `update_operational_memory`|上下文预览、准备推演任务、核验提案页面与运行态记忆写入|
 |**知识治理与审查**|`review_governance_list` · `resolve_governance_item` · `get_governance_debt` · `trigger_audit_graph` · `merge_suggestions_vector_lake` · `check_duplicate_entity`|治理队列审阅与裁决、知识债务度量、拓扑审计、实体查重与候选合并|
@@ -490,7 +491,9 @@ python -m pip install --only-binary=:all: -r requirements-test.txt
 python scripts/ci_core.py test --backend fallback --receipt scratch/dev-test-new/core.json -- -q
 ```
 
-该测试使用合成 bootstrap MEMORY，运行前确认回执路径属于本次任务且没有其他写者。native 构建/探针、测试依赖与 CI 细节见 [开发指南](docs/DEVELOPMENT.md)。实际 CI 平台矩阵以 [工作流](.github/workflows/test.yml) 为准，配置存在不等于远端已执行通过。
+该测试使用合成 bootstrap MEMORY，运行前确认回执路径属于本次任务且没有其他写者。
+
+性能用 `scripts/benchmark_retrieval.py`（`page` / `memory` / `query` / `timeline`）在**实际使用的库**上测；它强制关闭审计账本以免污染运维数据，并同时报出空结果占比——空结果是最快的答案，只看延迟 p50 会把"快而空"与"慢而实"混成一个数字。绝对值只在同一主机、同一库内可比。native 构建/探针、测试依赖与 CI 细节见 [开发指南](docs/DEVELOPMENT.md)。实际 CI 平台矩阵以 [工作流](.github/workflows/test.yml) 为准，配置存在不等于远端已执行通过。
 
 核心入口：
 
