@@ -19,7 +19,7 @@ No external template engine, discovery registry, recursive includes, or embedded
 | `prompts/query/` | Query synthesis and comparison hint | `tool_query` |
 | `prompts/strategy*.md` | Strategic-purpose instructions with supplied contract data | `purpose_contract` |
 | `prompts/research*.md`, `prompts/review/`, `prompts/janitor*.md` | Research and governance instructions | Matching tools/scripts |
-| `topology.html` | Existing graph HTML template; retains its own escaping and substitution | `tool_graph` |
+| `topology.html` | Single-file knowledge map: offline-first UI, pure graph helpers and embedded application; retains legacy placeholder compatibility | `tool_graph` |
 
 Optional or repeated page blocks are separate templates where necessary; code still selects blocks,
 iterates records, formats numbers, and serializes YAML/JSON. Parser selectors and API messages are not
@@ -53,6 +53,35 @@ page templates. `.pi/agents/` and `skills/` remain framework discovery entries, 
   for a missing template or invalid current packet; template-loading failures still propagate.
 - Moving an instruction does not grant permission to search, write, merge, or sync. Runtime authorization
   and validation contracts still govern every action; generating a janitor shard does not execute a merge.
+
+## KnowWeave · 知识经纬
+
+The header inlines the original `knowledge-graph.svg` from the project root, inheriting `currentColor` without an external image request. Keep the template copy synchronized when updating that asset; rendering tests compare both SVG trees. The project README uses `knowweave-app.svg`.
+
+`tool_graph._render_graph_html(payload, memory_dir)` only reads this template and renders HTML. It does not bootstrap canonical state, refresh projections, launch a browser, or read declared source documents. The public visualization tool retains its existing preparation and output contract. `%%GRAPH_DATA%%` and the quoted `%%MEMORY_BASE_PATH%%` remain compatible with a resident pre-change renderer; no new companion runtime asset or Watchdog/Runner restart is required. The fresh renderer substitutes both markers in one pass and JSON-escapes data and the file URI. A resident old module retains its old escaping implementation until its normal reload.
+
+The map explicitly presents a **static snapshot**. It starts with a domain overview, supports type/community grouping, searchable and paginated classification, intersecting filters, one/two-hop exploration, and a full matching-node list. Only drawing is capped at 100/200/400 nodes; overview aggregates at most 12 groups plus an explicitly named remainder. The left sidebar separates classification from filters and pages categories eight at a time. The right inspector has Overview/Sources/Relations/Actions sections, with five source/neighbor entries per page and a 180-character expandable/collapsible summary preview. No list grows cumulatively when paging. Coordinates are a reading layout, not historical or causal evidence. Relation strengths are the existing weight categories, not newly inferred support relations. Empty type selection means no results. Missing confidence remains unknown; the legacy constant alignment score is not presented as a measurement. Claim references resolve declared sources rather than inventing a Markdown file for every claim.
+
+The compact Overview section labels record `status` and `epistemic_status` independently. Products additionally show explicit `lifecycle_status`; absent values display `unknown`. Record `seed` is not a lifecycle and never implies `unreleased`. Claim `validity_state` retains its own label and is not replaced by either record or epistemic state. Page projection passes through explicit top-level or metadata epistemic/lifecycle fields without deriving them from prose or timestamps.
+
+Page payloads retain `declared_links` and directed `declared_relations` separately from the budgeted relevance backbone. The UI merges declarations into browsable adjacency without fabricating a relevance score or treating a declaration as verified evidence. The indexer's 15-edge pruning and the exported backbone budget remain unchanged. Older payloads can recover missing pairs from `semantic_links`, but existing backbone pairs are not relabeled as declarations because that legacy field mixed both. Relation details prefer the existing additive catalog `relations`, retaining navigation-vs-assertion labels, direction/predicate, null declaration weight and the literal `verified` value (including `false`). Optional `subject_scope`, `resolution_status`, `context`, `origin`, `provenance_status`, `temporal`, `epistemic_status` and `lifecycle_status` are shown as recorded text/JSON within the existing paged neighbor entries. No evidence pointer, time field or provenance status establishes verification; absent verification stays `unknown`. Catalog relatedness entries do not bypass the backbone drawing budget. Legacy node-level declarations remain a fallback without overwriting catalog context. Declaration details remain separate from numeric retrieval weights; self-links, unresolved/ambiguous targets and malformed records cannot mint nodes. An optional `meta.scoped_refresh` explicitly labels a targeted refresh while retaining the original global snapshot time. `read_consistency=scoped` is disclosed as a mixed-time snapshot, not an unlocked read or an all-library refresh; unrelated cached records and the claim graph can remain untouched.
+
+The canvas uses a light `#f7f9fc` surface with dark nodes, text and links, matching the reading panels. Default label candidates are limited to four aggregate labels or three local labels, with selected/hovered nodes always eligible; collision suppression still applies. Key/on-demand/more label settings affect presentation only, not filtering or data. 3D uses the same light background and hover labels; the 2D density selector is disabled there.
+
+Fonts are local-only: Segoe UI Variable/Segoe UI with Microsoft YaHei UI/PingFang SC for body text, Segoe UI Variable Display with DengXian/PingFang SC fallback for headings, and Cascadia Mono/Consolas for numbers. No font download or OS installation occurs. Canvas uses the computed font family, not an unresolved CSS variable. Responsive layouts, focus indicators, named search controls, equivalent node lists and reduced-motion handling are part of the UI contract; source assertions and color-token tests do not substitute for actual rendered accessibility acceptance.
+
+No script or font is requested externally on initial load. Optional 3D requires an explicit network confirmation and uses `3d-force-graph@1.79.0` (MIT) from unpkg, with SHA-384 `I8xUqUlkgn1YFxE2iHhBohLpcR9rKT9MSaKUFK/+opyNDd5UX5j98GymiICW9V76`. This pins the existing optional dependency, does not install an npm dependency, and is not a complete transitive vulnerability audit. Third-party code runs in the page and can access its data; the dialog discloses that boundary. CSP restricts connections and font downloads but is not claimed as full data isolation. Load/WebGL failure retains 2D. 3D receives exactly the current projected nodes/edges and supports actual pause/resume. The default 2D map has no continuous physics loop or unused temporal slider.
+
+Copy actions only copy text; they do not execute shell commands or submit queue entries. Local links reject schemes, absolute paths and traversal, encode path segments, and identify source locations as declared rather than verified. The template never injects untrusted labels or summaries as HTML.
+
+Verification:
+
+```text
+python -m pytest tests/test_tool_graph.py tests/test_graph_algo_contract.py tests/test_tool_graph_import_boundary.py tests/test_topology_render.py -q
+node --test tests/topology_ui.test.cjs
+```
+
+The Node tests execute the actual inline pure functions and application transitions with a synthetic DOM facade. They are not browser rendering, WebGL, clipboard permission or assistive-technology tests. Rendered acceptance should cover 390/768/1440/1920 widths, 200% zoom, keyboard/search, pointer cancellation, blocked clipboard, empty/malformed data, stale metadata, graph switching, source links, and optional-engine failure. Benchmark output is labeled synthetic core timing, not browser latency.
 
 ## Migration and verification
 

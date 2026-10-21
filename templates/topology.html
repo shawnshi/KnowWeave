@@ -1,2017 +1,978 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vector Lake Topology · 知识图谱与治理工作台</title>
-    <style>
-        :root {
-            --bg-base: #0B0F17;
-            --bg-surface: rgba(15, 23, 42, 0.78);
-            --bg-surface-elevated: rgba(30, 41, 59, 0.88);
-            --border-subtle: rgba(148, 163, 184, 0.12);
-            --border-prominent: rgba(148, 163, 184, 0.25);
-            --text-primary: #F8FAFC;
-            --text-secondary: #94A3B8;
-            --text-muted: #64748B;
-            --primary: #38BDF8;
-            --primary-hover: #0284C7;
-            --accent: #818CF8;
-            --success: #10B981;
-            --warning: #F59E0B;
-            --danger: #EF4444;
-            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-            --font-mono: "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body {
-            width: 100%; height: 100%;
-            overflow: hidden;
-            background-color: var(--bg-base);
-            font-family: var(--font-sans);
-            color: var(--text-primary);
-            user-select: none;
-        }
-
-        /* Top Navigation & Telemetry Bar */
-        #top-nav {
-            position: absolute; top: 0; left: 0; right: 0; height: 56px;
-            background: var(--bg-surface);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border-bottom: 1px solid var(--border-subtle);
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 0 20px; z-index: 50;
-        }
-
-        .brand-section {
-            display: flex; align-items: center; gap: 12px;
-        }
-        .brand-title {
-            font-size: 1rem; font-weight: 600; letter-spacing: 0.04em;
-            color: var(--text-primary); display: flex; align-items: center; gap: 8px;
-        }
-        .badge {
-            font-size: 0.7rem; font-weight: 500; padding: 2px 7px;
-            border-radius: 999px; background: rgba(56, 189, 248, 0.15);
-            color: var(--primary); border: 1px solid rgba(56, 189, 248, 0.25);
-            font-family: var(--font-mono);
-        }
-        .badge.pruned {
-            background: rgba(16, 185, 129, 0.15);
-            color: var(--success);
-            border-color: rgba(16, 185, 129, 0.3);
-        }
-
-        /* Global Telemetry Metrics */
-        .telemetry-group {
-            display: flex; align-items: center; gap: 16px;
-            font-family: var(--font-mono); font-size: 0.8rem;
-        }
-        .telemetry-item {
-            display: flex; align-items: center; gap: 6px; color: var(--text-secondary);
-        }
-        .telemetry-val {
-            color: var(--text-primary); font-weight: 600;
-        }
-
-        /* Search Center Bar */
-        .search-container {
-            position: relative; width: 340px;
-        }
-        .search-input {
-            width: 100%; height: 34px; padding: 0 12px 0 34px;
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--border-subtle);
-            border-radius: 6px; color: var(--text-primary); font-size: 0.85rem;
-            outline: none; transition: border-color 0.2s, box-shadow 0.2s;
-        }
-        .search-input:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
-        }
-        .search-icon {
-            position: absolute; left: 10px; top: 9px; width: 16px; height: 16px;
-            fill: none; stroke: var(--text-muted); stroke-width: 2;
-        }
-        .search-shortcut {
-            position: absolute; right: 10px; top: 8px; font-size: 0.7rem;
-            color: var(--text-muted); background: rgba(255,255,255,0.06);
-            padding: 1px 5px; border-radius: 4px; font-family: var(--font-mono);
-        }
-
-        #search-results {
-            position: absolute; top: 40px; left: 0; right: 0; max-height: 380px;
-            overflow-y: auto; background: var(--bg-surface-elevated);
-            backdrop-filter: blur(20px); border: 1px solid var(--border-prominent);
-            border-radius: 8px; display: none; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-            z-index: 100;
-        }
-        .search-result-item {
-            padding: 9px 14px; font-size: 0.82rem; cursor: pointer;
-            border-bottom: 1px solid var(--border-subtle); display: flex;
-            align-items: center; justify-content: space-between; gap: 8px;
-        }
-        .search-result-item:hover {
-            background: rgba(56, 189, 248, 0.12);
-        }
-        .search-result-title {
-            color: var(--text-primary); font-weight: 500; overflow: hidden;
-            text-overflow: ellipsis; white-space: nowrap;
-        }
-        .search-result-meta {
-            font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);
-            white-space: nowrap;
-        }
-
-        /* Action Controls */
-        .controls-group {
-            display: flex; align-items: center; gap: 8px;
-        }
-        .btn-ui {
-            background: rgba(30, 41, 59, 0.7);
-            border: 1px solid var(--border-subtle);
-            color: var(--text-secondary);
-            font-size: 0.8rem; font-weight: 500;
-            padding: 6px 12px; border-radius: 6px;
-            cursor: pointer; display: flex; align-items: center; gap: 6px;
-            transition: all 0.15s ease;
-        }
-        .btn-ui:hover {
-            background: rgba(51, 65, 85, 0.8); color: var(--text-primary);
-            border-color: var(--border-prominent);
-        }
-        .btn-ui.active {
-            background: rgba(56, 189, 248, 0.2); color: var(--primary);
-            border-color: rgba(56, 189, 248, 0.4);
-        }
-
-        /* Canvas & Viewport Area */
-        #graph-container {
-            position: absolute; top: 56px; bottom: 44px; left: 0; right: 0;
-            overflow: hidden;
-        }
-        #canvas-2d {
-            position: absolute; inset: 0; width: 100%; height: 100%; display: block;
-        }
-        #3d-graph {
-            position: absolute; inset: 0; width: 100%; height: 100%; display: none;
-        }
-
-        /* Floating Knowledge Inspector (Left Drawer) */
-        #left-inspector {
-            position: absolute; top: 72px; left: 20px; width: 420px; max-height: calc(100vh - 130px);
-            background: var(--bg-surface);
-            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--border-prominent);
-            border-radius: 12px; padding: 18px 20px 20px 20px;
-            display: none; flex-direction: column; gap: 14px;
-            box-shadow: 0 16px 36px -6px rgba(0, 0, 0, 0.6);
-            z-index: 40; overflow-y: auto;
-        }
-        #left-inspector::-webkit-scrollbar,
-        #right-drawer::-webkit-scrollbar {
-            width: 5px;
-        }
-        #left-inspector::-webkit-scrollbar-track,
-        #right-drawer::-webkit-scrollbar-track {
-            background: transparent;
-        }
-        #left-inspector::-webkit-scrollbar-thumb,
-        #right-drawer::-webkit-scrollbar-thumb {
-            background: rgba(148, 163, 184, 0.22);
-            border-radius: 999px;
-        }
-        #left-inspector::-webkit-scrollbar-thumb:hover,
-        #right-drawer::-webkit-scrollbar-thumb:hover {
-            background: rgba(148, 163, 184, 0.45);
-        }
-        #left-inspector.visible { display: flex; }
-        .inspector-header {
-            display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
-            border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px;
-        }
-        .inspector-title {
-            font-size: 1.15rem; font-weight: 600; line-height: 1.35; color: var(--text-primary);
-            word-break: break-word;
-        }
-        .inspector-title-link {
-            color: var(--text-primary);
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            transition: color 0.15s ease;
-        }
-        .inspector-title-link:hover {
-            color: var(--primary);
-            text-decoration: underline;
-        }
-        .inspector-title-link:hover .external-icon {
-            opacity: 1;
-            stroke: var(--primary);
-        }
-        .external-icon {
-            opacity: 0.55;
-            transition: opacity 0.15s ease;
-            flex-shrink: 0;
-        }
-        .search-result-item.selected {
-            background: rgba(56, 189, 248, 0.25);
-        }
-        .inspector-close {
-            cursor: pointer; color: var(--text-muted); font-size: 1.25rem; line-height: 1;
-            padding: 4px; border-radius: 4px; transition: color 0.15s;
-        }
-        .inspector-close:hover { color: var(--text-primary); }
-
-        .tag-row {
-            display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
-        }
-        .inspector-tag {
-            font-size: 0.72rem; padding: 2px 8px; border-radius: 999px;
-            background: rgba(255, 255, 255, 0.06); border: 1px solid var(--border-subtle);
-            color: var(--text-secondary); font-family: var(--font-mono);
-        }
-
-        .inspector-metric-strip {
-            display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
-            background: rgba(0, 0, 0, 0.28); padding: 10px 12px; border-radius: 8px;
-            border: 1px solid var(--border-subtle);
-        }
-        .metric-cell {
-            display: flex; flex-direction: column; gap: 2px;
-            transition: all 0.15s ease;
-        }
-        .metric-cell.interactive {
-            cursor: pointer; padding: 2px 4px; border-radius: 4px;
-        }
-        .metric-cell.interactive:hover {
-            background: rgba(56, 189, 248, 0.12);
-        }
-        .metric-cell.interactive:hover .metric-cell-val {
-            color: var(--primary);
-        }
-        .metric-cell-label {
-            font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase;
-        }
-        .metric-cell-val {
-            font-family: var(--font-mono); font-size: 0.88rem; font-weight: 600; color: var(--text-primary);
-        }
-
-        .inspector-section-title {
-            font-size: 0.78rem; font-weight: 600; text-transform: uppercase;
-            letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: 6px;
-        }
-        .inspector-summary-text {
-            font-size: 0.86rem; line-height: 1.65; color: #CBD5E1;
-            user-select: text; word-break: break-word; white-space: normal;
-        }
-        .summary-heading {
-            font-size: 0.92rem; font-weight: 600; color: #F8FAFC;
-            margin: 12px 0 6px 0; padding-bottom: 4px; border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-            display: block; line-height: 1.4;
-        }
-        .summary-heading-bullet {
-            display: inline-block; width: 3px; height: 12px; background: var(--primary);
-            border-radius: 2px; margin-right: 6px; vertical-align: middle;
-        }
-        .summary-wikilink {
-            display: inline-flex; align-items: center; gap: 3px;
-            padding: 1px 7px; margin: 1px 2px; border-radius: 4px;
-            background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3);
-            color: #38BDF8; font-size: 0.78rem; font-family: var(--font-sans);
-            cursor: pointer; transition: all 0.15s ease;
-            vertical-align: baseline; max-width: 100%; word-break: break-all;
-        }
-        .summary-wikilink:hover {
-            background: rgba(56, 189, 248, 0.28); border-color: #38BDF8;
-            color: #FFFFFF; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(56, 189, 248, 0.25);
-        }
-        .summary-predicate {
-            display: inline-block; padding: 1px 5px; margin-right: 3px;
-            font-size: 0.7rem; color: #C4B5FD; background: rgba(167, 139, 250, 0.12);
-            border: 1px solid rgba(167, 139, 250, 0.25); border-radius: 3px;
-            font-family: var(--font-mono); font-weight: 500;
-        }
-        .summary-list-item {
-            position: relative; padding-left: 14px; margin: 4px 0; font-size: 0.84rem; line-height: 1.55;
-        }
-        .summary-list-item::before {
-            content: "•"; position: absolute; left: 2px; color: var(--primary); font-weight: bold;
-        }
-
-        .summary-source-badge {
-            display: inline-flex; align-items: center; gap: 4px;
-            padding: 2px 8px; margin: 3px 2px; border-radius: 4px;
-            background: rgba(148, 163, 184, 0.1); border: 1px solid rgba(148, 163, 184, 0.25);
-            color: #94A3B8; font-size: 0.76rem; cursor: pointer; transition: all 0.15s ease;
-            vertical-align: baseline; max-width: 100%; word-break: break-all;
-        }
-        .summary-source-badge:hover {
-            background: rgba(167, 139, 250, 0.2); border-color: #A78BFA; color: #EDE9FE;
-            transform: translateY(-1px);
-        }
-
-        .link-chip-list {
-            display: flex; flex-wrap: wrap; gap: 6px;
-        }
-        .link-chip {
-            font-size: 0.74rem; padding: 4px 9px; border-radius: 6px;
-            background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.22);
-            color: #7DD3FC; cursor: pointer; transition: all 0.15s;
-            display: inline-flex; align-items: center; max-width: 100%;
-        }
-        .link-chip:hover {
-            background: rgba(56, 189, 248, 0.28); border-color: rgba(56, 189, 248, 0.55);
-            color: #FFFFFF; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-        }
-        .source-evidence-chip {
-            display: inline-flex; align-items: center; gap: 5px;
-            font-size: 0.74rem; padding: 5px 10px; border-radius: 6px;
-            background: rgba(148, 163, 184, 0.08); border: 1px solid rgba(148, 163, 184, 0.2);
-            color: #CBD5E1; cursor: pointer; transition: all 0.15s; max-width: 100%;
-        }
-        .source-evidence-chip:hover {
-            background: rgba(56, 189, 248, 0.16); border-color: rgba(56, 189, 248, 0.45);
-            color: #F8FAFC; transform: translateY(-1px);
-        }
-
-        /* Action Governance Suite - Sticky Bottom Bar */
-        .governance-actions {
-            position: sticky; bottom: -20px; margin: 8px -20px -20px -20px;
-            padding: 14px 20px;
-            background: rgba(15, 23, 42, 0.95);
-            backdrop-filter: blur(16px);
-            border-top: 1px solid var(--border-prominent);
-            display: flex; flex-direction: column; gap: 8px;
-            z-index: 10; box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
-        }
-        .action-row {
-            display: flex; gap: 8px;
-        }
-        .btn-action {
-            flex: 1; padding: 7px 10px; border-radius: 6px; font-size: 0.78rem; font-weight: 500;
-            background: rgba(255, 255, 255, 0.06); border: 1px solid var(--border-subtle);
-            color: var(--text-primary); cursor: pointer; display: flex; align-items: center;
-            justify-content: center; gap: 6px; transition: all 0.15s ease;
-        }
-        .btn-action:hover {
-            background: rgba(255, 255, 255, 0.12); border-color: var(--border-prominent);
-        }
-        .btn-action.primary {
-            background: rgba(56, 189, 248, 0.2); border-color: rgba(56, 189, 248, 0.4);
-            color: var(--primary);
-        }
-        .btn-action.primary:hover {
-            background: rgba(56, 189, 248, 0.3);
-        }
-
-        /* Right Faceted Filter Drawer */
-        #right-drawer {
-            position: absolute; top: 72px; right: 20px; width: 280px; max-height: calc(100vh - 140px);
-            background: var(--bg-surface);
-            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--border-prominent);
-            border-radius: 12px; padding: 16px;
-            display: flex; flex-direction: column; gap: 14px;
-            box-shadow: 0 16px 36px -6px rgba(0, 0, 0, 0.6);
-            z-index: 40; overflow-y: auto;
-            transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease;
-        }
-        #right-drawer.collapsed {
-            transform: translateX(calc(100% + 30px));
-            opacity: 0;
-            pointer-events: none;
-        }
-        .btn-floating-filter {
-            position: absolute; top: 72px; right: 20px; height: 36px; padding: 0 14px;
-            background: var(--bg-surface); backdrop-filter: blur(16px);
-            border: 1px solid var(--border-prominent); border-radius: 8px;
-            color: var(--text-secondary); font-size: 0.8rem; font-weight: 500;
-            display: none; align-items: center; gap: 8px; cursor: pointer;
-            z-index: 39; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-            transition: all 0.15s ease;
-        }
-        .btn-floating-filter:hover {
-            color: var(--primary); border-color: var(--primary); background: rgba(15, 23, 42, 0.9);
-        }
-        .drawer-icon-btn {
-            background: transparent; border: none; color: var(--text-muted);
-            cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center;
-            transition: color 0.15s, background 0.15s;
-        }
-        .drawer-icon-btn:hover {
-            color: var(--text-primary); background: rgba(255, 255, 255, 0.08);
-        }
-        .filter-block {
-            display: flex; flex-direction: column; gap: 8px;
-        }
-        .filter-block-title {
-            font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
-            letter-spacing: 0.06em; color: var(--text-secondary);
-            display: flex; justify-content: space-between; align-items: center;
-        }
-        .filter-list {
-            display: flex; flex-direction: column; gap: 5px;
-        }
-        .filter-item {
-            display: flex; align-items: center; justify-content: space-between;
-            font-size: 0.8rem; color: var(--text-secondary); cursor: pointer;
-            padding: 3px 6px; border-radius: 4px; transition: background 0.15s;
-        }
-        .filter-item:hover {
-            background: rgba(255, 255, 255, 0.04); color: var(--text-primary);
-        }
-        .filter-label-group {
-            display: flex; align-items: center; gap: 8px;
-        }
-        .color-dot {
-            width: 10px; height: 10px; border-radius: 999px; flex-shrink: 0;
-        }
-        .filter-count {
-            font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);
-        }
-
-        /* Bottom Temporal Scrubber */
-        #bottom-timeline {
-            position: absolute; bottom: 0; left: 0; right: 0; height: 44px;
-            background: var(--bg-surface);
-            backdrop-filter: blur(16px);
-            border-top: 1px solid var(--border-subtle);
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 0 20px; z-index: 50; font-size: 0.8rem;
-        }
-        .timeline-slider-group {
-            flex: 1; max-width: 600px; display: flex; align-items: center; gap: 12px; margin: 0 20px;
-        }
-        .timeline-slider {
-            flex: 1; accent-color: var(--primary); cursor: pointer;
-        }
-        .timeline-label {
-            font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary);
-            white-space: nowrap;
-        }
-
-        /* Toast notifications */
-        #toast {
-            position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
-            background: rgba(15, 23, 42, 0.95); border: 1px solid var(--primary);
-            padding: 8px 18px; border-radius: 8px; font-size: 0.85rem; color: var(--text-primary);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6); display: none; z-index: 1000;
-            pointer-events: none; backdrop-filter: blur(12px);
-        }
-
-        /* Modal source viewer fallback */
-        #modal-overlay {
-            position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75);
-            backdrop-filter: blur(8px); display: none; align-items: center; justify-content: center;
-            z-index: 200;
-        }
-        .modal-box {
-            width: 600px; max-width: 90vw; background: var(--bg-surface-elevated);
-            border: 1px solid var(--border-prominent); border-radius: 12px; padding: 24px;
-            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8); display: flex; flex-direction: column; gap: 16px;
-        }
-        .modal-title { font-size: 1.1rem; font-weight: 600; color: var(--text-primary); }
-        .modal-body { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary); user-select: text; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; word-break: break-all; }
-    </style>
-    <!-- Fallback check for 3D engine -->
-    <script src="https://unpkg.com/3d-force-graph" onerror="window.__FORCE_GRAPH_OFFLINE__ = true;"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://unpkg.com; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+<title>KnowWeave · 知识经纬</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f1f4f8; --panel: #ffffff; --panel-raised: #f6f8fb;
+  --ink: #192b3f; --secondary: #465a70; --muted: #5b6b7e;
+  --line: #dce4ee; --control-line: #7a8b9e; --accent: #235d88; --accent-bg: #eaf2f9;
+  --warning: #75510a; --warning-bg: #fff7e7; --focus: #235d88;
+  --shadow-soft: 0 1px 3px #192b3f0d;
+  --shadow-popover: 0 12px 36px #192b3f1f;
+  --shadow-dialog: 0 24px 80px #10172040;
+  --graph-bg: #f7f9fc;
+  --font-body: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-heading: "Segoe UI Variable Display", "Segoe UI", "DengXian", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-number: "Cascadia Mono", "Consolas", "SFMono-Regular", monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.65 var(--font-body); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; }
+button, select, input { color: inherit; }
+button, select { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+button { min-height: 36px; padding: 6px 12px; cursor: pointer; text-align: left; transition: background-color .12s, border-color .12s; }
+button:hover { background: var(--panel-raised); border-color: var(--control-line); }
+button:disabled { cursor: not-allowed; color: var(--muted); }
+button[aria-pressed="true"], button[aria-selected="true"] { background: var(--accent-bg); border-color: #b1c9df; color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+a { color: var(--accent); text-underline-offset: 4px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+input, select { min-height: 38px; padding: 7px 10px; border: 1px solid var(--control-line); border-radius: 7px; background: var(--panel); }
+input[type="checkbox"] { min-height: 16px; width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+input::placeholder { color: var(--muted); opacity: 1; }
+h1, h2, h3, p { margin: 0; }
+h1 { font: 650 21px/1.25 var(--font-heading); letter-spacing: -.035em; }
+h2 { font: 650 20px/1.5 var(--font-heading); letter-spacing: -.015em; }
+h3 { font: 600 14px/1.6 var(--font-body); }
+small, .small { font-size: 12px; line-height: 1.65; color: var(--muted); }
+.muted { color: var(--muted); }
+.number { font-family: var(--font-number); font-variant-numeric: tabular-nums; }
+.stack { display: grid; gap: 16px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.skip-link { position: fixed; top: 8px; left: 12px; z-index: 100; padding: 8px 12px; background: var(--panel); transform: translateY(-150%); }
+.skip-link:focus { transform: none; }
+.app { height: 100dvh; min-height: 600px; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.topbar { padding: 18px 26px; display: grid; grid-template-columns: minmax(190px, 1fr) minmax(260px, 480px) auto; gap: 28px; align-items: center; border-bottom: 1px solid var(--line); background: var(--panel); }
+.brand-lockup { display: flex; align-items: center; gap: 12px; }
+.brand-mark { display: grid; place-items: center; width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px; background: #192f47; color: #e7f0fa; }
+.brand-caption { font-size: 12px; color: var(--muted); margin-top: 4px; letter-spacing: .02em; }
+.view-picker { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); background: var(--panel-raised); border-radius: 9px; }
+.view-picker button { min-height: 32px; border-color: transparent; background: transparent; white-space: nowrap; font-size: 13px; }
+.view-picker button[aria-pressed="true"] { color: var(--ink); border-color: var(--line); background: var(--panel); box-shadow: var(--shadow-soft); }
+.search { position: relative; }
+.search input { width: 100%; min-height: 42px; padding: 9px 42px 9px 14px; border-color: var(--line); background: var(--panel-raised); border-radius: 10px; }
+.search input:focus { border-color: var(--accent); background: var(--panel); }
+.search-key { position: absolute; right: 12px; top: 10px; font: 12px var(--font-number); color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 2px 5px; pointer-events: none; }
+.search-results { position: absolute; inset: 49px 0 auto; z-index: 50; max-height: 350px; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-popover); }
+.search-option { padding: 11px 14px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.search-option:last-child { border-bottom: 0; }
+.search-option[aria-selected="true"] { background: var(--accent-bg); }
+.search-option strong { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.snapshot { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 18px; padding: 9px 26px; border-bottom: 1px solid var(--line); background: #f8fafd; font-size: 12px; color: var(--secondary); }
+.warning { color: var(--warning); background: var(--warning-bg); border: 1px solid #dfc58e; border-radius: 5px; padding: 2px 8px; }
+.workspace { display: grid; grid-template-columns: 232px minmax(280px, 1fr) 360px; min-height: 0; }
+.navigation, .inspector { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 22px 20px; background: var(--panel); }
+#detail-content { display: flex; flex-direction: column; gap: 12px; height: 100%; min-height: 0; }
+#detail-content > :not(.detail-pane) { flex-shrink: 0; }
+.side-tabs { display: flex; gap: 4px; padding: 3px; margin-bottom: 14px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 8px; flex-shrink: 0; }
+.side-tabs button { flex: 1; min-width: 0; min-height: 31px; padding: 4px 7px; text-align: center; font-size: 12px; border-color: transparent; background: transparent; }
+.side-tabs button[aria-pressed="true"] { background: var(--panel); border-color: var(--line); color: var(--ink); box-shadow: var(--shadow-soft); }
+.side-pane, .detail-pane { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #b4c2d2 transparent; padding-right: 3px; }
+.detail-pane { display: flex; flex-direction: column; gap: 12px; }
+.detail-pane > * { flex-shrink: 0; }
+.detail-tabs { margin: 0; }
+.detail-pane > .section { padding: 0; margin: 0; border: 0; }
+.detail-pane > button { width: 100%; }
+.summary-controls { position: sticky; top: 0; background: var(--panel); padding: 4px 0; z-index: 1; }
+.panel-guide { flex-shrink: 0; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 12px; color: var(--muted); }
+.panel-guide summary { cursor: pointer; }
+.panel-guide p { margin-top: 8px; }
+.pagination { justify-content: space-between; margin: 10px 0 2px; gap: 5px; }
+.pagination button { min-height: 30px; padding: 4px 9px; font-size: 12px; }
+.paged-search { width: 100%; min-height: 34px; margin-top: 4px; font-size: 12px; }
+.navigation { border-right: 1px solid var(--line); }
+.inspector { border-left: 1px solid var(--line); padding: 26px 24px; }
+.section { padding-bottom: 22px; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
+.section:last-child { margin-bottom: 0; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.navigation .section-heading h2 { font-size: 16px; }
+.field { display: grid; gap: 6px; font-size: 12px; font-weight: 500; color: var(--secondary); }
+.field + .field { margin-top: 14px; }
+.field select, .field input { width: 100%; font-size: 13px; color: var(--ink); }
+.check { display: flex; gap: 9px; align-items: center; min-height: 34px; font-size: 13px; }
+.filter-types { display: grid; gap: 2px; margin-top: 8px; }
+.filter-types .number { margin-left: auto; color: var(--muted); font-size: 12px; }
+.text-button { border: 0; background: transparent; padding: 3px 0; min-height: 30px; color: var(--accent); font-size: 12px; }
+.text-button:hover { background: transparent; text-decoration: underline; }
+.group-list { display: grid; gap: 3px; margin: 12px -7px; }
+.group-button { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 9px 10px; border-color: transparent; font-size: 13px; }
+.group-button:hover { border-color: transparent; background: var(--panel-raised); }
+.group-button[aria-pressed="true"] { border-color: transparent; background: var(--accent-bg); }
+.group-button[aria-pressed="true"]::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--accent); }
+.group-button span:first-child { overflow-wrap: anywhere; }
+.group-button .number { font-size: 12px; color: var(--muted); }
+.center { min-height: 0; min-width: 0; display: grid; grid-template-rows: auto auto minmax(240px, 1fr); background: var(--bg); }
+.context { padding: 22px 24px 10px; }
+.breadcrumb { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 7px; }
+.breadcrumb button { min-height: 24px; padding: 0 3px; border: 0; color: var(--accent); background: transparent; }
+.context h2 { overflow-wrap: anywhere; font-size: 23px; }
+.toolbar { padding: 5px 20px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar button, .toolbar select { min-height: 32px; padding: 4px 9px; font-size: 12px; }
+#tab-map, #tab-list { border-color: transparent; background: transparent; }
+#tab-map[aria-pressed="true"], #tab-list[aria-pressed="true"] { background: var(--panel); border-color: var(--line); color: var(--ink); box-shadow: var(--shadow-soft); }
+#fit-view { margin-left: 4px; background: transparent; border-color: transparent; color: var(--secondary); }
+.toolbar details { position: relative; }
+.toolbar summary { cursor: pointer; color: var(--secondary); }
+.advanced { position: absolute; right: 0; top: 30px; z-index: 30; width: 260px; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-popover); }
+.visualization { position: relative; min-height: 0; overflow: hidden; margin: 0 16px; border: 1px solid #cbd5e2; border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-soft); }
+#graph-canvas, #graph-3d { width: 100%; height: 100%; display: block; background: var(--graph-bg); }
+#graph-canvas { font-family: var(--font-body); touch-action: none; }
+.map-overlays { position: absolute; bottom: 10px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 6px 12px; pointer-events: none; }
+.map-hint { max-width: 100%; margin: 0; padding: 5px 8px; font-size: 12px; color: var(--muted); background: #fffffff0; border: 1px solid var(--line); border-radius: 6px; }
+.empty-state { padding: 32px 24px; display: grid; gap: 12px; align-content: center; height: 100%; text-align: center; background: var(--panel); }
+.empty-state p { max-width: 36em; margin: auto; color: var(--secondary); }
+.empty-state button { justify-self: center; }
+.results { height: 100%; overflow-y: auto; padding: 16px 22px; background: var(--panel); }
+.result-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.result-row button { border: 0; padding: 3px 0; min-height: 30px; color: var(--ink); background: none; overflow-wrap: anywhere; }
+.result-row button:hover { color: var(--accent); text-decoration: underline; }
+.legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px 10px; margin-left: auto; max-width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fffffff0; font-size: 12px; color: var(--secondary); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.shape { display: inline-block; width: 9px; height: 9px; border: 2px solid var(--accent); border-radius: 50%; }
+.shape.source { border-radius: 1px; }
+.shape.claim { border-radius: 0; transform: rotate(45deg); }
+.detail-heading { position: relative; display: flex; gap: 12px; align-items: start; justify-content: space-between; margin-bottom: 2px; padding-top: 24px; }
+.detail-heading::before { content: "节点档案"; position: absolute; top: 0; left: 0; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .08em; }
+.detail-heading h2 { min-width: 0; overflow-wrap: anywhere; font-size: 22px; font-weight: 650; line-height: 1.55; letter-spacing: -.015em; }
+.wiki-title-link { color: var(--ink); text-decoration: underline; text-decoration-color: #c1d1e1; text-decoration-thickness: 1px; text-underline-offset: 5px; }
+.wiki-title-link:hover { color: var(--accent); text-decoration-color: var(--accent); }
+.title-link-icon { display: inline; margin-left: 7px; color: var(--accent); font: 400 18px var(--font-body); white-space: nowrap; }
+.detail-heading button { flex-shrink: 0; min-height: 28px; padding: 2px 7px; color: var(--muted); background: transparent; border-color: transparent; font-size: 12px; }
+.detail-heading button:hover { color: var(--ink); background: var(--panel-raised); }
+.detail-open-hint { margin-top: -10px; font-size: 12px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.chip { border: 1px solid var(--line); background: var(--panel-raised); border-radius: 5px; padding: 2px 7px; color: var(--secondary); font-size: 12px; overflow-wrap: anywhere; }
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 2px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-raised); }
+.metric { padding: 13px 14px; }
+.metric + .metric { border-left: 1px solid var(--line); }
+.metric strong { display: block; font: 500 22px/1.45 var(--font-number); color: var(--ink); }
+.metric span { font-size: 12px; color: var(--muted); }
+.inspector .section h3 { margin-bottom: 10px; }
+.summary-text { margin-top: 8px; font-size: 15px; line-height: 1.8; color: #33485e; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.evidence-list, .neighbor-list { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 12px; }
+.evidence-list li { display: grid; gap: 5px; border-left: 2px solid #c6d7e7; padding-left: 12px; }
+.evidence-list a { overflow-wrap: anywhere; font-size: 13px; line-height: 1.8; }
+.neighbor-list button { width: 100%; padding: 9px 11px; font-size: 13px; overflow-wrap: anywhere; border-color: var(--line); background: var(--panel-raised); }
+.neighbor-list small { display: block; margin-top: 3px; font-size: 12px; }
+.feedback { border-top: 1px solid var(--line); background: var(--panel); padding: 8px 26px; min-height: 34px; color: var(--muted); font-size: 12px; }
+.mobile-navigation { display: none; }
+dialog { color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: min(520px, 90vw); padding: 28px; box-shadow: var(--shadow-dialog); }
+dialog::backdrop { background: #15223666; }
+dialog p { margin: 14px 0; color: var(--secondary); }
+dialog textarea { width: 100%; margin-bottom: 16px; padding: 12px; background: var(--panel-raised); color: var(--ink); border: 1px solid var(--control-line); border-radius: 8px; font-family: var(--font-number); font-size: 13px; resize: vertical; }
+@media (max-width: 1250px) {
+  .workspace { grid-template-columns: 216px minmax(260px, 1fr) 320px; }
+  .navigation { padding: 20px 16px; }
+  .inspector { padding: 24px 20px; }
+  .topbar { gap: 18px; grid-template-columns: auto minmax(220px, 1fr) auto; }
+}
+@media (max-width: 950px) {
+  .app { height: auto; min-height: 100dvh; }
+  .topbar { grid-template-columns: 1fr auto; padding: 16px 20px; }
+  .search { grid-row: 2; grid-column: 1 / -1; }
+  .workspace { grid-template-columns: 216px minmax(0, 1fr); }
+  .inspector { grid-column: 1 / -1; height: 560px; border-top: 1px solid var(--line); border-left: 0; padding: 28px; }
+  .center { min-height: 610px; }
+  .navigation { max-height: 610px; }
+  .snapshot { padding: 9px 20px; }
+}
+@media (max-width: 600px) {
+  .topbar { gap: 14px; padding: 15px 16px; }
+  h1 { font-size: 20px; }
+  .brand-caption { display: none; }
+  .brand-mark { width: 30px; height: 30px; border-radius: 8px; }
+  .brand-lockup { gap: 9px; }
+  .workspace { display: flex; flex-direction: column; }
+  .mobile-navigation { display: inline-flex; }
+  .navigation { display: none; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }
+  .navigation.is-open { display: flex; height: min(640px, 80dvh); }
+  .center { min-height: 560px; height: 76dvh; }
+  .context { padding: 19px 16px 10px; }
+  .context h2 { font-size: 21px; }
+  .toolbar { padding: 5px 12px 10px; }
+  .toolbar .row { gap: 5px; }
+  .visualization { margin: 0 10px; border-radius: 10px; }
+  .inspector { padding: 26px 22px; }
+  button { min-height: 40px; }
+  .feedback { padding: 9px 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}
+</style>
 </head>
 <body>
-    <!-- Top Navigation -->
-    <header id="top-nav">
-        <div class="brand-section">
-            <span class="brand-title">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="12" r="2"/><circle cx="20" cy="12" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="12" cy="20" r="2"/><line x1="12" y1="7" x2="12" y2="9"/><line x1="12" y1="15" x2="12" y2="17"/><line x1="6" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="18" y2="12"/></svg>
-                VECTOR LAKE
-            </span>
-            <span class="badge" id="engine-badge">2D CANVAS</span>
-            <span class="badge pruned" id="prune-badge">BACKBONE PRUNED</span>
-            <span class="badge" id="stale-badge" style="display:none; border-color:#F59E0B; color:#F59E0B;"></span>
-        </div>
-
-        <div class="telemetry-group">
-            <div class="telemetry-item">节点: <span class="telemetry-val" id="stat-nodes">-</span></div>
-            <div class="telemetry-item">主干边: <span class="telemetry-val" id="stat-edges">-</span></div>
-            <div class="telemetry-item">原始边: <span class="telemetry-val" id="stat-raw-edges">-</span></div>
-            <div class="telemetry-item">社区: <span class="telemetry-val" id="stat-communities">-</span></div>
-        </div>
-
-        <div class="search-container">
-            <svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="search-input" class="search-input" placeholder="搜索节点、断言或摘要..." autocomplete="off">
-            <span class="search-shortcut">/</span>
-            <div id="search-results"></div>
-        </div>
-
-        <div class="controls-group">
-            <button id="btn-dimension" class="btn-ui" title="切换 2D Canvas 与 3D WebGL">
-                <span>维度: <b>2D</b></span>
-            </button>
-            <button id="btn-view-mode" class="btn-ui active" title="切换实体页面图或原子断言图">
-                <span>视图: <b>PAGE</b></span>
-            </button>
-            <button id="btn-focus-mode" class="btn-ui" title="聚焦选中节点及关联邻居网络">Ego 聚焦</button>
-            <button id="btn-pause-physics" class="btn-ui" title="暂停力学物理仿真">暂停物理</button>
-            <button id="btn-reset-camera" class="btn-ui" title="居中还原">还原</button>
-        </div>
-    </header>
-
-    <!-- Graph Viewport -->
-    <main id="graph-container">
-        <canvas id="canvas-2d"></canvas>
-        <div id="3d-graph"></div>
-    </main>
-
-    <!-- Left Knowledge Inspector -->
-    <aside id="left-inspector">
-        <div class="inspector-header">
-            <div>
-                <h2 class="inspector-title">
-                    <a id="inspect-title-link" href="#" target="_blank" rel="noopener noreferrer" class="inspector-title-link" title="在新的标签页直接打开该 Markdown 文件">
-                        <span id="inspect-title">节点详情</span>
-                        <svg class="external-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-                    </a>
-                </h2>
-                <div class="tag-row" id="inspect-tags"></div>
-            </div>
-            <span class="inspector-close" onclick="closeInspector()">×</span>
-        </div>
-
-        <div class="inspector-metric-strip">
-            <div class="metric-cell" title="全局度数: 在全量网络中的总连接数（含弱共现与隐式引用）">
-                <span class="metric-cell-label">全局度数</span>
-                <span class="metric-cell-val" id="inspect-deg">-</span>
-            </div>
-            <div class="metric-cell interactive" id="metric-backbone-cell" title="主干连接: 在已剪枝的主干图谱中保留的高显著性拓扑核心（点击一键聚焦这组邻居）" onclick="actionFocusNeighbors()">
-                <span class="metric-cell-label">主干连接 🔍</span>
-                <span class="metric-cell-val" id="inspect-backbone-deg">-</span>
-            </div>
-            <div class="metric-cell" title="对齐度评分: 实体定义与全局知识图谱治理规则的一致性得分">
-                <span class="metric-cell-label">对齐度评分</span>
-                <span class="metric-cell-val" id="inspect-score">-</span>
-            </div>
-        </div>
-
-        <div>
-            <div class="inspector-section-title">知识摘要</div>
-            <div id="inspect-summary" class="inspector-summary-text">-</div>
-        </div>
-
-        <div>
-            <div class="inspector-section-title">拓扑主干关联 (<span id="inspect-links-count">0</span>)</div>
-            <div class="link-chip-list" id="inspect-links"></div>
-        </div>
-
-        <div>
-            <div class="inspector-section-title">数据来源 / 证据 (<span id="inspect-sources-count">0</span>)</div>
-            <div class="link-chip-list" id="inspect-sources"></div>
-        </div>
-
-        <!-- Actionable Governance Suite -->
-        <div class="governance-actions">
-            <div class="inspector-section-title">治理与研究操作</div>
-            <div class="action-row">
-                <button class="btn-action primary" id="act-copy-query" onclick="actionCopyQuery()">复制 Query 指令</button>
-                <button class="btn-action" id="act-copy-trace" onclick="actionCopyTrace()">溯源 Trace</button>
-            </div>
-            <div class="action-row">
-                <button class="btn-action" id="act-push-queue" onclick="actionPushGovernanceQueue()">推入待办队列</button>
-                <button class="btn-action primary" id="act-open-source" onclick="actionOpenSourcePath()" title="在新的标签页直接打开 Markdown 文件">打开 Markdown 源码 ↗</button>
-            </div>
-        </div>
-    </aside>
-
-    <!-- Right Faceted Filter Drawer -->
-    <aside id="right-drawer">
-        <div class="drawer-header-row" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
-            <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
-                图谱控制台
-            </span>
-            <button id="btn-collapse-filters" class="drawer-icon-btn" title="收起控制台" onclick="toggleRightDrawer(false)">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </button>
-        </div>
-
-        <div class="filter-block">
-            <div class="filter-block-title">
-                <span>着色模式</span>
-            </div>
-            <div style="display: flex; gap: 6px;">
-                <button id="btn-color-type" class="btn-ui active" style="flex: 1; justify-content: center;">本体分类</button>
-                <button id="btn-color-comm" class="btn-ui" style="flex: 1; justify-content: center;">社区聚类</button>
-            </div>
-        </div>
-
-        <div class="filter-block">
-            <div class="filter-block-title">
-                <span id="filter-block-heading">本体类型过滤</span>
-                <span style="cursor: pointer; color: var(--primary);" onclick="toggleAllFilters()">全选/反选</span>
-            </div>
-            <div class="filter-list" id="type-filter-list"></div>
-        </div>
-
-        <div class="filter-block">
-            <div class="filter-block-title">
-                <span>治理健康度</span>
-            </div>
-            <div class="filter-list" id="governance-filter-list">
-                <label class="filter-item">
-                    <span class="filter-label-group">
-                        <input type="checkbox" id="chk-only-risk" onchange="applyFilters()">
-                        <span>仅看需审核/低对齐</span>
-                    </span>
-                    <span class="filter-count" id="count-risk">-</span>
-                </label>
-                <label class="filter-item">
-                    <span class="filter-label-group">
-                        <input type="checkbox" id="chk-only-orphans" onchange="applyFilters()">
-                        <span>仅看孤岛节点 (Orphans)</span>
-                    </span>
-                    <span class="filter-count" id="count-orphans">-</span>
-                </label>
-            </div>
-        </div>
-    </aside>
-
-    <!-- Floating Toggle Button for Right Drawer -->
-    <button id="btn-expand-filters" class="btn-floating-filter" title="展开图谱控制台" onclick="toggleRightDrawer(true)">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
-        <span>过滤面板</span>
-    </button>
-
-    <!-- Bottom Temporal Scrubber -->
-    <footer id="bottom-timeline">
-        <div class="timeline-label">时间演化轴</div>
-        <div class="timeline-slider-group">
-            <span class="timeline-label" id="timeline-start">-</span>
-            <input type="range" id="timeline-slider" class="timeline-slider" min="0" max="100" value="100">
-            <span class="timeline-label" id="timeline-end">-</span>
-        </div>
-        <div class="timeline-label" id="timeline-current">显示全量</div>
-    </footer>
-
-    <!-- Toast Component -->
-    <div id="toast"></div>
-
-    <!-- Modal Fallback for Source Path -->
-    <div id="modal-overlay" onclick="closeModal(event)">
-        <div class="modal-box" onclick="event.stopPropagation()">
-            <h3 class="modal-title" id="modal-title">本地 Markdown 文件路径</h3>
-            <p style="font-size: 0.8rem; color: var(--text-muted);">
-                浏览器安全策略已拦截直接通过网页跳转打开本地磁盘文件。您可复制下方路径并在编辑器中打开：
-            </p>
-            <div class="modal-body" id="modal-content"></div>
-            <div style="display: flex; justify-content: flex-end; gap: 8px;">
-                <button class="btn-action primary" onclick="copyModalContent()">复制路径</button>
-                <button class="btn-action" onclick="closeModal()">关闭</button>
-            </div>
-        </div>
+<a class="skip-link" href="#main-content">跳到知识经纬</a>
+<div class="app">
+  <header class="topbar">
+    <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="knowledge-graph-title knowledge-graph-desc"><title id="knowledge-graph-title">知识经纬</title><desc id="knowledge-graph-desc">可直接内联到导航按钮，颜色继承 currentColor。</desc><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6.78 5.49 L10.22 4.51 M13.7 4.73 L17.3 6.27 M19 8.85 V15.15 M17.3 17.73 L13.7 19.27 M10.3 19.27 L6.7 17.73 M5 15.15 V7.85"/><path d="M6.35 7.05 L10.4 10.25 M13.5 12.7 L17.65 15.95 M6.35 15.95 L17.65 8.05"/></g><g fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="5" cy="6" r="1.7"/><circle cx="12" cy="4" r="1.7"/><circle cx="19" cy="7" r="1.7"/><circle cx="19" cy="17" r="1.7"/><circle cx="12" cy="20" r="1.7"/><circle cx="5" cy="17" r="1.7"/></g></svg></span><div><h1>KnowWeave · 知识经纬</h1><p class="brand-caption">关系与证据</p></div></div>
+    <div class="search">
+      <label for="search-input" class="sr-only">搜索当前视图的标题、编号或摘要</label>
+      <input id="search-input" type="search" placeholder="搜索标题、编号或摘要" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="search-results" aria-expanded="false">
+      <span class="search-key" aria-hidden="true">/</span>
+      <div id="search-results" class="search-results" role="listbox" aria-label="匹配节点" hidden></div>
     </div>
+    <div class="view-picker" role="group" aria-label="知识视图">
+      <button id="view-page" aria-pressed="true">页面</button><button id="view-claim" aria-pressed="false">主张</button>
+    </div>
+  </header>
+  <section class="snapshot" aria-label="快照状态">
+    <span>静态快照 · <time id="generated-at">时间未知</time></span>
+    <span id="snapshot-total"></span>
+    <span id="stale-warning" class="warning" role="status" hidden>社区划分已过期，分组仅供参考</span>
+    <span id="consistency-warning" class="warning" role="status" hidden></span>
+    <span id="data-warning" class="warning" role="status" hidden>载荷缺失或含无效记录，当前结果可能不完整</span>
+  </section>
+  <div class="workspace">
+    <nav id="navigation" class="navigation" aria-label="分类与过滤">
+      <div class="section-heading"><h2>浏览知识</h2><button id="reset-filters" class="text-button">重置</button></div>
+      <div class="side-tabs" role="group" aria-label="浏览分区"><button id="nav-browse" aria-pressed="true" aria-controls="browse-panel">分类</button><button id="nav-filters" aria-pressed="false" aria-controls="filter-panel">筛选</button></div>
+      <section id="browse-panel" class="side-pane" aria-label="分类浏览">
+        <label class="field" for="group-mode">分类方式<select id="group-mode"><option value="domain">领域</option><option value="community">社区</option><option value="type">类型</option></select></label>
+        <label class="field" for="group-search">查找分类<input id="group-search" type="search" placeholder="检索全部分类"></label>
+        <p id="group-count" class="small"></p><div id="group-list" class="group-list"></div>
+        <div class="row pagination"><button id="previous-groups">上一页</button><button id="more-groups">下一页</button></div>
+      </section>
+      <section id="filter-panel" class="side-pane" aria-label="节点过滤" hidden>
+        <div class="section-heading"><h3>节点类型</h3><button id="toggle-types" class="text-button">全部取消</button></div>
+        <div id="type-filters" class="filter-types"></div>
+        <label class="check"><input id="filter-attention" type="checkbox">仅需关注的状态</label><p id="attention-definition" class="small"></p>
+        <label class="check"><input id="filter-isolated" type="checkbox">仅当前主干无连接</label>
+        <p class="small">仅指本次主干视图，不等同于 Wiki 孤立页检查。</p>
+      </section>
+      <details class="panel-guide"><summary>阅读说明</summary><p class="small">这是静态快照，不实时同步或写入知识库。连线和位置用于探索，不代表支持、因果、时间或地理距离。重新导出才能取得新数据。</p></details>
+    </nav>
+    <main id="main-content" class="center" tabindex="-1">
+      <section class="context">
+        <nav id="breadcrumb" class="breadcrumb" aria-label="当前位置"></nav>
+        <h2 id="scope-title" tabindex="-1">领域概览</h2>
+      </section>
+      <div class="toolbar">
+        <div class="row" role="group" aria-label="结果呈现">
+          <button id="toggle-navigation" class="mobile-navigation" aria-controls="navigation" aria-expanded="false">分类与过滤</button>
+          <button id="tab-map" aria-pressed="true">地图</button><button id="tab-list" aria-pressed="false">节点列表</button>
+          <button id="fit-view">适配当前图</button>
+        </div>
+        <div class="row">
+          <label class="small" for="label-density">标签</label><select id="label-density" title="二维标签密度；三维仅显示悬停提示"><option value="key">精简</option><option value="hover">按需</option><option value="all">更多</option></select>
+          <label class="small" for="node-limit">绘图上限</label><select id="node-limit"><option value="100">100</option><option value="200" selected>200</option><option value="400">400</option></select>
+          <details><summary class="small">显示选项</summary><div class="advanced stack"><label class="field" for="hop-count">局部关系范围<select id="hop-count"><option value="1">一跳</option><option value="2">两跳</option></select></label><button id="toggle-3d">三维预览（需联网）</button><button id="pause-3d" hidden aria-pressed="false">暂停三维</button><p class="small">默认二维完全离线。三维引擎只在确认后加载，使用同一组筛选结果。</p></div></details>
+        </div>
+      </div>
+      <section id="visualization" class="visualization" aria-label="知识关系与节点结果">
+        <canvas id="graph-canvas" tabindex="0" role="img" aria-label="知识经纬。可用节点列表完成等价浏览；方向键平移，加减键缩放，Home 适配当前图。"></canvas>
+        <div id="graph-3d" hidden></div>
+        <div id="list-results" class="results" hidden></div>
+        <div id="empty-state" class="empty-state" hidden><h3>没有匹配的节点</h3><p>可以清除搜索或恢复类型过滤。空选择不会自动恢复为全选。</p><button id="empty-reset">恢复全部节点</button></div>
+        <div id="map-overlays" class="map-overlays" role="group" aria-label="图谱提示与图例">
+          <p id="map-hint" class="map-hint">拖动平移 · 滚轮缩放 · 悬停查看标签</p>
+          <div id="graph-legend" class="legend" role="group" aria-label="图形编码说明"><span><i class="shape" aria-hidden="true"></i>页面</span><span><i class="shape source" aria-hidden="true"></i>来源页</span><span><i class="shape claim" aria-hidden="true"></i>主张</span><span>大小：连接度 · 连线：声明或加权关联，均非独立核验</span></div>
+        </div>
+      </section>
+    </main>
+    <aside id="inspector" class="inspector" aria-label="节点与证据详情">
+      <div id="detail-content" class="stack"><h2>先找到一个问题</h2><p class="muted">从左侧分类或顶部搜索进入，再选择节点查看关系与声明来源。</p><p class="small">连线表示关联，不自动代表支持或因果。未测量的分数不会显示为满分。</p></div>
+    </aside>
+  </div>
+  <footer id="feedback" class="feedback" role="status" aria-live="polite">正在准备快照…</footer>
+</div>
+<dialog id="network-dialog" aria-labelledby="network-title"><h2 id="network-title">加载可选三维引擎？</h2><p>将从 unpkg.com 下载固定版本 1.79.0 的第三方脚本，并校验 SHA-384 完整性。第三方代码在本页运行，可以接触图谱内容；这不是独立安全隔离。</p><p>不确认则保持离线二维浏览。受限网络或 WebGL 不可用时会保留二维视图。</p><div class="row"><button id="cancel-network">保持二维</button><button id="confirm-network" class="primary">确认联网加载</button></div></dialog>
+<dialog id="path-dialog" aria-labelledby="path-title"><h2 id="path-title">本地文件位置</h2><p id="path-description">这是来源声明的位置，尚未核验文件可打开。若浏览器限制本地跳转，可复制路径到编辑器。</p><label class="sr-only" for="path-value">待复制内容</label><textarea id="path-value" rows="5" readonly></textarea><div class="row"><button id="copy-path">复制路径</button><button id="close-path">关闭</button></div></dialog>
+<noscript><p>此地图需要 JavaScript。当前没有执行任何图谱操作。</p></noscript>
+<script>
+const rawData = %%GRAPH_DATA%%;
+const memoryBasePath = "%%MEMORY_BASE_PATH%%";
+</script>
+<script>
+(function (global) {
+  'use strict';
 
-    <!-- Topology Runtime Script -->
-    <script>
-        const rawData = %%GRAPH_DATA%%;
-        const memoryBasePath = "%%MEMORY_BASE_PATH%%";
+  const TYPE_NAMES = { Concept: '概念', Source: '来源', Product: '产品', Vendor: '企业', Person: '人物', Institution: '机构', Policy: '政策', Standard: '标准', Event: '事件', Synthesis: '综合', Claim: '主张', Unknown: '未分类' };
+  const GRAPH_COLORS = { background: '#f7f9fc', text: '#253b52', edge: '#526f8e', focus: '#235d88', neutral: '#66788b' };
+  const COLORS = ['#3f6f96', '#6a6091', '#347d77', '#947545', '#697d53', '#94687e'];
+  const TYPE_COLORS = { Source: '#7464a0', Concept: '#416f96', Claim: '#337c75', Person: '#936c86', Product: '#8d754d' };
+  const ATTENTION_STATES = new Set(['conflicted', 'expired', 'unsupported', 'needs-review', 'review-due', 'expiring-soon', 'contested', 'deprecated']);
+  const ENGINE_URL = 'https://unpkg.com/3d-force-graph@1.79.0/dist/3d-force-graph.min.js';
+  const ENGINE_INTEGRITY = 'sha384-I8xUqUlkgn1YFxE2iHhBohLpcR9rKT9MSaKUFK/+opyNDd5UX5j98GymiICW9V76';
+  const endpoint = value => typeof value === 'object' && value !== null ? value.id : value;
+  const normalize = text => String(text ?? '').toLocaleLowerCase().replace(/[-_\s]+/g, ' ').trim();
+  const finite = value => typeof value === 'number' && Number.isFinite(value);
+  const typeOf = node => node.raw_type || (node.node_kind === 'claim' ? 'Claim' : node.group) || 'Unknown';
+  const stateOf = node => String(node.validity_state || node.status || 'unknown').toLowerCase();
+  const recordedValue = value => value == null || value === '' ? 'unknown' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  const typeName = node => TYPE_NAMES[typeOf(node)] || typeOf(node);
+  const salience = node => finite(node.backbone_degree) ? node.backbone_degree : 0;
+  const bySalience = (a, b) => salience(b) - salience(a) || String(a.id).localeCompare(String(b.id));
+  const escapeHTML = text => String(text).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
-        // Professional Slate & Semantic Tokens
-        const PALETTE = {
-            Vendor: '#818CF8',     // Indigo
-            Product: '#38BDF8',    // Sky
-            Person: '#FB7185',     // Rose
-            Event: '#34D399',      // Emerald
-            Concept: '#60A5FA',    // Blue
-            Source: '#A78BFA',     // Purple
-            Synthesis: '#FBBF24',  // Amber
-            // Institution / Policy / Standard are first-class entity prefixes in
-            // VALID_PREFIXES but had no colour, so 187 live nodes (Institution
-            // alone 101) rendered as the same grey as a genuinely unknown type.
-            Institution: '#F472B6', // Pink
-            Policy: '#4ADE80',     // Green
-            Standard: '#FACC15',   // Yellow
-            Claim: '#22D3EE',      // Cyan
-            System: '#64748B',     // Slate-600
-            Unknown: '#94A3B8',    // Slate
-        };
-
-        const CLAIM_STATE_COLORS = {
-            active: '#10B981',
-            provisional: '#06B6D4',
-            'review-due': '#F59E0B',
-            'needs-review': '#F59E0B',
-            'expiring-soon': '#FB923C',
-            expired: '#EF4444',
-            conflicted: '#E11D48',
-            unsupported: '#A855F7',
-            unknown: '#94A3B8'
-        };
-
-        const COMMUNITY_COLORS = [
-            '#38BDF8', '#818CF8', '#34D399', '#FBBF24', '#F472B6',
-            '#A78BFA', '#2DD4BF', '#FB7185', '#60A5FA', '#C084FC'
-        ];
-        const COMMUNITY_UNASSIGNED_COLOR = '#475569';
-
-        // Community ids are opaque stable tokens (8-hex UUID fragments), never
-        // integers.  The previous `COMMUNITY_COLORS[cid % length]` produced
-        // `'6fd2edf4' % 10 === NaN`, so every node silently kept the previous
-        // fillStyle and the whole community view rendered in one colour.
-        function communityColorIndex(communityId) {
-            const token = String(communityId);
-            let hash = 0;
-            for (let i = 0; i < token.length; i++) {
-                hash = (hash * 31 + token.charCodeAt(i)) >>> 0;
-            }
-            return hash % COMMUNITY_COLORS.length;
+  function buildGraph(raw, kind) {
+    const nodes = [], byId = new Map(), adjacency = new Map(), search = new Map(), normalizedIds = new Map();
+    let rejected = 0;
+    for (const original of Array.isArray(raw?.nodes) ? raw.nodes : []) {
+      if (!original || typeof original.id !== 'string' || !original.id || byId.has(original.id)) { rejected++; continue; }
+      const node = { ...original, node_kind: original.node_kind || kind, name: String(original.name || original.id) };
+      nodes.push(node); byId.set(node.id, node); adjacency.set(node.id, new Set());
+      search.set(node.id, normalize(`${node.name} ${node.id} ${node.summary || ''}`));
+      const key = normalize(node.id);
+      if (!normalizedIds.has(key)) normalizedIds.set(key, new Set());
+      normalizedIds.get(key).add(node.id);
+    }
+    const edges = [], byPair = new Map();
+    for (const original of Array.isArray(raw?.edges) ? raw.edges : []) {
+      const source = endpoint(original?.source), target = endpoint(original?.target);
+      if (!byId.has(source) || !byId.has(target) || source === target) { rejected++; continue; }
+      const pair = JSON.stringify([source, target].sort());
+      if (byPair.has(pair)) continue;
+      const edge = { source, target, weight: finite(original.weight) ? original.weight : 1, relation: String(original.relation || 'related_to'), declarations: [] };
+      edges.push(edge); byPair.set(pair, edge);
+      adjacency.get(source).add(target); adjacency.get(target).add(source);
+    }
+    if (kind === 'page') {
+      const catalogTargets = new Map();
+      function declare(source, target, predicate, legacy = false, metadata = null) {
+        if (!byId.has(source) || typeof target !== 'string' || !byId.has(target) || source === target) { rejected++; return; }
+        if (metadata) {
+          if (!catalogTargets.has(source)) catalogTargets.set(source, new Set());
+          catalogTargets.get(source).add(target);
         }
-
-        function graphHasCommunities() {
-            return graphs[currentGraphKey].nodes.some(n => !!n.community);
+        const pair = JSON.stringify([source, target].sort());
+        // Old semantic_links combine declarations with backbone neighbors. Only
+        // a missing backbone pair proves an extra declaration in that format.
+        if (legacy && byPair.has(pair)) return;
+        let edge = byPair.get(pair);
+        if (!edge) {
+          edge = { source, target, weight: null, relation: '页面声明', declarations: [] };
+          edges.push(edge); byPair.set(pair, edge);
+          adjacency.get(source).add(target); adjacency.get(target).add(source);
         }
-
-        // System State
-        let currentDimension = '2d'; // '2d' or '3d'
-        let currentGraphKey = 'page'; // 'page' or 'claim'
-        let currentColorMode = 'type'; // 'type' or 'community'
-        let focusMode = false;
-        let physicsPaused = false;
-        let selectedNode = null;
-        let hoverNode = null;
-        let onlyRisk = false;
-        let onlyOrphans = false;
-        const activeTypes = new Set();
-        const activeCommunities = new Set();
-
-        const graphs = {
-            // pageGraph/claimGraph are the only node/edge carriers; the tool no
-            // longer repeats them at the top level of the payload (it serialised
-            // every page node twice, doubling the artifact).
-            page: rawData.pageGraph || { nodes: [], edges: [], community_labels: {} },
-            claim: rawData.claimGraph || { nodes: [], edges: [], community_labels: {} }
-        };
-
-        // Graph Metadata Setup
-        const meta = rawData.meta || {};
-        document.getElementById('stat-raw-edges').textContent = (meta.total_page_edges || graphs.page.edges.length).toLocaleString();
-        if (!meta.pruned) {
-            document.getElementById('prune-badge').style.display = 'none';
+        if (!edge.declarations.some(item => item.source === source && item.target === target && item.predicate === predicate && (!metadata || item.layer === metadata.layer))) {
+          edge.declarations.push({ ...(metadata || {}), source, target, predicate });
         }
-        // A stale partition draws community colours for a node set it was not
-        // computed on, and an unlocked read can pair two projections from
-        // different generations. Both are reported by the tool and must be
-        // visible here rather than silently trusted.
-        const staleBadge = document.getElementById('stale-badge');
-        const staleReasons = [];
-        if (meta.communities_stale) staleReasons.push('社区划分已过期');
-        if (meta.read_consistency && meta.read_consistency !== 'locked') staleReasons.push('索引未加锁读取');
-        if (staleReasons.length) {
-            staleBadge.textContent = `\u26A0 ${staleReasons.join(' / ')}`;
-        } else {
-            staleBadge.style.display = 'none';
+      }
+      for (const item of Array.isArray(raw?.relations) ? raw.relations : []) {
+        if (!item || !['declared', 'navigation'].includes(item.layer)) continue;
+        if (typeof item.predicate !== 'string' || !item.predicate.trim()) { rejected++; continue; }
+        declare(item.source, item.target, item.predicate, false, { ...item, weight: null });
+      }
+      for (const node of nodes) {
+        const named = new Set(catalogTargets.get(node.id) || []);
+        for (const item of Array.isArray(node.declared_relations) ? node.declared_relations : []) {
+          if (!item || typeof item.predicate !== 'string' || !item.predicate.trim()) { rejected++; continue; }
+          declare(node.id, item.target, item.predicate.trim()); named.add(item.target);
         }
-        if (!meta.community_labels_available && graphHasCommunities()) {
-            console.warn('community_labels missing; falling back to raw community ids');
+        const explicit = Array.isArray(node.declared_links);
+        const links = explicit ? node.declared_links : (Array.isArray(node.semantic_links) ? node.semantic_links : []);
+        for (const target of links) if (!named.has(target)) declare(node.id, target, null, !explicit);
+      }
+    }
+    const invalidShape = !raw || !Array.isArray(raw.nodes) || !Array.isArray(raw.edges);
+    return { nodes, edges, byId, adjacency, search, normalizedIds, labels: raw?.community_labels || {}, rejected, invalidShape };
+  }
+
+  function filterNodes(graph, options) {
+    const query = normalize(options.query), tokens = query.split(' ').filter(Boolean), exactIds = graph.normalizedIds.get(query);
+    return graph.nodes.filter(node => (!exactIds || exactIds.has(node.id)) && options.types.has(typeOf(node)) &&
+      (!options.attention || ATTENTION_STATES.has(stateOf(node))) &&
+      (!options.isolated || graph.adjacency.get(node.id).size === 0) &&
+      tokens.every(token => graph.search.get(node.id).includes(token)));
+  }
+
+  function groupKey(node, mode) {
+    if (mode === 'community') return String(node.community || 'unassigned');
+    if (mode === 'type') return typeOf(node);
+    return String(node.domain || node.group || '未分类');
+  }
+
+  function groupsFor(graph, nodes, mode) {
+    const groups = new Map();
+    for (const node of nodes) {
+      const key = groupKey(node, mode);
+      if (!groups.has(key)) {
+        const label = mode === 'community' ? (key === 'unassigned' ? '未分配社区' : String(graph.labels[key] || `社区 ${key}`)) : mode === 'type' ? (TYPE_NAMES[key] || key) : key;
+        groups.set(key, { id: `group:${key}`, key, name: label, members: [], aggregate: true });
+      }
+      groups.get(key).members.push(node);
+    }
+    return [...groups.values()].sort((a, b) => b.members.length - a.members.length || a.key.localeCompare(b.key));
+  }
+
+  function overview(graph, groups, maxGroups = 12) {
+    const displayed = groups.slice(0, maxGroups);
+    if (groups.length > maxGroups) displayed.push({ id: 'remainder:', name: `其余 ${groups.length - maxGroups} 个分类`, members: groups.slice(maxGroups).flatMap(group => group.members), aggregate: true, remainder: true });
+    const owner = new Map();
+    displayed.forEach(group => group.members.forEach(node => owner.set(node.id, group.id)));
+    const edges = new Map();
+    for (const edge of graph.edges) {
+      const a = owner.get(edge.source), b = owner.get(edge.target);
+      if (!a || !b || a === b) continue;
+      const [source, target] = [a, b].sort(), key = JSON.stringify([source, target]);
+      if (!edges.has(key)) edges.set(key, { source, target, weight: 0, relation: '分类之间的主干关系条数' });
+      edges.get(key).weight++;
+    }
+    return { nodes: displayed, edges: [...edges.values()], total: owner.size, aggregated: true };
+  }
+
+  function localNodes(graph, eligible, rootId, hops = 1) {
+    const allowed = new Set(eligible.map(node => node.id));
+    if (!allowed.has(rootId)) return [];
+    const distance = new Map([[rootId, 0]]), queue = [rootId];
+    for (let i = 0; i < queue.length; i++) {
+      const id = queue[i], depth = distance.get(id);
+      if (depth >= Math.min(2, Math.max(1, hops))) continue;
+      for (const next of graph.adjacency.get(id)) {
+        if (allowed.has(next) && !distance.has(next)) { distance.set(next, depth + 1); queue.push(next); }
+      }
+    }
+    return queue.map(id => graph.byId.get(id)).sort((a, b) => distance.get(a.id) - distance.get(b.id) || bySalience(a, b));
+  }
+
+  function nodeView(graph, candidates, limit) {
+    const nodes = candidates.slice(0, Math.min(400, Math.max(1, limit))), ids = new Set(nodes.map(node => node.id));
+    return { nodes, edges: graph.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target)), total: candidates.length, aggregated: false };
+  }
+
+  function layout(view, rootId) {
+    const count = view.nodes.length;
+    return view.nodes.map((node, index) => {
+      let x, y;
+      if (node.id === rootId || count === 1) { x = 0; y = 0; }
+      else if (view.aggregated) {
+        const columns = Math.max(1, Math.ceil(Math.sqrt(count * 1.3))), row = Math.floor(index / columns), column = index % columns;
+        const rows = Math.ceil(count / columns);
+        x = (column - (Math.min(columns, count - row * columns) - 1) / 2) * 190;
+        y = (row - (rows - 1) / 2) * 135;
+      } else {
+        const j = rootId ? Math.max(0, index - 1) : index;
+        const radius = 60 + Math.sqrt(j + 1) * 24, angle = j * 2.399963229728653;
+        x = Math.cos(angle) * radius; y = Math.sin(angle) * radius;
+      }
+      return { ...node, x, y, radius: view.aggregated ? Math.min(29, 15 + Math.log2(node.members.length + 1) * 1.5) : Math.min(13, 5 + Math.sqrt(Math.max(0, salience(node))) * .8) };
+    });
+  }
+
+  function totalEdges(meta, key, graph) {
+    const value = meta?.[key === 'page' ? 'total_page_edges' : 'total_claim_edges'];
+    return finite(value) && value >= 0 ? value : null;
+  }
+
+  function evidenceURL(source, base) {
+    if (typeof source !== 'string' || !source || !String(base).startsWith('file:///')) return null;
+    let path = source.replace(/\\/g, '/');
+    if (/^[a-z][\w+.-]*:/i.test(path) || path.startsWith('/') || /[\x00-\x1f]/.test(path) || path.split('/').some(part => part === '..' || part === '.')) return null;
+    if (!path.includes('/')) path = `wiki/${path.endsWith('.md') ? path : path + '.md'}`;
+    if (!(path.startsWith('wiki/') || path.startsWith('raw/')) || !path.toLowerCase().endsWith('.md')) return null;
+    try { return new URL(path.split('/').map(encodeURIComponent).join('/'), base.endsWith('/') ? base : base + '/').href; }
+    catch { return null; }
+  }
+
+  function slicePage(items, page, size = 8) {
+    if (!Array.isArray(items)) throw new TypeError('Pagination requires an array');
+    const perPage = Math.min(40, Math.max(1, Number.isFinite(size) ? Math.trunc(size) : 8)), pages = Math.max(1, Math.ceil(items.length / perPage));
+    const current = Math.max(0, Math.min(pages - 1, Number.isFinite(page) ? Math.trunc(page) : 0));
+    return { items: items.slice(current * perPage, (current + 1) * perPage), page: current, pages, total: items.length };
+  }
+  function shouldShowLabel(node, index, { aggregated = false, density = 'key', selectedId, hoverId } = {}) {
+    if (node.id === selectedId || node.id === hoverId) return true;
+    if (density === 'all') return true;
+    if (density === 'hover') return false;
+    return index < (aggregated ? 4 : 3);
+  }
+
+  function confidenceLabel(value) {
+    if (!finite(value) || value < 0 || value > 1) return '未提供';
+    return `${Math.round(value * 100)}%（来源记录值，非本页测量）`;
+  }
+
+  const api = { buildGraph, filterNodes, groupsFor, overview, localNodes, nodeView, layout, totalEdges, evidenceURL, confidenceLabel, slicePage, shouldShowLabel, GRAPH_COLORS, normalize, stateOf, typeOf, ENGINE_URL, ENGINE_INTEGRITY };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  global.KnowWeaveGraph = api;
+
+  function createApp(data, base) {
+    const $ = id => document.getElementById(id);
+    const graphs = { page: buildGraph(data.pageGraph, 'page'), claim: buildGraph(data.claimGraph, 'claim') }, meta = data.meta || {};
+    const reducedMotion = global.matchMedia('(prefers-reduced-motion: reduce)');
+    const state = { key: 'page', types: new Set(), query: '', attention: false, isolated: false, mode: 'domain', group: null, selected: null, hops: 1, limit: 200, tab: 'map', groupQuery: '', groupPage: 0, navigationTab: 'browse', detailTab: 'overview', labelDensity: 'key', page: 0, dimension: '2d', paused: false };
+    let eligible = [], groups = [], candidates = [], model = { nodes: [], edges: [] }, plotted = [], graph3d = null, enginePromise = null;
+    let frame = null, hover = null, searchTimer = null, searchMatches = [], searchIndex = -1, detailId = null, detailHeading = null, pending3D = null;
+    const canvas = $('graph-canvas'), ctx = canvas.getContext('2d'), camera = { x: 0, y: 0, zoom: 1 };
+    let width = 1, height = 1, pointer = null, activePointers = new Set();
+    const number = value => Number(value).toLocaleString('zh-CN');
+    const graph = () => graphs[state.key];
+    const message = text => { $('feedback').textContent = text; };
+    const element = (tag, text, className) => { const result = document.createElement(tag); if (text !== undefined) result.textContent = text; if (className) result.className = className; return result; };
+    const button = (text, handler, className) => { const result = element('button', text, className); result.type = 'button'; result.addEventListener('click', handler); return result; };
+    const resetTypes = () => { state.types = new Set(graph().nodes.map(typeOf)); };
+
+    function showNavigation(tab) {
+      state.navigationTab = tab;
+      for (const [key, panel] of [['browse', 'browse-panel'], ['filters', 'filter-panel']]) { $(panel).hidden = key !== tab; $(`nav-${key}`).setAttribute('aria-pressed', String(key === tab)); }
+    }
+
+    function closeSearch() {
+      clearTimeout(searchTimer); searchTimer = null; searchMatches = []; searchIndex = -1;
+      $('search-results').hidden = true; $('search-input').setAttribute('aria-expanded', 'false'); $('search-input').removeAttribute('aria-activedescendant');
+    }
+
+    function resetFilters() {
+      clearTimeout(searchTimer); state.query = ''; state.attention = false; state.isolated = false; state.selected = null; state.group = null; state.page = 0;
+      state.groupQuery = ''; state.groupPage = 0; $('group-search').value = '';
+      $('search-input').value = ''; $('filter-attention').checked = false; $('filter-isolated').checked = false; resetTypes(); closeSearch(); renderTypes(); refresh();
+    }
+
+    function renderTypes() {
+      const counts = new Map(); graph().nodes.forEach(node => counts.set(typeOf(node), (counts.get(typeOf(node)) || 0) + 1));
+      $('type-filters').replaceChildren();
+      for (const [type, count] of [...counts].sort(([a], [b]) => a.localeCompare(b))) {
+        const label = element('label', undefined, 'check'), input = element('input'); input.type = 'checkbox'; input.checked = state.types.has(type);
+        input.addEventListener('change', () => { input.checked ? state.types.add(type) : state.types.delete(type); state.page = 0; refresh(); });
+        label.append(input, element('span', TYPE_NAMES[type] || type), element('span', number(count), 'number')); $('type-filters').append(label);
+      }
+      $('attention-definition').textContent = state.key === 'claim' ? '冲突、过期、无支持、待复核或临近过期。' : '争议、已弃用的页面状态。';
+      $('toggle-types').textContent = state.types.size === counts.size ? '全部取消' : '全部选择';
+    }
+
+    function renderGroups(direction) {
+      const matches = groups.filter(group => normalize(`${group.name} ${group.key}`).includes(normalize(state.groupQuery))), result = slicePage(matches, state.groupPage, 8); state.groupPage = result.page;
+      const allGroups = button('全部分类', () => { state.group = null; state.selected = null; state.page = 0; refresh(); $('scope-title').focus(); }, 'group-button');
+      allGroups.setAttribute('aria-pressed', String(state.group === null && !state.selected)); $('group-list').replaceChildren(allGroups);
+      for (const group of result.items) {
+        const row = button('', () => enterGroup(group.key), 'group-button'); row.setAttribute('aria-pressed', String(state.group === group.key));
+        row.append(element('span', group.name), element('span', number(group.members.length), 'number')); row.title = `${group.name} · ${group.key}`; $('group-list').append(row);
+      }
+      $('group-count').textContent = `${number(matches.length)} 类 · 第 ${result.page + 1}/${result.pages} 页`;
+      $('previous-groups').hidden = $('more-groups').hidden = matches.length <= 8;
+      $('previous-groups').disabled = result.page === 0; $('more-groups').disabled = result.page + 1 >= result.pages;
+      if (direction) { const preferred = direction === 'previous' ? $('previous-groups') : $('more-groups'); (preferred.disabled ? (preferred === $('previous-groups') ? $('more-groups') : $('previous-groups')) : preferred).focus(); }
+    }
+
+
+    function enterGroup(key) {
+      state.group = key; state.selected = null; state.page = 0; closeSearch(); refresh();
+      $('navigation').classList.remove('is-open'); $('toggle-navigation').setAttribute('aria-expanded', 'false');
+      $('scope-title').focus?.();
+    }
+
+    function chooseNode(id) {
+      if (!graph().byId.has(id)) return;
+      const target = graph().byId.get(id);
+      if (!filterNodes(graph(), { ...state, query: '' }).includes(target)) { message('此节点被当前类型或状态过滤排除；请重置过滤后查看。'); return; }
+      clearTimeout(searchTimer); state.selected = id; state.group = null; state.query = ''; state.page = 0; $('search-input').value = ''; closeSearch(); refresh();
+      $('inspector').scrollTop = 0; detailHeading?.focus({ preventScroll: true });
+      if (global.innerWidth <= 950) $('inspector').scrollIntoView({ behavior: 'auto', block: 'start' });
+    }
+
+    function refresh() {
+      eligible = filterNodes(graph(), state); groups = groupsFor(graph(), eligible, state.mode);
+      if (state.selected) candidates = localNodes(graph(), eligible, state.selected, state.hops);
+      else if (state.group !== null) candidates = (groups.find(group => group.key === state.group)?.members || []).slice().sort(bySalience);
+      else candidates = eligible.slice().sort(bySalience);
+      model = state.selected || state.group !== null ? nodeView(graph(), candidates, state.limit) : overview(graph(), groups);
+      plotted = layout(model, state.selected);
+      hover = null; state.page = Math.min(state.page, Math.max(0, Math.ceil(candidates.length / 40) - 1));
+      renderGroups(); renderContext(); renderList(); renderDetail(); showTab(); fit();
+      $('toggle-types').textContent = state.types.size === new Set(graph().nodes.map(typeOf)).size ? '全部取消' : '全部选择';
+      if (graph3d && state.dimension === '3d') update3D();
+      const rejected = graph().rejected;
+      const capped = !model.aggregated && model.total > model.nodes.length ? ` · 绘图 ${number(model.nodes.length)}/${number(model.total)}` : '';
+      message(`${state.key === 'page' ? '页面' : '主张'}视图 · 匹配 ${number(eligible.length)} 个节点${capped}${rejected ? `；已跳过 ${number(rejected)} 条无效节点或关系记录` : ''}。本页没有执行知识库写入。${ctx ? '' : '二维 Canvas 不可用，已保留节点列表。'}`);
+    }
+
+    function renderContext() {
+      const group = groups.find(item => item.key === state.group), selected = graph().byId.get(state.selected), raw = totalEdges(meta, state.key, graph());
+      const groupNames = { domain: '领域概览', community: '社区概览', type: '类型概览' };
+      $('scope-title').textContent = selected ? selected.name : group ? group.name : state.group !== null ? '该分类没有匹配节点' : groupNames[state.mode];
+      $('breadcrumb').replaceChildren(button(state.key === 'page' ? '页面总览' : '主张总览', () => { state.selected = null; state.group = null; refresh(); }));
+      if (group || selected) $('breadcrumb').append(element('span', '/'), element('span', selected ? `${state.hops} 跳局部关系` : '分类内节点'));
+      $('snapshot-total').textContent = `${number(graph().nodes.length)} 节点 · 主干 ${number(graph().edges.length)} / 原始 ${raw === null ? '未知' : number(raw)} 条关系`;
+      $('stale-warning').hidden = state.key !== 'page' || !meta.communities_stale;
+      $('data-warning').hidden = !graph().invalidShape && graph().rejected === 0;
+    }
+
+    function renderList(focusFirst = false) {
+      const container = $('list-results'); container.replaceChildren();
+      let firstResult = null;
+      const list = candidates.slice(state.page * 40, state.page * 40 + 40);
+      container.append(element('p', `共 ${number(candidates.length)} 个节点 · 第 ${number(state.page + 1)} / ${number(Math.max(1, Math.ceil(candidates.length / 40)))} 页`, 'small'));
+      for (const node of list) {
+        const row = element('div', undefined, 'result-row'), main = element('div'), action = button(node.name, () => chooseNode(node.id));
+        if (!firstResult) firstResult = action;
+        main.append(action, element('p', `${typeName(node)} · ${stateOf(node)}`, 'small'));
+        row.append(main, element('span', `${number(salience(node))} 主干连接`, 'small number')); container.append(row);
+      }
+      const controls = element('div', undefined, 'row');
+      const prev = button('上一页', () => { state.page--; renderList(true); }), next = button('下一页', () => { state.page++; renderList(true); });
+      prev.disabled = state.page === 0; next.disabled = (state.page + 1) * 40 >= candidates.length; controls.append(prev, next); container.append(controls);
+      if (focusFirst) { container.scrollTop = 0; (firstResult || $('scope-title')).focus(); }
+    }
+
+    function showTab() {
+      const empty = candidates.length === 0;
+      if (!ctx && state.dimension === '2d') state.tab = 'list';
+      $('empty-state').hidden = !empty; $('list-results').hidden = empty || state.tab !== 'list';
+      canvas.hidden = empty || state.tab !== 'map' || state.dimension !== '2d';
+      $('graph-3d').hidden = empty || state.tab !== 'map' || state.dimension !== '3d';
+      $('map-overlays').hidden = empty || state.tab !== 'map';
+      $('map-hint').hidden = empty || state.tab !== 'map';
+      $('map-hint').textContent = state.dimension === '3d' ? '三维均为球形 · 类型见详情' : '拖动平移 · 滚轮缩放 · 悬停查看标签';
+      $('label-density').disabled = state.dimension === '3d';
+      $('tab-map').setAttribute('aria-pressed', String(state.tab === 'map')); $('tab-list').setAttribute('aria-pressed', String(state.tab === 'list'));
+      if (graph3d) state.tab === 'map' && state.dimension === '3d' && !empty && !state.paused ? graph3d.resumeAnimation() : graph3d.pauseAnimation();
+    }
+
+    function pagedItems(items, { className, name, searchText, renderItem, emptyText }) {
+      const region = element('div', undefined, 'paged-region'), list = element('ul', undefined, className), controls = element('div', undefined, 'row pagination');
+      let page = 0, query = '';
+      const status = element('span', '', 'small number');
+      const previous = button('上一页', () => { page--; paint('previous'); }), next = button('下一页', () => { page++; paint('next'); });
+      previous.setAttribute('aria-label', `上一页${name}`); next.setAttribute('aria-label', `下一页${name}`);
+      controls.append(previous, status, next);
+      if (items.length > 5) {
+        const search = element('input'); search.type = 'search'; search.placeholder = `筛选${name}`; search.className = 'paged-search'; search.setAttribute('aria-label', `筛选${name}`);
+        search.addEventListener('input', () => { query = normalize(search.value); page = 0; paint(); }); region.append(search);
+      }
+      function paint(direction) {
+        const matched = items.filter(item => normalize(searchText(item)).includes(query)), result = slicePage(matched, page, 5); page = result.page;
+        list.replaceChildren(...result.items.map(renderItem));
+        if (!matched.length) list.append(element('li', emptyText, 'small'));
+        status.textContent = `${number(matched.length)} 项 · ${result.page + 1}/${result.pages}`;
+        previous.disabled = page === 0; next.disabled = page + 1 >= result.pages; controls.hidden = matched.length <= 5;
+        if (direction) { const preferred = direction === 'previous' ? previous : next; (preferred.disabled ? (preferred === previous ? next : previous) : preferred).focus(); }
+      }
+      region.append(list, controls); paint(); return region;
+    }
+
+    function renderDetail() {
+      const container = $('detail-content'), node = graph().byId.get(state.selected);
+      if (!node) {
+        detailId = null; detailHeading = null; container.replaceChildren(element('h2', '从关系回到证据'), element('p', '选择节点后，按概览、来源、关联分区查看。', 'muted'), element('p', '分类图不代表知识完整性或可靠性评分。', 'small'));
+        return;
+      }
+      if (detailId === `${state.key}:${node.id}`) return;
+      detailId = `${state.key}:${node.id}`; container.replaceChildren();
+      const heading = element('div', undefined, 'detail-heading'); detailHeading = element('h2'); detailHeading.tabIndex = -1;
+      const wikiURL = node.node_kind === 'page' ? evidenceURL(`${node.id}.md`, base) : null;
+      if (wikiURL) {
+        const titleLink = element('a', node.name, 'wiki-title-link'); titleLink.href = wikiURL; titleLink.target = '_blank'; titleLink.rel = 'noopener noreferrer';
+        titleLink.setAttribute('aria-label', `${node.name}，在新标签页打开对应 Wiki 文件`); titleLink.title = '打开对应 Wiki 文件（新标签页）';
+        const icon = element('span', '↗', 'title-link-icon'); icon.setAttribute('aria-hidden', 'true'); titleLink.append(icon); detailHeading.append(titleLink);
+      } else detailHeading.textContent = node.name;
+      heading.append(detailHeading, button('关闭', () => { state.selected = null; detailId = null; refresh(); $('scope-title').focus(); })); container.append(heading);
+      if (wikiURL) container.append(element('p', '点击标题打开对应 Wiki 文件', 'detail-open-hint'));
+      const chips = element('div', undefined, 'chips'); chips.append(element('span', typeName(node), 'chip'));
+      if (node.node_kind === 'claim') chips.append(element('span', `有效性（validity_state）：${recordedValue(node.validity_state)}`, 'chip'));
+      container.append(chips);
+      const tabs = element('div', undefined, 'side-tabs detail-tabs'); tabs.setAttribute('role', 'group'); tabs.setAttribute('aria-label', '详情分区');
+      const sections = new Map();
+      for (const [key, label] of [['overview', '概览'], ['sources', '来源'], ['relations', '关联'], ['actions', '操作']]) {
+        const pane = element('section', undefined, 'detail-pane'); pane.id = `detail-pane-${key}`; pane.setAttribute('role', 'region');
+        const tab = button(label, () => { state.detailTab = key; showDetailTab(); }); tab.id = `detail-tab-${key}`;
+        tab.setAttribute('aria-controls', pane.id); pane.setAttribute('aria-labelledby', tab.id); sections.set(key, { tab, pane }); tabs.append(tab);
+      }
+      function showDetailTab() {
+        for (const [key, value] of sections) { value.pane.hidden = key !== state.detailTab; value.tab.setAttribute('aria-pressed', String(key === state.detailTab)); }
+      }
+      container.append(tabs, ...[...sections.values()].map(value => value.pane)); showDetailTab();
+      const overviewPane = sections.get('overview').pane, sourcePane = sections.get('sources').pane, relationPane = sections.get('relations').pane, actionPane = sections.get('actions').pane;
+      const metrics = element('div', undefined, 'metrics');
+      for (const [value, label] of [[finite(node.degree) ? number(node.degree) : '未提供', '原始加权连接度'], [number(graph().adjacency.get(node.id).size), '当前可浏览关联数']]) {
+        const cell = element('div', undefined, 'metric'); cell.append(element('strong', value), element('span', label)); metrics.append(cell);
+      }
+      overviewPane.append(metrics);
+      overviewPane.append(element('p', `记录状态（status）：${recordedValue(node.status)}`, 'small'), element('p', `认知状态（epistemic_status）：${recordedValue(node.epistemic_status)}`, 'small'));
+      if (typeOf(node) === 'Product' || node.lifecycle_status != null) overviewPane.append(element('p', `产品生命周期（lifecycle_status）：${recordedValue(node.lifecycle_status)}`, 'small'));
+      if (node.community) overviewPane.append(element('p', String(graph().labels[node.community] || `社区 ${node.community}`), 'small'));
+      if (node.node_kind === 'claim') overviewPane.append(element('p', `置信度：${confidenceLabel(node.confidence)}。状态与置信度不能互相替代。`, 'small'));
+      else overviewPane.append(element('p', '本视图不提供可审计的规则对齐度评分。', 'small'));
+      const summary = element('section', undefined, 'section'), summaryHeading = element('div', undefined, 'section-heading summary-controls'); summaryHeading.append(element('h3', '内容摘要'));
+      const rawSummary = String(node.summary || '此快照没有摘要。'), preview = rawSummary.length > 180 ? rawSummary.slice(0, 180) + '…' : rawSummary, summaryText = element('p', preview, 'summary-text');
+      if (rawSummary.length > 180) {
+        let expanded = false;
+        const toggle = button('展开摘要', () => { expanded = !expanded; summaryText.textContent = expanded ? rawSummary : preview; toggle.textContent = expanded ? '收起摘要' : '展开摘要'; if (!expanded) overviewPane.scrollTop = 0; }, 'text-button'); summaryHeading.append(toggle);
+      }
+      summary.append(summaryHeading, summaryText); overviewPane.append(summary);
+      const sources = Array.isArray(node.sources) ? node.sources : [];
+      sourcePane.append(element('h3', `声明来源（${number(sources.length)}）`), element('p', '声明不等于已核验；本页不自动读取原文。', 'small'));
+      sourcePane.append(pagedItems(sources, { className: 'evidence-list', name: '声明来源', searchText: source => String(source), emptyText: '没有匹配的声明来源。', renderItem: source => {
+        const item = element('li'), url = evidenceURL(source, base);
+        if (url) {
+          const link = element('a', String(source)); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+          link.addEventListener('click', () => message('已请求打开声明来源；是否成功由浏览器与本地文件决定。'));
+          item.append(link, button('复制或查看路径', () => showPath(url), 'text-button'));
+        } else item.append(element('span', String(source)), element('small', '无法解析为允许的本地 Markdown 路径；未发起外部请求。'));
+        return item;
+      } }));
+      if (wikiURL) sourcePane.append(button('查看本页 Markdown 路径', () => showPath(wikiURL)));
+      const neighbors = [...graph().adjacency.get(node.id)].map(id => graph().byId.get(id)).sort(bySalience);
+      relationPane.append(element('h3', `关联邻居（${number(neighbors.length)}）`), element('p', '页面声明保留方向和谓词，不等于已核实；加权关联仅供检索，不代表支持或因果。', 'small'));
+      relationPane.append(pagedItems(neighbors, { className: 'neighbor-list', name: '关联邻居', searchText: neighbor => `${neighbor.name} ${neighbor.id}`, emptyText: '没有匹配的关联邻居。', renderItem: neighbor => {
+        const edge = graph().edges.find(item => (item.source === node.id && item.target === neighbor.id) || (item.target === node.id && item.source === neighbor.id));
+        const item = element('li'), action = button(neighbor.name, () => chooseNode(neighbor.id));
+        for (const declaration of edge?.declarations || []) {
+          const layer = declaration.layer === 'navigation' ? '导航声明' : '页面声明';
+          action.append(element('small', `${layer}：${declaration.source === node.id ? '→' : '←'} ${declaration.predicate || '显式关联（未提供谓词）'} · 声明权重：null · 核验（verified）：${recordedValue(declaration.verified)}`));
+          for (const [field, label] of [['subject_scope', '主体范围'], ['resolution_status', '解析状态'], ['context', '声明上下文'], ['origin', '声明位置'], ['provenance_status', '溯源状态'], ['temporal', '声明时间'], ['epistemic_status', '关系认知状态'], ['lifecycle_status', '关系生命周期']]) {
+            if (declaration[field] != null) action.append(element('small', `${label}（${field}）：${recordedValue(declaration[field])}`));
+          }
         }
+        if (finite(edge?.weight)) action.append(element('small', `加权关联：${edge.relation} · 检索权重 ${edge.weight}`));
+        if (!action.children.length) action.append(element('small', '关联类型未提供'));
+        item.append(action); return item;
+      } }));
+      actionPane.append(element('h3', '研究与治理交接'), button('复制检索问题', () => copy(node.name)), button('复制溯源标识', () => copy(node.id)), button('复制治理建议 JSON', () => copy(JSON.stringify({ title: `复核：${node.name}`, node: node.id, status: 'pending', created_at: new Date().toISOString() }, null, 2))));
+      actionPane.append(element('p', '只复制文本，不执行命令，不向治理队列提交。', 'small'));
+    }
 
-        // ==========================================
-        // 2D Canvas High-Performance Engine
-        // ==========================================
-        const canvas = document.getElementById('canvas-2d');
-        const ctx = canvas.getContext('2d');
-        let dpr = window.devicePixelRatio || 1;
-        let width = 0, height = 0;
 
-        const camera = { x: 0, y: 0, zoom: 1 };
-        let isDragging = false;
-        let dragStart = { x: 0, y: 0 };
-        let hasMoved = false;
+    async function copy(text) {
+      try { await navigator.clipboard.writeText(String(text)); message('已复制文本；未执行指令或写入队列。'); }
+      catch {
+        $('path-title').textContent = '手动复制文本'; $('path-description').textContent = '浏览器没有允许自动复制。请手动复制下方文本；未执行任何命令或队列写入。'; $('copy-path').textContent = '重试复制文本';
+        $('path-value').value = String(text); $('path-dialog').showModal(); $('path-value').select(); message('浏览器不允许自动复制，请手动复制选中文本。');
+      }
+    }
+    function showPath(url) {
+      $('path-title').textContent = '本地文件位置'; $('path-description').textContent = '这是来源声明的位置，尚未核验文件可打开。若浏览器限制本地跳转，可复制路径到编辑器。'; $('copy-path').textContent = '复制路径';
+      $('path-value').value = url; $('path-dialog').showModal(); $('path-value').focus();
+    }
 
-        // Force simulation state for 2D
-        let simNodes = [];
-        let simLinks = [];
-        let neighborsMap = {};
-        let isSimulating = true;
-        let animFrameId = null;
+    function renderSearch() {
+      const input = $('search-input'), container = $('search-results'); container.replaceChildren();
+      searchMatches = eligible.slice().sort((a, b) => {
+        const rank = node => normalize(node.name) === normalize(state.query) ? 2 : normalize(node.name).startsWith(normalize(state.query)) ? 1 : 0;
+        return rank(b) - rank(a) || bySalience(a, b);
+      }).slice(0, 12);
+      if (!state.query) { closeSearch(); return; }
+      if (!searchMatches.length) container.append(element('p', '没有匹配结果', 'search-option'));
+      searchMatches.forEach((node, index) => {
+        const option = element('div', undefined, 'search-option'); option.id = `search-option-${index}`; option.setAttribute('role', 'option'); option.setAttribute('aria-selected', String(index === searchIndex));
+        option.append(element('strong', node.name), element('small', `${typeName(node)} · ${number(salience(node))} 个主干连接`));
+        option.addEventListener('mousedown', event => event.preventDefault()); option.addEventListener('click', () => chooseNode(node.id)); container.append(option);
+      });
+      container.hidden = false; input.setAttribute('aria-expanded', 'true');
+      if (searchMatches[searchIndex]) input.setAttribute('aria-activedescendant', `search-option-${searchIndex}`);
+      else input.removeAttribute('aria-activedescendant');
+    }
 
-        function resizeCanvas() {
-            const container = document.getElementById('graph-container');
-            width = container.clientWidth;
-            height = container.clientHeight;
-            canvas.width = width * dpr;
-            canvas.height = height * dpr;
-            ctx.scale(dpr, dpr);
-            requestRender();
+    function fit() {
+      if (!plotted.length) { drawSoon(); return; }
+      const xs = plotted.map(node => node.x), ys = plotted.map(node => node.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      camera.x = (minX + maxX) / 2; camera.y = (minY + maxY) / 2;
+      camera.zoom = Math.max(.1, Math.min(2, (width - 150) / Math.max(100, maxX - minX + 100), (height - 100) / Math.max(100, maxY - minY + 100)));
+      drawSoon();
+      if (graph3d && state.dimension === '3d') graph3d.zoomToFit(reducedMotion.matches ? 0 : 300, 50);
+    }
+    const screen = node => ({ x: (node.x - camera.x) * camera.zoom + width / 2, y: (node.y - camera.y) * camera.zoom + height / 2 });
+    function drawSoon() { if (frame === null) frame = requestAnimationFrame(() => { frame = null; draw(); }); }
+    function resize() {
+      const rect = $('visualization').getBoundingClientRect(); width = Math.max(1, rect.width); height = Math.max(1, rect.height);
+      const dpr = Math.min(3, global.devicePixelRatio || 1); canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr); ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (graph3d) graph3d.width(width).height(height); fit();
+    }
+    function draw() {
+      if (!ctx || state.dimension !== '2d') return;
+      ctx.clearRect(0, 0, width, height);
+      const byId = new Map(plotted.map(node => [node.id, node]));
+      for (const edge of model.edges) {
+        const a = byId.get(edge.source), b = byId.get(edge.target); if (!a || !b) continue;
+        const p = screen(a), q = screen(b), focused = hover && (a.id === hover.id || b.id === hover.id);
+        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.strokeStyle = focused ? GRAPH_COLORS.focus : GRAPH_COLORS.edge;
+        ctx.lineWidth = focused ? 1.8 : model.aggregated ? Math.min(3, .8 + Math.log2(edge.weight + 1) * .25) : .9;
+        ctx.globalAlpha = hover && !focused ? .18 : focused ? 1 : .8; ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      const family = getComputedStyle(canvas).fontFamily, labels = [], selected = state.selected;
+      plotted.forEach((node, index) => {
+        const p = screen(node), radius = Math.max(4, node.radius * Math.min(1.4, camera.zoom)), active = node.id === selected || node.id === hover?.id;
+        if (p.x < -100 || p.x > width + 100 || p.y < -100 || p.y > height + 100) return;
+        ctx.beginPath();
+        if (!node.aggregate && node.node_kind === 'claim') { ctx.moveTo(p.x, p.y - radius); ctx.lineTo(p.x + radius, p.y); ctx.lineTo(p.x, p.y + radius); ctx.lineTo(p.x - radius, p.y); ctx.closePath(); }
+        else if (!node.aggregate && typeOf(node) === 'Source') ctx.rect(p.x - radius, p.y - radius, radius * 2, radius * 2);
+        else ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = node.aggregate ? COLORS[index % COLORS.length] : TYPE_COLORS[typeOf(node)] || GRAPH_COLORS.neutral; ctx.fill();
+        if (active) { ctx.strokeStyle = GRAPH_COLORS.focus; ctx.lineWidth = 2.5; ctx.stroke(); }
+        if (shouldShowLabel(node, index, { aggregated: model.aggregated, density: state.labelDensity, selectedId: selected, hoverId: hover?.id })) labels.push({ node, p, radius, active });
+      });
+      const occupied = [];
+      labels.sort((a, b) => Number(b.active) - Number(a.active)).forEach(({ node, p, radius, active }) => {
+        const limit = active ? 36 : 12;
+        let text = node.name.length > limit ? node.name.slice(0, limit - 1) + '…' : node.name;
+        if (node.aggregate && active) text += ` · ${number(node.members.length)}`;
+        ctx.font = `${active ? '600' : '400'} 13px ${family}`;
+        const maximum = Math.max(40, Math.min(width - 16, active ? 360 : 160));
+        while (text.length > 4 && ctx.measureText(text).width > maximum) text = text.slice(0, -2) + '…';
+        const textWidth = ctx.measureText(text).width, x = Math.max(6, Math.min(width - textWidth - 6, p.x - textWidth / 2)), y = p.y + radius + 18, box = { x, y: y - 13, w: textWidth, h: 19 };
+        if (!active && occupied.some(other => box.x < other.x + other.w + 5 && box.x + box.w + 5 > other.x && box.y < other.y + other.h + 3 && box.y + box.h + 3 > other.y)) return;
+        occupied.push(box); ctx.fillStyle = GRAPH_COLORS.background; ctx.fillRect(x - 3, y - 15, textWidth + 6, 20);
+        ctx.fillStyle = active ? GRAPH_COLORS.focus : GRAPH_COLORS.text; ctx.textAlign = 'left'; ctx.fillText(text, x, y);
+      });
+    }
+
+
+    function pick(event) {
+      const rect = canvas.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top;
+      return plotted.slice().reverse().find(node => { const p = screen(node); return Math.hypot(p.x - x, p.y - y) < Math.max(12, node.radius * camera.zoom + 5); });
+    }
+    function activate(node) {
+      if (!node) return;
+      if (node.remainder) { showNavigation('browse'); $('navigation').classList.add('is-open'); $('toggle-navigation').setAttribute('aria-expanded', 'true'); $('group-search').focus(); message('其余分类均可在左侧搜索或翻页查看。'); }
+      else if (node.aggregate) enterGroup(node.key);
+      else chooseNode(node.id);
+    }
+    canvas.addEventListener('pointerdown', event => {
+      activePointers.add(event.pointerId); canvas.setPointerCapture(event.pointerId);
+      pointer = activePointers.size === 1 ? { id: event.pointerId, x: event.clientX, y: event.clientY, originX: event.clientX, originY: event.clientY, moved: false } : null;
+    });
+    canvas.addEventListener('pointermove', event => {
+      if (pointer && pointer.id === event.pointerId) {
+        const dx = event.clientX - pointer.x, dy = event.clientY - pointer.y;
+        pointer.moved ||= Math.hypot(event.clientX - pointer.originX, event.clientY - pointer.originY) > 4; camera.x -= dx / camera.zoom; camera.y -= dy / camera.zoom; pointer.x = event.clientX; pointer.y = event.clientY; drawSoon();
+      } else if (!activePointers.size) { const next = pick(event); if (next?.id !== hover?.id) { hover = next; canvas.style.cursor = next ? 'pointer' : 'grab'; drawSoon(); } }
+    });
+    const endPointer = event => { if (pointer?.id === event.pointerId && !pointer.moved && event.type === 'pointerup') activate(pick(event)); activePointers.delete(event.pointerId); pointer = null; };
+    canvas.addEventListener('pointerup', endPointer); canvas.addEventListener('pointercancel', endPointer); canvas.addEventListener('lostpointercapture', endPointer);
+    canvas.addEventListener('pointerleave', () => { hover = null; drawSoon(); });
+    canvas.addEventListener('wheel', event => {
+      event.preventDefault(); const rect = canvas.getBoundingClientRect(), x = event.clientX - rect.left - width / 2, y = event.clientY - rect.top - height / 2;
+      const worldX = camera.x + x / camera.zoom, worldY = camera.y + y / camera.zoom;
+      camera.zoom = Math.max(.1, Math.min(5, camera.zoom * Math.exp(-event.deltaY * .001))); camera.x = worldX - x / camera.zoom; camera.y = worldY - y / camera.zoom; drawSoon();
+    }, { passive: false });
+    canvas.addEventListener('keydown', event => {
+      const moves = { ArrowLeft: [-30, 0], ArrowRight: [30, 0], ArrowUp: [0, -30], ArrowDown: [0, 30] };
+      if (moves[event.key]) { event.preventDefault(); camera.x += moves[event.key][0] / camera.zoom; camera.y += moves[event.key][1] / camera.zoom; drawSoon(); }
+      else if (event.key === '+' || event.key === '=') { event.preventDefault(); camera.zoom = Math.min(5, camera.zoom * 1.2); drawSoon(); }
+      else if (event.key === '-') { event.preventDefault(); camera.zoom = Math.max(.1, camera.zoom / 1.2); drawSoon(); }
+      else if (event.key === 'Home') { event.preventDefault(); fit(); }
+    });
+
+    function loadEngine() {
+      if (typeof global.ForceGraph3D === 'function') return Promise.resolve();
+      if (enginePromise) return enginePromise;
+      enginePromise = new Promise((resolve, reject) => {
+        const script = document.createElement('script'); script.src = ENGINE_URL; script.integrity = ENGINE_INTEGRITY; script.crossOrigin = 'anonymous';
+        const timer = setTimeout(() => { script.remove(); reject(new Error('三维引擎加载超时；保留二维。')); }, 15000);
+        script.onload = () => { clearTimeout(timer); typeof global.ForceGraph3D === 'function' ? resolve() : reject(new Error('脚本未提供预期的三维引擎。')); };
+        script.onerror = () => { clearTimeout(timer); script.remove(); reject(new Error('三维引擎下载或完整性校验失败；保留二维。')); };
+        document.head.append(script);
+      }).catch(error => { enginePromise = null; throw error; });
+      return enginePromise;
+    }
+    function update3D() {
+      if (!graph3d) return;
+      graph3d.graphData({ nodes: model.nodes.map(node => ({ ...node })), links: model.edges.map(edge => ({ ...edge })) });
+      if (state.paused || state.tab !== 'map') graph3d.pauseAnimation(); else graph3d.resumeAnimation();
+    }
+    function cancel3DRequest() {
+      if (!pending3D) return;
+      pending3D = null; $('confirm-network').disabled = false;
+      message('已取消进入三维，保持二维。已经开始的脚本下载或执行不能据此撤销。');
+    }
+    // This owned dialog cancels synchronously even though native close events are queued.
+    const networkDialog = $('network-dialog'), nativeNetworkClose = networkDialog.close.bind(networkDialog);
+    networkDialog.close = (...args) => { cancel3DRequest(); return nativeNetworkClose(...args); };
+    function current3DRequest(request) {
+      if (pending3D !== request) return false;
+      // Also cover a direct prototype close that bypassed the owned instance method.
+      if (!networkDialog.open) { cancel3DRequest(); return false; }
+      return true;
+    }
+    async function enable3D() {
+      if (pending3D || !networkDialog.open) return;
+      const request = {}; pending3D = request;
+      $('confirm-network').disabled = true; message('正在加载已确认的三维引擎；二维仍可使用。');
+      try {
+        await loadEngine();
+        if (!current3DRequest(request)) return;
+        if (!graph3d) {
+          graph3d = global.ForceGraph3D()($('graph-3d')).width(width).height(height).backgroundColor(GRAPH_COLORS.background).showNavInfo(false)
+            .nodeColor(node => node.aggregate ? COLORS[0] : TYPE_COLORS[typeOf(node)] || GRAPH_COLORS.neutral)
+            .nodeLabel(node => escapeHTML(node.name)).nodeVal(node => node.aggregate ? Math.sqrt(node.members.length + 1) : Math.max(1, Math.sqrt(salience(node) + 1)))
+            .linkColor(() => GRAPH_COLORS.edge).linkLabel(edge => escapeHTML(`${edge.relation} · ${edge.weight}`)).cooldownTicks(80)
+            .onNodeClick(activate).onEngineStop(() => { if (state.dimension === '3d') graph3d.zoomToFit(reducedMotion.matches ? 0 : 300, 50); });
         }
-        window.addEventListener('resize', resizeCanvas);
-
-        function worldToScreen(wx, wy) {
-            return {
-                x: (wx - camera.x) * camera.zoom + width / 2,
-                y: (wy - camera.y) * camera.zoom + height / 2
-            };
+        state.dimension = '3d'; state.paused = reducedMotion.matches; $('pause-3d').hidden = false;
+        $('pause-3d').setAttribute('aria-pressed', String(state.paused)); $('pause-3d').textContent = state.paused ? '继续三维' : '暂停三维';
+        $('toggle-3d').textContent = '返回离线二维'; showTab(); update3D(); message('已进入可选三维预览。筛选与绘图范围和二维一致；类型与证据见详情。');
+      } catch (error) {
+        if (!current3DRequest(request)) return;
+        state.dimension = '2d'; graph3d?.pauseAnimation(); showTab(); drawSoon(); message(error.message || 'WebGL 初始化失败，已保留二维。');
+      } finally {
+        if (pending3D === request) {
+          pending3D = null; $('confirm-network').disabled = false;
+          if ($('network-dialog').open) $('network-dialog').close();
         }
+      }
+    }
 
-        function screenToWorld(sx, sy) {
-            return {
-                x: (sx - width / 2) / camera.zoom + camera.x,
-                y: (sy - height / 2) / camera.zoom + camera.y
-            };
+    $('search-input').addEventListener('input', () => {
+      clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.query = $('search-input').value; state.selected = null; state.group = null; state.page = 0; searchIndex = 0; refresh(); renderSearch(); }, 120);
+    });
+    $('search-input').addEventListener('keydown', event => {
+      if (event.key === 'Escape') { closeSearch(); return; }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); if (!searchMatches.length) return; searchIndex = (searchIndex + (event.key === 'ArrowDown' ? 1 : -1) + searchMatches.length) % searchMatches.length; renderSearch(); }
+      else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (normalize($('search-input').value) !== normalize(state.query)) {
+          clearTimeout(searchTimer); state.query = $('search-input').value; state.selected = null; state.group = null; state.page = 0; searchIndex = 0; refresh(); renderSearch();
         }
-
-        function init2DGraphData() {
-            const srcGraph = graphs[currentGraphKey];
-            activeTypes.clear();
-            srcGraph.nodes.forEach(n => activeTypes.add(n.raw_type || n.group || 'Unknown'));
-            activeCommunities.clear();
-            srcGraph.nodes.forEach(n => activeCommunities.add(n.community || 'unassigned'));
-
-            // Build neighbors
-            neighborsMap = {};
-            srcGraph.edges.forEach(e => {
-                const s = e.source.id || e.source;
-                const t = e.target.id || e.target;
-                if (!neighborsMap[s]) neighborsMap[s] = new Set();
-                if (!neighborsMap[t]) neighborsMap[t] = new Set();
-                neighborsMap[s].add(t);
-                neighborsMap[t].add(s);
-            });
-
-            // Initialize node positions with spiral distribution
-            const count = srcGraph.nodes.length;
-            simNodes = srcGraph.nodes.map((n, i) => {
-                const angle = i * 0.35;
-                const radius = 15 + Math.sqrt(i) * 38;
-                return {
-                    ...n,
-                    x: Math.cos(angle) * radius,
-                    y: Math.sin(angle) * radius,
-                    vx: 0,
-                    vy: 0,
-                    radius: Math.max(3, Math.min(18, 3 + Math.sqrt(n.backbone_degree || n.degree || 1) * 2.2))
-                };
-            });
-
-            const nodeLookup = new Map(simNodes.map(n => [n.id, n]));
-            simLinks = [];
-            srcGraph.edges.forEach(e => {
-                const s = nodeLookup.get(e.source.id || e.source);
-                const t = nodeLookup.get(e.target.id || e.target);
-                if (s && t) {
-                    simLinks.push({ source: s, target: t, weight: e.weight || 1, relation: e.relation || '' });
-                }
-            });
-
-            isSimulating = true;
-            simAlpha = SIM_ALPHA_START;
-            stepSimulation(120); // Pre-warm physics
-            isSimulating = true; // The pre-warm may have cooled alpha to the floor
-            updateTelemetry();
-            renderTypeFilters();
-            requestRender();
-        }
-
-        function truncateLabel(text, maxChars = 14) {
-            if (!text) return '';
-            if (text.length <= maxChars) return text;
-            return text.slice(0, maxChars - 1) + '…';
-        }
-
-        function toggleRightDrawer(expand) {
-            const drawer = document.getElementById('right-drawer');
-            const floatBtn = document.getElementById('btn-expand-filters');
-            if (expand) {
-                drawer.classList.remove('collapsed');
-                floatBtn.style.display = 'none';
-            } else {
-                drawer.classList.add('collapsed');
-                floatBtn.style.display = 'flex';
-            }
-        }
-
-        // Simulation state.  alpha decays like d3's alphaDecay: it used to be a
-        // fixed 0.08 with `isSimulating` never returning to false, so the layout
-        // re-stepped on every frame forever instead of converging.
-        let simAlpha = 1.0;
-        const SIM_ALPHA_START = 0.3;
-        const SIM_ALPHA_MIN = 0.001;
-        const SIM_ALPHA_DECAY = 0.985;
-        const REPULSION_RADIUS = 100;
-        const REPULSION_CELL = 100;
-        const repulsionGrid = new Map();
-
-        function reheatSimulation() {
-            simAlpha = SIM_ALPHA_START;
-            isSimulating = true;
-            if (currentDimension === '2d' && !animFrameId) {
-                animFrameId = requestAnimationFrame(render2D);
-            }
-        }
-
-        function stepSimulation(iterations = 1) {
-            const linkDistance = 85;
-            const cellSize = REPULSION_CELL;
-            const radiusSq = REPULSION_RADIUS * REPULSION_RADIUS;
-            // Half-plane cell offsets, so each unordered pair is visited once.
-            const neighbourOffsets = [[1, 0], [-1, 1], [0, 1], [1, 1]];
-
-            for (let iter = 0; iter < iterations; iter++) {
-                const alpha = simAlpha;
-
-                // Link attraction with dynamic balance distance based on degrees
-                for (let i = 0; i < simLinks.length; i++) {
-                    const l = simLinks[i];
-                    const dx = l.target.x - l.source.x;
-                    const dy = l.target.y - l.source.y;
-                    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                    const dynamicDist = linkDistance + Math.min(70, ((l.source.backbone_degree || 0) + (l.target.backbone_degree || 0)) * 1.5);
-                    const force = (dist - dynamicDist) * 0.02 * alpha;
-                    const fx = (dx / dist) * force;
-                    const fy = (dy / dist) * force;
-                    l.source.vx += fx;
-                    l.source.vy += fy;
-                    l.target.vx -= fx;
-                    l.target.vy -= fy;
-                }
-
-                // Repulsion through a uniform spatial hash over the repulsion
-                // radius.  The previous "bounded local" pass advanced by
-                // `max(1, N/200)` and scanned only [i+1, i+16): at 7,125 nodes
-                // that left 54.2% of nodes (3,861 of 7,125 measured) with no
-                // repulsion applied at any point, so they were dragged onto
-                // their neighbours by link attraction with nothing pushing back.
-                // Bucketing by position makes every pair inside the radius
-                // participate and stays linear in node count.
-                repulsionGrid.clear();
-                for (let i = 0; i < simNodes.length; i++) {
-                    const node = simNodes[i];
-                    const key = (Math.floor(node.x / cellSize) + 4096) * 8192 +
-                                (Math.floor(node.y / cellSize) + 4096);
-                    const bucket = repulsionGrid.get(key);
-                    if (bucket) bucket.push(i);
-                    else repulsionGrid.set(key, [i]);
-                }
-
-                const applyRepulsion = (i1, i2) => {
-                    const n1 = simNodes[i1];
-                    const n2 = simNodes[i2];
-                    const dx = n2.x - n1.x;
-                    const dy = n2.y - n1.y;
-                    const distSq = dx * dx + dy * dy;
-                    if (distSq >= radiusSq || distSq <= 0.01) return;
-                    const dist = Math.sqrt(distSq);
-                    const repForce = (REPULSION_RADIUS - dist) * 0.012 * alpha;
-                    const rx = (dx / dist) * repForce;
-                    const ry = (dy / dist) * repForce;
-                    n1.vx -= rx;
-                    n1.vy -= ry;
-                    n2.vx += rx;
-                    n2.vy += ry;
-                };
-
-                repulsionGrid.forEach((bucket, key) => {
-                    const gx = Math.floor(key / 8192) - 4096;
-                    const gy = (key % 8192) - 4096;
-                    for (let a = 0; a < bucket.length; a++) {
-                        for (let b = a + 1; b < bucket.length; b++) {
-                            applyRepulsion(bucket[a], bucket[b]);
-                        }
-                    }
-                    for (let o = 0; o < neighbourOffsets.length; o++) {
-                        const other = repulsionGrid.get(
-                            (gx + neighbourOffsets[o][0] + 4096) * 8192 +
-                            (gy + neighbourOffsets[o][1] + 4096)
-                        );
-                        if (!other) continue;
-                        for (let a = 0; a < bucket.length; a++) {
-                            for (let b = 0; b < other.length; b++) {
-                                applyRepulsion(bucket[a], other[b]);
-                            }
-                        }
-                    }
-                });
-
-                // Movement & Damping
-                for (let i = 0; i < simNodes.length; i++) {
-                    const n = simNodes[i];
-                    // Center gravity
-                    n.vx -= n.x * 0.0006 * alpha;
-                    n.vy -= n.y * 0.0006 * alpha;
-
-                    // Update pos
-                    n.x += n.vx;
-                    n.y += n.vy;
-                    n.vx *= 0.85; // damping
-                    n.vy *= 0.85;
-                }
-
-                simAlpha = simAlpha * SIM_ALPHA_DECAY;
-                if (simAlpha <= SIM_ALPHA_MIN) {
-                    simAlpha = SIM_ALPHA_MIN;
-                    isSimulating = false;
-                    break;
-                }
-            }
-        }
-
-        function getNodeColor(n) {
-            if (currentGraphKey === 'claim') {
-                return CLAIM_STATE_COLORS[n.validity_state] || CLAIM_STATE_COLORS.unknown;
-            }
-            if (currentColorMode === 'community') {
-                if (!n.community) return COMMUNITY_UNASSIGNED_COLOR;
-                return COMMUNITY_COLORS[communityColorIndex(n.community)];
-            }
-            return PALETTE[n.raw_type] || PALETTE.Unknown;
-        }
-
-        function isRiskyNode(n) {
-            // The page graph carries no reliability score any more (every node
-            // reports alignment_score 100), so risk is status-driven; the claim
-            // graph carries no status, so it is validity-driven.  The previous
-            // single expression compared a capitalised status against a
-            // lowercase literal and tested alignment on claim nodes that have
-            // no such field, so the filter could never match anything.
-            if (currentGraphKey === 'claim') {
-                const state = String(n.validity_state || '').toLowerCase();
-                return ['conflicted', 'expired', 'unsupported'].includes(state);
-            }
-            const status = String(n.status || '').toLowerCase();
-            if (status === 'contested' || status === 'deprecated') return true;
-            return typeof n.alignment_score === 'number' && n.alignment_score < 80;
-        }
-
-        function isNodeVisible(n) {
-            if (currentColorMode === 'community' && activeCommunities.size > 0) {
-                const cid = n.community || 'unassigned';
-                if (!activeCommunities.has(cid)) return false;
-            } else {
-                const type = n.raw_type || n.group || 'Unknown';
-                if (!activeTypes.has(type)) return false;
-            }
-            if (onlyRisk && !isRiskyNode(n)) return false;
-            if (onlyOrphans && (n.backbone_degree || 0) > 0) return false;
-            return true;
-        }
-
-        function render2D() {
-            ctx.clearRect(0, 0, width, height);
-
-            if (!physicsPaused && isSimulating) {
-                stepSimulation(1);
-            }
-
-            const focus = hoverNode || selectedNode;
-
-            // ==========================================
-            // Pass 1: Draw Links
-            // ==========================================
-            for (let i = 0; i < simLinks.length; i++) {
-                const l = simLinks[i];
-                if (!isNodeVisible(l.source) || !isNodeVisible(l.target)) continue;
-
-                const isConnected = focus && (l.source.id === focus.id || l.target.id === focus.id);
-                if (focusMode && focus && !isConnected) continue;
-
-                const p1 = worldToScreen(l.source.x, l.source.y);
-                const p2 = worldToScreen(l.target.x, l.target.y);
-
-                ctx.beginPath();
-                ctx.moveTo(p1.x, p1.y);
-                ctx.lineTo(p2.x, p2.y);
-
-                if (isConnected) {
-                    ctx.strokeStyle = '#38BDF8';
-                    ctx.lineWidth = 1.8 * camera.zoom;
-                    ctx.globalAlpha = 0.95;
-                } else if (focus) {
-                    // 聚焦时背景非关联边大幅消退，避免视觉干扰
-                    ctx.strokeStyle = '#1E293B';
-                    ctx.lineWidth = 0.5 * camera.zoom;
-                    ctx.globalAlpha = 0.05;
-                } else {
-                    ctx.strokeStyle = '#475569';
-                    ctx.lineWidth = Math.min(2.5, 0.7 + (l.weight / 15)) * Math.max(0.4, camera.zoom);
-                    ctx.globalAlpha = 0.22;
-                }
-                ctx.stroke();
-            }
-
-            // ==========================================
-            // Pass 2: Draw Nodes
-            // ==========================================
-            // 计算当前焦点的重要邻居 Top-K（常驻标签至多 8 个，其余 Hover 显示）
-            const topNeighborIds = new Set();
-            if (focus && neighborsMap[focus.id]) {
-                const neighborArr = Array.from(neighborsMap[focus.id]);
-                if (neighborArr.length <= 8) {
-                    neighborArr.forEach(id => topNeighborIds.add(id));
-                } else {
-                    const sorted = neighborArr
-                        .map(id => simNodes.find(n => n.id === id))
-                        .filter(Boolean)
-                        .sort((a, b) => (b.backbone_degree || 0) - (a.backbone_degree || 0));
-                    sorted.slice(0, 8).forEach(n => topNeighborIds.add(n.id));
-                }
-            }
-
-            const labelsToDraw = [];
-
-            for (let i = 0; i < simNodes.length; i++) {
-                const n = simNodes[i];
-                if (!isNodeVisible(n)) continue;
-
-                const isTarget = focus && focus.id === n.id;
-                const isNeighbor = focus && neighborsMap[focus.id] && neighborsMap[focus.id].has(n.id);
-                if (focusMode && focus && !isTarget && !isNeighbor) continue;
-
-                const pt = worldToScreen(n.x, n.y);
-                const r = Math.max(2, n.radius * camera.zoom);
-                const color = getNodeColor(n);
-
-                // Alpha modulation: 背景节点微弱星尘化，聚焦核心星座化
-                if (focus && !isTarget && !isNeighbor) {
-                    ctx.globalAlpha = 0.14;
-                } else {
-                    ctx.globalAlpha = 1.0;
-                }
-
-                // Outer Halo for active target
-                if (isTarget) {
-                    ctx.beginPath();
-                    ctx.arc(pt.x, pt.y, r + 7, 0, Math.PI * 2);
-                    ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
-                    ctx.fill();
-                    ctx.beginPath();
-                    ctx.arc(pt.x, pt.y, r + 3, 0, Math.PI * 2);
-                    ctx.fillStyle = 'rgba(56, 189, 248, 0.45)';
-                    ctx.fill();
-                } else if (isNeighbor) {
-                    ctx.beginPath();
-                    ctx.arc(pt.x, pt.y, r + 2.5, 0, Math.PI * 2);
-                    ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
-                    ctx.fill();
-                }
-
-                // Core Node
-                ctx.beginPath();
-                ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
-                ctx.fillStyle = color;
-                ctx.fill();
-                ctx.strokeStyle = '#0B0F17';
-                ctx.lineWidth = Math.max(1, 1.5 * Math.min(1.5, camera.zoom));
-                ctx.stroke();
-
-                // 判断是否应该收集标签
-                let shouldShowLabel = false;
-                const isHoveredDirectly = hoverNode && hoverNode.id === n.id;
-
-                if (isTarget) {
-                    shouldShowLabel = true;
-                } else if (isHoveredDirectly) {
-                    shouldShowLabel = true;
-                } else if (isNeighbor && topNeighborIds.has(n.id)) {
-                    shouldShowLabel = true;
-                } else if (!focus) {
-                    shouldShowLabel = (camera.zoom > 1.6 && n.backbone_degree >= 6) ||
-                                      (camera.zoom > 3.0 && n.backbone_degree >= 2) ||
-                                      (camera.zoom > 5.0);
-                }
-
-                if (shouldShowLabel && ctx.globalAlpha > 0.05) {
-                    labelsToDraw.push({
-                        node: n,
-                        pt,
-                        r,
-                        isTarget,
-                        isNeighbor,
-                        isHoveredDirectly,
-                        color
-                    });
-                }
-            }
-
-            // ==========================================
-            // Pass 3: Draw Labels (Layered on top of all nodes)
-            // ==========================================
-            ctx.globalAlpha = 1.0;
-            for (let i = 0; i < labelsToDraw.length; i++) {
-                const item = labelsToDraw[i];
-                const n = item.node;
-                const pt = item.pt;
-                const r = item.r;
-                const isTarget = item.isTarget;
-
-                const rawText = n.name || n.id;
-                const maxLen = isTarget ? 24 : 14;
-                const text = truncateLabel(rawText, maxLen);
-
-                ctx.save();
-                const baseFontSize = isTarget ? 13 : Math.max(10, Math.min(12, 11 * Math.sqrt(camera.zoom)));
-                ctx.font = `${isTarget ? '600' : '500'} ${baseFontSize}px var(--font-sans)`;
-                ctx.lineJoin = 'round';
-                ctx.lineWidth = 3.5;
-                ctx.strokeStyle = 'rgba(11, 15, 23, 0.94)'; // 强对比暗色微晕，切断与背景连线的粘连
-
-                let textX, textY;
-                if (isTarget) {
-                    ctx.textAlign = 'center';
-                    textX = pt.x;
-                    textY = pt.y + r + baseFontSize + 2;
-                } else if (focus) {
-                    // 径向自适应：根据相对 focus 向量决定左右展开
-                    const dx = n.x - focus.x;
-                    const dy = n.y - focus.y;
-                    if (dx < -6) {
-                        ctx.textAlign = 'right';
-                        textX = pt.x - r - 5;
-                        textY = pt.y + 4;
-                    } else if (dx > 6) {
-                        ctx.textAlign = 'left';
-                        textX = pt.x + r + 5;
-                        textY = pt.y + 4;
-                    } else {
-                        ctx.textAlign = 'center';
-                        textX = pt.x;
-                        textY = dy >= 0 ? (pt.y + r + baseFontSize + 2) : (pt.y - r - 4);
-                    }
-                } else {
-                    ctx.textAlign = 'left';
-                    textX = pt.x + r + 5;
-                    textY = pt.y + 4;
-                }
-
-                ctx.strokeText(text, textX, textY);
-                ctx.fillStyle = isTarget ? '#38BDF8' : (item.isHoveredDirectly ? '#38BDF8' : '#F1F5F9');
-                ctx.fillText(text, textX, textY);
-                ctx.restore();
-            }
-
-            ctx.globalAlpha = 1.0;
-
-            if (!physicsPaused && isSimulating) {
-                animFrameId = requestAnimationFrame(render2D);
-            } else {
-                animFrameId = null;
-            }
-        }
-
-        function requestRender() {
-            if (currentDimension === '2d') {
-                cancelAnimationFrame(animFrameId);
-                animFrameId = requestAnimationFrame(render2D);
-            }
-        }
-
-        // ==========================================
-        // 2D Canvas Interactions (Pan, Zoom, Pick)
-        // ==========================================
-        canvas.addEventListener('mousedown', (e) => {
-            if (cameraAnimId) { cancelAnimationFrame(cameraAnimId); cameraAnimId = null; }
-            isDragging = true;
-            hasMoved = false;
-            dragStart = { x: e.clientX, y: e.clientY };
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (isDragging) {
-                const dx = e.clientX - dragStart.x;
-                const dy = e.clientY - dragStart.y;
-                if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
-                camera.x -= dx / camera.zoom;
-                camera.y -= dy / camera.zoom;
-                dragStart = { x: e.clientX, y: e.clientY };
-                requestRender();
-            } else {
-                // Hover detection
-                const rect = canvas.getBoundingClientRect();
-                const mouseWorld = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-                let hit = null;
-                for (let i = simNodes.length - 1; i >= 0; i--) {
-                    const n = simNodes[i];
-                    if (!isNodeVisible(n)) continue;
-                    const dx = n.x - mouseWorld.x;
-                    const dy = n.y - mouseWorld.y;
-                    if (dx * dx + dy * dy <= (n.radius + 4) * (n.radius + 4)) {
-                        hit = n;
-                        break;
-                    }
-                }
-                if (hit !== hoverNode) {
-                    hoverNode = hit;
-                    canvas.style.cursor = hit ? 'pointer' : 'default';
-                    requestRender();
-                }
-            }
-        });
-
-        window.addEventListener('mouseup', (e) => {
-            if (!hasMoved && isDragging) {
-                // Click
-                if (hoverNode) {
-                    selectNode(hoverNode.id);
-                } else {
-                    closeInspector();
-                }
-            }
-            isDragging = false;
-        });
-
-        canvas.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const mouseY = e.clientY - rect.top;
-            const worldBefore = screenToWorld(mouseX, mouseY);
-
-            const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
-            camera.zoom = Math.max(0.15, Math.min(8.0, camera.zoom * zoomFactor));
-
-            const worldAfter = screenToWorld(mouseX, mouseY);
-            camera.x += worldBefore.x - worldAfter.x;
-            camera.y += worldBefore.y - worldAfter.y;
-
-            requestRender();
-        }, { passive: false });
-
-        // ==========================================
-        // 3D WebGL Engine Integration & Fallback
-        // ==========================================
-        let Graph3DInstance = null;
-
-        function init3DGraph() {
-            if (window.__FORCE_GRAPH_OFFLINE__ || typeof ForceGraph3D === 'undefined') {
-                showToast("3D 引擎未加载，已自动切换至原生 2D Canvas 模式");
-                switchDimension('2d');
-                return;
-            }
-
-            const elem = document.getElementById('3d-graph');
-            elem.innerHTML = '';
-            Graph3DInstance = ForceGraph3D()(elem)
-                .backgroundColor('#0B0F17')
-                .showNavInfo(false)
-                .nodeColor(getNodeColor)
-                .nodeRelSize(4.5)
-                .nodeVal(n => Math.max(1, Math.sqrt(n.backbone_degree || 1)))
-                .linkColor(() => 'rgba(56, 189, 248, 0.2)')
-                .linkWidth(l => Math.min(2, 0.5 + (l.weight || 1) / 10))
-                .onNodeClick(node => selectNode(node.id));
-
-            const srcGraph = graphs[currentGraphKey];
-            Graph3DInstance.graphData({
-                nodes: srcGraph.nodes.map(n => ({ ...n })),
-                links: srcGraph.edges.map(e => ({ ...e }))
-            });
-        }
-
-        function switchDimension(dim) {
-            currentDimension = dim;
-            document.getElementById('engine-badge').textContent = dim === '2d' ? '2D CANVAS' : '3D WEBGL';
-            document.getElementById('btn-dimension').querySelector('b').textContent = dim.toUpperCase();
-
-            if (dim === '2d') {
-                document.getElementById('canvas-2d').style.display = 'block';
-                document.getElementById('3d-graph').style.display = 'none';
-                requestRender();
-            } else {
-                document.getElementById('canvas-2d').style.display = 'none';
-                document.getElementById('3d-graph').style.display = 'block';
-                if (!Graph3DInstance) init3DGraph();
-            }
-        }
-
-        // ==========================================
-        // UI Navigation & Telemetry
-        // ==========================================
-        function updateTelemetry() {
-            const g = graphs[currentGraphKey];
-            document.getElementById('stat-nodes').textContent = g.nodes.length.toLocaleString();
-            document.getElementById('stat-edges').textContent = g.edges.length.toLocaleString();
-            const commSet = new Set(g.nodes.map(n => n.community).filter(Boolean));
-            document.getElementById('stat-communities').textContent = commSet.size || '-';
-
-            const riskCount = g.nodes.filter(isRiskyNode).length;
-            const orphanCount = g.nodes.filter(n => (n.backbone_degree || 0) === 0).length;
-            document.getElementById('count-risk').textContent = riskCount;
-            document.getElementById('count-orphans').textContent = orphanCount;
-        }
-
-        function renderFilterPanel() {
-            const heading = document.getElementById('filter-block-heading');
-            const container = document.getElementById('type-filter-list');
-            container.innerHTML = '';
-            const g = graphs[currentGraphKey];
-
-            if (currentColorMode === 'community') {
-                if (heading) heading.textContent = '社区聚类过滤 (Top 社群)';
-                const commCounts = {};
-                g.nodes.forEach(n => {
-                    const cid = n.community || 'unassigned';
-                    commCounts[cid] = (commCounts[cid] || 0) + 1;
-                });
-
-                const sortedCids = Object.keys(commCounts).sort((a, b) => commCounts[b] - commCounts[a]);
-                const topCids = sortedCids.slice(0, 15);
-                const commLabels = (rawData.pageGraph && rawData.pageGraph.community_labels) || {};
-
-                topCids.forEach(cid => {
-                    const row = document.createElement('label');
-                    row.className = 'filter-item';
-                    const color = cid === 'unassigned' ? COMMUNITY_UNASSIGNED_COLOR : COMMUNITY_COLORS[communityColorIndex(cid)];
-                    const checked = activeCommunities.has(cid) ? 'checked' : '';
-                    let labelText = cid === 'unassigned' ? '未分配社群' : (commLabels[cid] || `社群 #${cid}`);
-                    if (labelText.length > 18) labelText = labelText.substring(0, 18) + '...';
-
-                    row.innerHTML = `
-                        <span class="filter-label-group" title="${commLabels[cid] || cid}">
-                            <input type="checkbox" value="${cid}" ${checked}>
-                            <span class="color-dot" style="background: ${color}"></span>
-                            <span>${labelText}</span>
-                        </span>
-                        <span class="filter-count">${commCounts[cid]}</span>
-                    `;
-                    row.querySelector('input').addEventListener('change', (e) => {
-                        if (e.target.checked) activeCommunities.add(cid);
-                        else activeCommunities.delete(cid);
-                        reheatSimulation();
-                    });
-                    container.appendChild(row);
-                });
-
-                if (sortedCids.length > 15) {
-                    const otherCount = sortedCids.slice(15).reduce((sum, c) => sum + commCounts[c], 0);
-                    const tip = document.createElement('div');
-                    tip.style.fontSize = '0.75rem';
-                    tip.style.color = 'var(--text-muted)';
-                    tip.style.padding = '4px 6px';
-                    tip.textContent = `其余 ${sortedCids.length - 15} 个细分社群包含 ${otherCount} 个节点`;
-                    container.appendChild(tip);
-                }
-            } else {
-                if (heading) heading.textContent = '本体类型过滤';
-                const typeCounts = {};
-                g.nodes.forEach(n => {
-                    const t = n.raw_type || n.group || 'Unknown';
-                    typeCounts[t] = (typeCounts[t] || 0) + 1;
-                });
-
-                Object.keys(typeCounts).sort().forEach(type => {
-                    const row = document.createElement('label');
-                    row.className = 'filter-item';
-                    const color = PALETTE[type] || PALETTE.Unknown;
-                    const checked = activeTypes.has(type) ? 'checked' : '';
-                    row.innerHTML = `
-                        <span class="filter-label-group">
-                            <input type="checkbox" value="${type}" ${checked}>
-                            <span class="color-dot" style="background: ${color}"></span>
-                            <span>${type}</span>
-                        </span>
-                        <span class="filter-count">${typeCounts[type]}</span>
-                    `;
-                    row.querySelector('input').addEventListener('change', (e) => {
-                        if (e.target.checked) activeTypes.add(type);
-                        else activeTypes.delete(type);
-                        reheatSimulation();
-                    });
-                    container.appendChild(row);
-                });
-            }
-        }
-
-        function toggleAllFilters() {
-            const g = graphs[currentGraphKey];
-            if (currentColorMode === 'community') {
-                const allComms = Array.from(new Set(g.nodes.map(n => n.community || 'unassigned')));
-                if (activeCommunities.size === allComms.length) {
-                    activeCommunities.clear();
-                } else {
-                    allComms.forEach(c => activeCommunities.add(c));
-                }
-            } else {
-                const allTypes = Array.from(new Set(g.nodes.map(n => n.raw_type || n.group || 'Unknown')));
-                if (activeTypes.size === allTypes.length) {
-                    activeTypes.clear();
-                } else {
-                    allTypes.forEach(t => activeTypes.add(t));
-                }
-            }
-            renderFilterPanel();
-            reheatSimulation();
-        }
-
-        function renderTypeFilters() {
-            renderFilterPanel();
-        }
-
-        function toggleAllTypes() {
-            toggleAllFilters();
-        }
-
-        function applyFilters() {
-            onlyRisk = document.getElementById('chk-only-risk').checked;
-            onlyOrphans = document.getElementById('chk-only-orphans').checked;
-            reheatSimulation();
-        }
-
-        // ==========================================
-        // Omni-Search & High-Precision Relevance Ranking
-        // ==========================================
-        const searchInput = document.getElementById('search-input');
-        const searchResults = document.getElementById('search-results');
-        let currentSearchMatches = [];
-        let selectedSearchIndex = -1;
-
-        function renderSearchResults() {
-            if (!currentSearchMatches.length) {
-                searchResults.innerHTML = '<div style="padding:10px 14px; font-size:0.8rem; color:var(--text-muted);">未找到匹配的实体或断言</div>';
-                searchResults.style.display = 'block';
-                return;
-            }
-            searchResults.innerHTML = '';
-            currentSearchMatches.forEach((m, idx) => {
-                const item = document.createElement('div');
-                item.className = 'search-result-item' + (idx === selectedSearchIndex ? ' selected' : '');
-                item.innerHTML = `
-                    <span class="search-result-title">${escapeHTML(m.name || m.id)}</span>
-                    <span class="search-result-meta">${escapeHTML(m.raw_type || m.group || '')} · 关联 ${m.backbone_degree || m.degree || 0}</span>
-                `;
-                item.onclick = () => {
-                    executeSearchSelect(idx);
-                };
-                searchResults.appendChild(item);
-            });
-            searchResults.style.display = 'block';
-        }
-
-        function executeSearchSelect(index) {
-            if (index < 0 || index >= currentSearchMatches.length) return;
-            const target = currentSearchMatches[index];
-            searchResults.style.display = 'none';
-            searchInput.value = target.name || target.id;
-            selectNode(target.id);
-        }
-
-        searchInput.addEventListener('input', (e) => {
-            const rawQ = e.target.value.trim().toLowerCase();
-            selectedSearchIndex = 0;
-            if (!rawQ) {
-                currentSearchMatches = [];
-                searchResults.style.display = 'none';
-                return;
-            }
-            // Normalize punctuation and whitespace
-            const normQ = rawQ.replace(/[-_\s]+/g, ' ');
-            const tokens = normQ.split(' ').filter(Boolean);
-            const nodes = graphs[currentGraphKey].nodes;
-
-            const scoredList = [];
-            for (let i = 0; i < nodes.length; i++) {
-                const n = nodes[i];
-                const rawName = (n.name || '').toLowerCase();
-                const rawId = (n.id || '').toLowerCase();
-                const normName = rawName.replace(/[-_\s]+/g, ' ');
-                const normId = rawId.replace(/[-_\s]+/g, ' ');
-                const summary = (n.summary || '').toLowerCase();
-
-                let score = 0;
-
-                // 1. Exact Match (Tier 1: 10000)
-                if (normName === normQ || normId === normQ || rawName === rawQ || rawId === rawQ) {
-                    score += 10000;
-                } else if (rawId.endsWith('_' + rawQ) || rawId.endsWith('-' + rawQ)) {
-                    score += 8000;
-                }
-                // 2. Prefix Match (Tier 2: 3000 ~ 5000)
-                else if (normName.startsWith(normQ)) {
-                    score += 5000;
-                } else if (normId.startsWith(normQ)) {
-                    score += 3000;
-                }
-                // 3. Substring / Phrase Match (Tier 3: 1000 ~ 2000)
-                else if (normName.includes(normQ)) {
-                    score += 2000;
-                } else if (normId.includes(normQ)) {
-                    score += 1000;
-                }
-
-                // 4. Token Coverage (Tier 4)
-                let matchedTokens = 0;
-                for (let t = 0; t < tokens.length; t++) {
-                    const tok = tokens[t];
-                    if (normName.includes(tok)) {
-                        score += 500;
-                        matchedTokens++;
-                    } else if (normId.includes(tok)) {
-                        score += 300;
-                        matchedTokens++;
-                    } else if (summary.includes(tok)) {
-                        score += 40;
-                        matchedTokens++;
-                    }
-                }
-
-                // Node degree boost (Tier 5: break ties with topology salience)
-                if (matchedTokens === tokens.length || score >= 1000) {
-                    const deg = n.backbone_degree || n.degree || 0;
-                    score += Math.min(150, deg * 3);
-                    scoredList.push({ node: n, score });
-                }
-            }
-
-            scoredList.sort((a, b) => b.score - a.score);
-            currentSearchMatches = scoredList.slice(0, 15).map(item => item.node);
-            renderSearchResults();
-        });
-
-        searchInput.addEventListener('keydown', (e) => {
-            if (!currentSearchMatches.length || searchResults.style.display === 'none') {
-                if (e.key === 'Enter') {
-                    searchInput.dispatchEvent(new Event('input'));
-                }
-                return;
-            }
-            if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                selectedSearchIndex = (selectedSearchIndex + 1) % currentSearchMatches.length;
-                renderSearchResults();
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                selectedSearchIndex = (selectedSearchIndex - 1 + currentSearchMatches.length) % currentSearchMatches.length;
-                renderSearchResults();
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                executeSearchSelect(selectedSearchIndex >= 0 ? selectedSearchIndex : 0);
-            } else if (e.key === 'Escape') {
-                searchResults.style.display = 'none';
-            }
-        });
-
-        function formatKnowledgeSummary(rawText) {
-            if (!rawText) return '<span style="color:var(--text-muted);">暂无详细摘要描述。</span>';
-
-            // 基础防 XSS 转义
-            let safe = rawText
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;');
-
-            // 1. 清洗内部系统指令提示词噪音: *[System Directive: ...]* 或 [System Directive: ...]
-            safe = safe.replace(/\*?\[System Directive:[^\]]*\]\*?/gi, '');
-
-            // 2. 规整出处引用: (Source: [[target|alias]]) 或 Source: [[target]]
-            safe = safe.replace(/\(?\s*Source:\s*\[\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)(?:\|([^\]]+))?\]\]\s*\)?/gi, (match, targetId, alias) => {
-                const display = alias || targetId.replace(/^[A-Za-z]+_/, '');
-                return `<span class="summary-source-badge" onclick="selectNode('${targetId}')" title="跳转证据源: ${targetId}">📄 出处: ${display}</span>`;
-            });
-            // 清理多余孤立空括号
-            safe = safe.replace(/\(\s*\)/g, '');
-
-            // 3. 智能在 Markdown 标题符号 (#) 与列表项 (-) 前断行（支持同一行中压缩的标题与项目）
-            safe = safe.replace(/([^\n])\s*(#{1,4}\s+)/g, '$1\n\n$2');
-            safe = safe.replace(/([^\n])\s+-\s+/g, '$1\n\n- ');
-
-            // 4. 识别 Markdown 标题并渲染为结构化块级标题
-            safe = safe.replace(/^#{1,4}\s+([^\n]+)$/gm, (match, titleText) => {
-                return `<div class="summary-heading"><span class="summary-heading-bullet"></span>${titleText.trim()}</div>`;
-            });
-
-            // 5. 带谓词的双链三元组: [predicate::[[target|alias]]] 或 [predicate::[[target]]]
-            safe = safe.replace(/\[([a-zA-Z0-9_\-]+)::\[\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)(?:\|([^\]]+))?\]\]\]/g, (match, pred, targetId, alias) => {
-                const display = alias || targetId.replace(/^[A-Za-z]+_/, '');
-                return `<span class="summary-predicate">${pred}</span><span class="summary-wikilink" onclick="selectNode('${targetId}')" title="跳转实体: ${targetId}">🔗 ${display}</span>`;
-            });
-
-            // 6. 常规双链: [[target|alias]] 或 [[target]]
-            safe = safe.replace(/\[\[([a-zA-Z0-9_\-\u4e00-\u9fa5]+)(?:\|([^\]]+))?\]\]/g, (match, targetId, alias) => {
-                const display = alias || targetId.replace(/^[A-Za-z]+_/, '');
-                return `<span class="summary-wikilink" onclick="selectNode('${targetId}')" title="跳转实体: ${targetId}">🔗 ${display}</span>`;
-            });
-
-            // 7. 裸属性谓词: [predicate::value]
-            safe = safe.replace(/\[([a-zA-Z0-9_\-]+)::([^\]]+)\]/g, '<span class="summary-predicate">$1</span><span style="color:#94A3B8;">$2</span>');
-
-            // 8. 粗体 **text**
-            safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong style="color:var(--text-primary);">$1</strong>');
-
-            // 9. 列表项 - item 或 * item
-            safe = safe.replace(/^[ \t]*[-*]\s+(.+)$/gm, '<div class="summary-list-item">$1</div>');
-
-            // 10. 规范化段落换行与行距
-            safe = safe.replace(/\n\n+/g, '<div style="height:6px;"></div>').replace(/\n/g, '<br>');
-
-            return safe;
-        }
-
-        let cameraAnimId = null;
-        function flyTo2D(targetX, targetY, targetZoom = null, duration = 480) {
-            if (cameraAnimId) { cancelAnimationFrame(cameraAnimId); cameraAnimId = null; }
-            const startX = camera.x;
-            const startY = camera.y;
-            const startZoom = camera.zoom;
-            const endZoom = targetZoom !== null ? targetZoom : Math.max(camera.zoom, 1.4);
-            const startTime = performance.now();
-
-            function easeInOutCubic(t) {
-                return t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1;
-            }
-
-            function step(now) {
-                const elapsed = now - startTime;
-                const progress = Math.min(1, elapsed / duration);
-                const ease = easeInOutCubic(progress);
-
-                camera.x = startX + (targetX - startX) * ease;
-                camera.y = startY + (targetY - startY) * ease;
-                camera.zoom = startZoom + (endZoom - startZoom) * ease;
-
-                requestRender();
-
-                if (progress < 1) {
-                    cameraAnimId = requestAnimationFrame(step);
-                } else {
-                    cameraAnimId = null;
-                }
-            }
-            cameraAnimId = requestAnimationFrame(step);
-        }
-
-        // ==========================================
-        // Knowledge Inspector Details & Governance
-        // ==========================================
-        function selectNode(nodeId) {
-            const g = graphs[currentGraphKey];
-            const node = g.nodes.find(n => n.id === nodeId);
-            if (!node) return;
-
-            selectedNode = node;
-            const inspector = document.getElementById('left-inspector');
-            inspector.classList.add('visible');
-
-            // Pan camera smoothly to center on target in 2D
-            if (currentDimension === '2d') {
-                const targetSimNode = simNodes.find(n => n.id === nodeId);
-                if (targetSimNode) {
-                    const targetZ = camera.zoom < 1.2 ? 1.5 : camera.zoom;
-                    flyTo2D(targetSimNode.x, targetSimNode.y, targetZ, 450);
-                }
-            } else if (Graph3DInstance) {
-                Graph3DInstance.cameraPosition(
-                    { x: node.x * 1.5, y: node.y * 1.5, z: 200 },
-                    node,
-                    1500
-                );
-            }
-
-            // Populate Metadata
-            const nodeHref = `${memoryBasePath}wiki/${node.id}.md`;
-            const titleLink = document.getElementById('inspect-title-link');
-            if (titleLink) {
-                titleLink.href = nodeHref;
-                titleLink.setAttribute('title', `在新的标签页直接打开该 Markdown 文件\n${nodeHref}`);
-            }
-            document.getElementById('inspect-title').textContent = node.name || node.id;
-            document.getElementById('inspect-deg').textContent = node.degree || 0;
-            document.getElementById('inspect-backbone-deg').textContent = node.backbone_degree || 0;
-            document.getElementById('inspect-score').textContent = node.alignment_score ? `${node.alignment_score}%` : '100%';
-            document.getElementById('inspect-summary').innerHTML = formatKnowledgeSummary(node.summary);
-
-            // Tags
-            const tagsBox = document.getElementById('inspect-tags');
-            tagsBox.innerHTML = `
-                <span class="inspector-tag" style="color: ${getNodeColor(node)}; border-color: ${getNodeColor(node)}40;">
-                    ${node.raw_type || node.group || '实体'}
-                </span>
-            `;
-            if (node.validity_state) {
-                tagsBox.innerHTML += `<span class="inspector-tag">${node.validity_state}</span>`;
-            }
-            if (node.community) {
-                const commLabels = (graphs[currentGraphKey] && graphs[currentGraphKey].community_labels) || rawData.community_labels || {};
-                const commText = commLabels[node.community] || `社区 #${node.community}`;
-                tagsBox.innerHTML += `<span class="inspector-tag" title="社群 ID: ${node.community}">🌐 ${commText}</span>`;
-            }
-
-            // Semantic / Backbone Links Chips
-            const linksBox = document.getElementById('inspect-links');
-            linksBox.innerHTML = '';
-            // 优先获取真实骨干拓扑中的所有邻居节点，并合并语义链接
-            const backboneNeighbors = neighborsMap[node.id] ? Array.from(neighborsMap[node.id]) : [];
-            const semanticLinks = node.semantic_links || [];
-            const mergedLinks = Array.from(new Set([...backboneNeighbors, ...semanticLinks]));
-
-            document.getElementById('inspect-links-count').textContent = mergedLinks.length;
-            mergedLinks.slice(0, 50).forEach(targetId => {
-                const chip = document.createElement('span');
-                chip.className = 'link-chip';
-                const parts = targetId.split('_');
-                const prefix = parts.length > 1 ? parts[0] : 'Node';
-                const rest = parts.length > 1 ? parts.slice(1).join('_') : targetId;
-
-                const ontologyColor = PALETTE[prefix] || '#38BDF8';
-                chip.style.borderColor = `${ontologyColor}35`;
-                chip.style.backgroundColor = `${ontologyColor}10`;
-
-                chip.innerHTML = `<span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:${ontologyColor}; margin-right:5px; vertical-align:middle; flex-shrink:0;"></span><span style="color:${ontologyColor}; font-weight:600; font-size:0.68rem; margin-right:4px;">${prefix}:</span><span style="color:#F1F5F9; word-break:break-all;">${rest}</span>`;
-                chip.title = `点击跳转并聚焦: ${targetId} (${prefix})`;
-                chip.onclick = () => selectNode(targetId);
-                linksBox.appendChild(chip);
-            });
-            if (!mergedLinks.length) linksBox.innerHTML = '<span style="font-size:0.75rem; color:var(--text-muted);">无直接骨干关联</span>';
-
-            // Sources
-            const sourcesBox = document.getElementById('inspect-sources');
-            sourcesBox.innerHTML = '';
-            const sources = node.sources || [];
-            document.getElementById('inspect-sources-count').textContent = sources.length;
-            sources.forEach(src => {
-                const chip = document.createElement('span');
-                chip.className = 'source-evidence-chip';
-                let cleanTitle = src.replace(/^raw\/[^\/]+\//, '').replace(/^raw\//, '').replace(/\.md$/i, '');
-                chip.innerHTML = `<span style="opacity:0.7; flex-shrink:0;">📄</span><span style="word-break:break-all;">${cleanTitle}</span>`;
-                chip.title = `点击在新标签页直接打开原始数据源:\n${src}`;
-                chip.onclick = (e) => {
-                    e.stopPropagation();
-                    const srcUrl = `${memoryBasePath}${src}`;
-                    window.open(srcUrl, '_blank');
-                    showToast(`已在新标签页打开数据源: ${cleanTitle}`);
-                };
-                sourcesBox.appendChild(chip);
-            });
-            if (!sources.length) sourcesBox.innerHTML = '<span style="font-size:0.75rem; color:var(--text-muted);">无关联原始数据源</span>';
-        }
-
-        function closeInspector() {
-            selectedNode = null;
-            document.getElementById('left-inspector').classList.remove('visible');
-            requestRender();
-        }
-
-        // ==========================================
-        // Governance Action Suite Handlers
-        // ==========================================
-        function actionFocusNeighbors() {
-            if (!selectedNode) return;
-            focusMode = true;
-            document.getElementById('btn-focus-mode').classList.add('active');
-            if (currentDimension === '2d') {
-                const targetSimNode = simNodes.find(n => n.id === selectedNode.id);
-                if (targetSimNode) {
-                    camera.x = targetSimNode.x;
-                    camera.y = targetSimNode.y;
-                    camera.zoom = Math.max(1.6, camera.zoom);
-                }
-                requestRender();
-                showToast(`已一键聚焦 [${selectedNode.name || selectedNode.id}] 的核心主干子图`);
-            }
-        }
-
-        function actionCopyQuery() {
-            if (!selectedNode) return;
-            const cmd = `vector-lake query "${selectedNode.name || selectedNode.id}"`;
-            navigator.clipboard.writeText(cmd).then(() => {
-                showToast(`已复制 CLI 指令: ${cmd}`);
-            });
-        }
-
-        function actionCopyTrace() {
-            if (!selectedNode) return;
-            const cmd = `vector-lake trace "${selectedNode.id}"`;
-            navigator.clipboard.writeText(cmd).then(() => {
-                showToast(`已复制溯源指令: ${cmd}`);
-            });
-        }
-
-        function actionPushGovernanceQueue() {
-            if (!selectedNode) return;
-            const item = {
-                title: `Review Topology Node: ${selectedNode.name || selectedNode.id}`,
-                node: selectedNode.id,
-                status: 'pending',
-                created_at: new Date().toISOString()
-            };
-            const jsonStr = JSON.stringify(item, null, 2);
-            navigator.clipboard.writeText(jsonStr).then(() => {
-                showToast("已将待办项 JSON 写入剪贴板，可粘贴至治理队列");
-            });
-        }
-
-        function actionOpenSourcePath() {
-            if (!selectedNode) return;
-            const rawPath = `${memoryBasePath}wiki/${selectedNode.id}.md`;
-            // Directly open in new browser tab
-            const win = window.open(rawPath, '_blank');
-            if (win) {
-                showToast(`已在新标签页打开: wiki/${selectedNode.id}.md`);
-            } else {
-                // If browser popup blocker triggered, copy path and show modal
-                const cleanPath = rawPath.replace('file:///', '');
-                navigator.clipboard.writeText(cleanPath);
-                showToast(`弹窗拦截，已复制文件路径: ${cleanPath}`);
-                document.getElementById('modal-content').textContent = cleanPath;
-                document.getElementById('modal-overlay').style.display = 'flex';
-            }
-        }
-
-        function closeModal() {
-            document.getElementById('modal-overlay').style.display = 'none';
-        }
-
-        function copyModalContent() {
-            const text = document.getElementById('modal-content').textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                showToast("文件路径已成功复制到剪贴板！");
-                closeModal();
-            });
-        }
-
-        function showToast(msg) {
-            const t = document.getElementById('toast');
-            t.textContent = msg;
-            t.style.display = 'block';
-            setTimeout(() => { t.style.display = 'none'; }, 2500);
-        }
-
-        function escapeHTML(str) {
-            if (!str) return '';
-            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        }
-
-        // ==========================================
-        // View Controller Buttons & Keyboard Binding
-        // ==========================================
-        document.getElementById('btn-dimension').onclick = () => {
-            switchDimension(currentDimension === '2d' ? '3d' : '2d');
-        };
-
-        document.getElementById('btn-view-mode').onclick = () => {
-            currentGraphKey = currentGraphKey === 'page' ? 'claim' : 'page';
-            document.getElementById('btn-view-mode').querySelector('b').textContent = currentGraphKey.toUpperCase();
-            init2DGraphData();
-            if (currentDimension === '3d') init3DGraph();
-            closeInspector();
-        };
-
-        document.getElementById('btn-focus-mode').onclick = (e) => {
-            focusMode = !focusMode;
-            e.target.classList.toggle('active', focusMode);
-            requestRender();
-        };
-
-        document.getElementById('btn-pause-physics').onclick = (e) => {
-            physicsPaused = !physicsPaused;
-            e.target.classList.toggle('active', physicsPaused);
-            if (!physicsPaused) requestRender();
-        };
-
-        document.getElementById('btn-reset-camera').onclick = () => {
-            camera.x = 0;
-            camera.y = 0;
-            camera.zoom = 1;
-            requestRender();
-        };
-
-        document.getElementById('btn-color-type').onclick = () => {
-            currentColorMode = 'type';
-            document.getElementById('btn-color-type').classList.add('active');
-            document.getElementById('btn-color-comm').classList.remove('active');
-            renderFilterPanel();
-            requestRender();
-        };
-
-        document.getElementById('btn-color-comm').onclick = () => {
-            if (!graphHasCommunities()) {
-                showToast("当前图谱暂无有效社区聚类数据，请先运行 community_clustering_daemon.py");
-                return;
-            }
-            currentColorMode = 'community';
-            document.getElementById('btn-color-comm').classList.add('active');
-            document.getElementById('btn-color-type').classList.remove('active');
-            renderFilterPanel();
-            requestRender();
-        };
-
-        // Hotkeys
-        window.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                closeInspector();
-                closeModal();
-                searchResults.style.display = 'none';
-            } else if (e.key === '/' && document.activeElement !== searchInput) {
-                e.preventDefault();
-                searchInput.focus();
-            } else if (e.key === ' ' && document.activeElement !== searchInput) {
-                e.preventDefault();
-                document.getElementById('btn-pause-physics').click();
-            }
-        });
-
-        // Initialize Engine
-        resizeCanvas();
-        init2DGraphData();
-    </script>
+        if (searchMatches[searchIndex] && !$('search-results').hidden) chooseNode(searchMatches[searchIndex].id);
+        else { clearTimeout(searchTimer); state.query = $('search-input').value; state.selected = null; state.group = null; state.page = 0; refresh(); state.tab = 'list'; closeSearch(); showTab(); }
+      }
+    });
+    document.addEventListener('click', event => { if (!event.target.closest('.search')) closeSearch(); });
+    document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) { event.preventDefault(); $('search-input').focus(); } });
+    for (const key of ['page', 'claim']) $( `view-${key}`).addEventListener('click', () => {
+      clearTimeout(searchTimer); state.key = key; state.groupQuery = ''; state.groupPage = 0; state.detailTab = 'overview'; $('group-search').value = '';
+      $('view-page').setAttribute('aria-pressed', String(key === 'page')); $('view-claim').setAttribute('aria-pressed', String(key === 'claim')); detailId = null; resetFilters();
+    });
+    for (const tab of ['browse', 'filters']) $(`nav-${tab}`).addEventListener('click', () => showNavigation(tab));
+    $('group-mode').addEventListener('change', event => { state.mode = event.target.value; state.group = null; state.selected = null; state.groupPage = 0; refresh(); });
+    $('group-search').addEventListener('input', event => { state.groupQuery = event.target.value; state.groupPage = 0; renderGroups(); });
+    $('more-groups').addEventListener('click', () => { state.groupPage++; renderGroups('next'); });
+    $('previous-groups').addEventListener('click', () => { state.groupPage--; renderGroups('previous'); });
+    $('label-density').addEventListener('change', event => { state.labelDensity = event.target.value; drawSoon(); });
+    $('toggle-types').addEventListener('click', () => { state.types.size === new Set(graph().nodes.map(typeOf)).size ? state.types.clear() : resetTypes(); state.page = 0; renderTypes(); refresh(); });
+    $('filter-attention').addEventListener('change', event => { state.attention = event.target.checked; state.page = 0; refresh(); });
+    $('filter-isolated').addEventListener('change', event => { state.isolated = event.target.checked; state.page = 0; refresh(); });
+    $('reset-filters').addEventListener('click', resetFilters); $('empty-reset').addEventListener('click', resetFilters);
+    $('node-limit').addEventListener('change', event => { state.limit = Number(event.target.value); refresh(); });
+    $('hop-count').addEventListener('change', event => { state.hops = Number(event.target.value); refresh(); });
+    $('fit-view').addEventListener('click', fit);
+    for (const tab of ['map', 'list']) $(`tab-${tab}`).addEventListener('click', () => { state.tab = tab; showTab(); resize(); });
+    $('toggle-navigation').addEventListener('click', () => { const open = $('navigation').classList.toggle('is-open'); $('toggle-navigation').setAttribute('aria-expanded', String(open)); });
+    $('toggle-3d').addEventListener('click', () => {
+      if (state.dimension === '3d') { state.dimension = '2d'; graph3d?.pauseAnimation(); $('pause-3d').hidden = true; $('toggle-3d').textContent = '三维预览（需联网）'; showTab(); resize(); }
+      else $('network-dialog').showModal();
+    });
+    $('confirm-network').addEventListener('click', enable3D);
+    $('cancel-network').addEventListener('click', () => { cancel3DRequest(); $('network-dialog').close(); });
+    $('network-dialog').addEventListener('cancel', cancel3DRequest);
+    $('network-dialog').addEventListener('close', () => { if (!$('network-dialog').open) cancel3DRequest(); });
+    $('pause-3d').addEventListener('click', () => { if (!graph3d) return; state.paused = !state.paused; state.paused ? graph3d.pauseAnimation() : graph3d.resumeAnimation(); $('pause-3d').textContent = state.paused ? '继续三维' : '暂停三维'; $('pause-3d').setAttribute('aria-pressed', String(state.paused)); });
+    reducedMotion.addEventListener('change', event => { if (event.matches && graph3d) { state.paused = true; graph3d.pauseAnimation(); $('pause-3d').textContent = '继续三维'; $('pause-3d').setAttribute('aria-pressed', 'true'); } });
+    $('close-path').addEventListener('click', () => $('path-dialog').close()); $('copy-path').addEventListener('click', () => copy($('path-value').value));
+    const date = new Date(typeof meta.generated_at === 'string' ? meta.generated_at : NaN); $('generated-at').textContent = Number.isNaN(date.getTime()) ? '生成时间未知' : date.toLocaleString('zh-CN', { hour12: false });
+    if (!Number.isNaN(date.getTime())) $('generated-at').dateTime = date.toISOString();
+    const scopedDate = new Date(typeof meta.scoped_refresh?.updated_at === 'string' ? meta.scoped_refresh.updated_at : NaN);
+    if (!Number.isNaN(scopedDate.getTime())) $('generated-at').textContent += `；${String(meta.scoped_refresh.label || '指定范围').slice(0, 50)}更新 ${scopedDate.toLocaleString('zh-CN', { hour12: false })}（其余保留原快照）`;
+    $('consistency-warning').hidden = meta.read_consistency === 'locked'; $('consistency-warning').textContent = meta.read_consistency === 'scoped' ? '定向范围更新，不是全库同一时点快照' : meta.read_consistency ? '索引未加锁读取，快照一致性降级' : '索引读取一致性未知';
+    showNavigation(state.navigationTab); new ResizeObserver(resize).observe($('visualization')); resetTypes(); renderTypes(); refresh(); resize();
+    return { state, refresh, chooseNode, enterGroup, resetFilters, showTab, getModel: () => model, getCandidates: () => candidates };
+  }
+  api.createApp = createApp;
+  if (typeof document !== 'undefined' && typeof rawData !== 'undefined') {
+    try { global.knowWeaveApp = createApp(rawData, memoryBasePath); }
+    catch (error) { const feedback = document.getElementById('feedback'); if (feedback) feedback.textContent = `地图初始化失败：${error.message}。未将此错误当作空数据。`; console.error(error); }
+  }
+})(globalThis);
+
+</script>
 </body>
 </html>

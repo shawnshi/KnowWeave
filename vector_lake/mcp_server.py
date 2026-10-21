@@ -556,24 +556,46 @@ def doctor_vector_lake() -> str:
     return tools.doctor_vector_lake()
 
 @mcp.tool()
-def rename_entity(old_name: str, new_name: str, dry_run: bool = True) -> str:
+def rename_entity(old_name: str, new_name: str, dry_run: bool = True, *,
+                  domain: str = "", cluster: str = "") -> str:
     """Rename a Wiki entity (filename/frontmatter) and automatically update all referring markdown links.
     
     Args:
         old_name: Current name of the entity (e.g. 'Concept_Old-Name.md').
         new_name: New name for the entity (e.g. 'Concept_New-Name.md').
         dry_run: Preview changes without writing to disk.
+        domain: Exact domain scope; empty retains the existing rename scope.
+        cluster: Exact cluster scope within the domain.
     """
     from vector_lake.tool_rename import rename_vector_lake_entity
-    return rename_vector_lake_entity(old_name, new_name, dry_run=dry_run)
+    return rename_vector_lake_entity(old_name, new_name, dry_run=dry_run, domain=domain, cluster=cluster)
 
 @mcp.tool()
-def trace_vector_lake(query_or_id: str) -> str:
-    """Show provenance trace for a query or identifier.
-    
-    Args:
-        query_or_id: Query text or object identifier.
+def get_relations(entity_name: str, domain: str, cluster: str = "", depth: int = 1,
+                  limit: int = 200, include_relatedness: bool = False) -> str:
+    """Read complete document declarations in an exact domain (General is not global).
+
+    Direction, predicates, unresolved diagnostics and truncation come from the shared
+    reader. Relatedness is opt-in and is not an asserted fact. Dependency errors propagate.
     """
+    if not isinstance(domain, str) or not domain.strip():
+        raise ValueError("get_relations requires a nonempty exact domain")
+    import json
+
+    from vector_lake.tool_relations import get_relations as read_relations
+
+    result = read_relations(entity_name=entity_name, domain=domain, cluster=cluster,
+                            depth=depth, limit=limit, include_relatedness=include_relatedness)
+    return json.dumps(result, ensure_ascii=False)
+
+@mcp.tool()
+def trace_vector_lake(query_or_id: str, domain: str = "", cluster: str = "") -> str:
+    """Show legacy provenance, or document relations within an explicit exact domain.
+
+    Scoped traces never mix in the legacy unscoped claim search.
+    """
+    if domain or cluster:
+        return tools.trace_vector_lake(query_or_id, domain=domain, cluster=cluster)
     return tools.trace_vector_lake(query_or_id)
 
 @mcp.tool()
@@ -587,16 +609,30 @@ def merge_suggestions_vector_lake(limit: int = 20, enqueue: bool = False) -> str
     return tools.merge_suggestions_vector_lake(limit=limit, enqueue=enqueue)
 
 # [CLI-only / Internal]
-def gc_vector_lake(days: int = 30, dry_run: bool = True, force: bool = False) -> str:
-    """Automatically prune isolated or orphaned entities.
+def gc_vector_lake(
+    days: int = 30, dry_run: bool = True, force: bool = False, *,
+    domain: str = "", cluster: str = "", expected_plan: dict | None = None,
+) -> str:
+    """Preview GC safely; execution requires an exact domain and a version-bound plan.
 
-    Args:
-        days: Prune entities older than this many days (default: 30).
-        dry_run: Preview what would be deleted without making changes (default: True).
-        force: Bypass the 50% mass-deletion safety threshold. Only set after
-            inspecting the page-edge projection with projection-report.
+    ``force`` retains the native bulk-limit meaning, not permission to bypass CAS.
+    Unscoped legacy destructive calls are intentionally rejected. Use the scoped
+    preview's expected_plan for execution; the native tool validates its freshness.
     """
-    return tools.gc_vector_lake(days=days, dry_run=dry_run, force=force)
+    if not dry_run and (not domain.strip() or expected_plan is None):
+        return "Error: destructive GC requires an explicit domain and expected_plan from preview."
+    if not domain and not cluster and expected_plan is None:
+        return tools.gc_vector_lake(days=days, dry_run=dry_run, force=force)
+    parameters = inspect.signature(tools.gc_vector_lake).parameters
+    if not ({"domain", "cluster", "expected_plan"} <= parameters.keys() or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )):
+        return "Error: native GC does not yet support scoped version-bound plans."
+    kwargs: dict[str, Any] = {
+        "days": days, "dry_run": dry_run, "force": force,
+        "domain": domain, "cluster": cluster, "expected_plan": expected_plan,
+    }
+    return tools.gc_vector_lake(**kwargs)
 
 # [CLI-only / Internal]
 def prepare_ingest_batch(batch_size: int = 5) -> str:
@@ -722,8 +758,8 @@ def write_wiki_page(filename: str, payload_file: str) -> str:
     from vector_lake.wiki_utils import SafeWriteError
     try:
         from vector_lake.mutation_coordinator import execute_mutation_plan
-        execute_mutation_plan(filename, content=content, is_delete=False)
-        return f"Successfully wrote {filename} and queued index update."
+        ok, message = execute_mutation_plan(filename, content=content, is_delete=False)
+        return f"{message} Index completion pending verification via get_mutation_status." if ok else message
     except SafeWriteError as e:
         return f"[Write Rejected] {str(e)}"
     except Exception as e:
@@ -767,48 +803,110 @@ def propose_schema_mutation(new_category: str, payload_file: str, parent_categor
 
 
 
-# [CLI-only / Internal]
-def batch_replace_links(old_text: str, new_text: str, dry_run: bool = True) -> str:
-    """Batch replace occurrences of a string (usually a link) across all wiki pages.
-    Use this when an entity's name changes but `rename_entity` failed to cover all cases.
-    
-    Args:
-        old_text: The exact string to search for (e.g. '[[Old Name]]').
-        new_text: The exact replacement string (e.g. '[[New Name]]').
-        dry_run: If True, only count how many files would be modified without actually changing them.
-    """
-    
-    if old_text.strip() in ["", "---", "[[", "]]", "```", "#"]:
-        return f"Error: '{old_text}' is a structural syntax marker. Global replacement aborted to protect graph topology."
-        
-    import os
-    from vector_lake.wiki_utils import get_wiki_dir
-    from vector_lake.mutation_coordinator import execute_mutation_batch
-    wiki_dir = get_wiki_dir()
-    modified_count = 0
-    matched_files = []
-    mutations = []
-    
-    for filename in os.listdir(wiki_dir):
-        if not filename.endswith(".md"):
-            continue
-        filepath = os.path.join(wiki_dir, filename)
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-            if old_text in content:
-                mutations.append({"filename": filename, "content": content.replace(old_text, new_text)})
-                modified_count += 1
-                matched_files.append(filename)
-        except Exception as e:
-            logging.error(f"Error processing {filename} for link replacement: {e}")
-            
-    if dry_run:
-        return f"[DRY RUN] Would replace '{old_text}' with '{new_text}' in {modified_count} files: {', '.join(matched_files[:10])}..."
+@mcp.tool()
+def get_mutation_status(outbox_ids: list[int], max_hops: int = 32) -> dict:
+    """Read native receipt status without repair, enqueue, SQL writes or blanket completion.
 
-    if mutations:
-        execute_mutation_batch(mutations)
-    return f"Successfully replaced '{old_text}' with '{new_text}' in {modified_count} files and queued projections."
+    Superseded receipts follow only bounded same-page equivalent native successors.
+    Completion requires the exact current canonical target and native completion;
+    missing/unreadable data is unavailable/error, never fabricated success.
+    """
+    from vector_lake.mutation_receipts import get_mutation_status as observe
+    return observe(outbox_ids, max_hops=max_hops)
+
+
+def _replace_link_syntax(content: str, old_text: str, new_text: str) -> str:
+    import re
+
+    # Preserve frontmatter, comments, escaped literals and Markdown code examples.
+    protected = re.compile(
+        r"\A\ufeff?---\r?\n.*?\r?\n---(?:\r?\n|$)|<!--.*?(?:-->|\Z)|"
+        r"^ {0,3}(?P<fence>(?P<fencechar>`|~)(?P=fencechar){2,})[^\n]*\n"
+        r".*?(?:^ {0,3}(?P=fence)(?P=fencechar)*[ \t]*(?:\n|$)|\Z)|"
+        r"(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)|"
+        r"(?P<typed>(?<![\\\[])\[[^\[\]\r\n]+::\s*\[\[[^\[\]\r\n]+\]\]\])|"
+        r"(?<![\\\[])\[\[[^\[\]\r\n]+\]\](?!\])",
+        re.M | re.S,
+    )
+    def replace(match):
+        text = match.group(0)
+        if match.group("typed"):
+            return text.replace(old_text, new_text)
+        return new_text if text == old_text else text
+
+    return protected.sub(replace, content)
+
+
+# [CLI-only / Internal]
+def batch_replace_links(
+    old_text: str, new_text: str, dry_run: bool = True, *, domain: str = "", cluster: str = "",
+) -> str:
+    """Replace exact complete wikilinks only, in a native version-bound canonical scope.
+
+    Plain text/structural replacements and unscoped destructive legacy calls are
+    intentionally rejected. Code, frontmatter and comments are not link assertions.
+    Dry-run remains the default; read errors abort rather than commit a partial scan.
+    """
+    import re
+    import sqlite3
+
+    from vector_lake import db_store, governance_store
+    from vector_lake.mutation_coordinator import execute_mutation_batch
+    from vector_lake.mutation_receipts import (
+        ReadBudget,
+        _safe_filename,
+        canonical_snapshot,
+        readonly_snapshot,
+    )
+    from vector_lake.wiki_utils import get_wiki_dir
+
+    link_pattern = r"\[\[[^\[\]\r\n|#]+(?:#[^\[\]\r\n|]+)?(?:\|[^\[\]\r\n]+)?\]\]"
+    if not all(isinstance(text, str) and re.fullmatch(link_pattern, text) for text in (old_text, new_text)):
+        return "Error: replacements must be complete [[target]] or [[target|label]] links; arbitrary text is unsafe."
+    if not dry_run and not domain.strip():
+        return "Error: destructive link replacement requires an explicit domain."
+    try:
+        budget = ReadBudget()
+        with readonly_snapshot(budget) as conn:
+            scanned_versions = canonical_snapshot(conn, domain=domain, cluster=cluster, budget=budget)
+        if len(scanned_versions) > 2000:
+            raise ValueError("Link replacement page budget exceeded")
+        wiki_dir = get_wiki_dir()
+        mutations, scanned_text = [], {}
+        for page_key, version in sorted(scanned_versions.items()):
+            filename = _safe_filename(page_key + ".md")
+            path = wiki_dir / filename
+            size = path.stat().st_size
+            budget.check(size)
+            if path.is_symlink() or size > 4 * 1024 * 1024:
+                raise ValueError("Unsafe or oversized Markdown projection")
+            content = path.read_text(encoding="utf-8")
+            if governance_store.canonical_page_version_from_content(filename, content) != version:
+                raise ValueError(f"Canonical/projection version conflict for {filename}")
+            scanned_text[filename] = content
+            replaced = _replace_link_syntax(content, old_text, new_text)
+            if replaced != content:
+                mutations.append({"filename": filename, "content": replaced, "expected_version": version})
+        if dry_run:
+            return f"[DRY RUN] Would replace links in {len(mutations)} files; scope domain={domain!r}, cluster={cluster!r}."
+        if not mutations:
+            return "No matching links; no canonical mutation committed."
+
+        def require_scanned_versions():
+            current = canonical_snapshot(db_store.get_connection(), domain=domain, cluster=cluster)
+            if current != scanned_versions:
+                raise ValueError("Canonical scoped scan version conflict")
+            for filename, content in scanned_text.items():
+                path = wiki_dir / filename
+                if path.is_symlink() or path.read_text(encoding="utf-8") != content:
+                    raise ValueError(f"Markdown scanned version conflict for {filename}")
+
+        ok, message = execute_mutation_batch(
+            mutations, validation_mode="schema", canonical_precondition=require_scanned_versions,
+        )
+        return f"{message} Index completion pending verification via get_mutation_status." if ok else message
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return f"Error during scoped link replacement: {type(exc).__name__}: {exc}"
 
 # [CLI-only / Internal]
 def bulk_reconciliation(payload_file: str, dry_run: bool = True) -> str:

@@ -1,21 +1,42 @@
 import json
 from pathlib import Path
 import pytest
-from vector_lake import controlled_recompile as control, db_store
+from vector_lake import claim_extractor, controlled_recompile as control, db_store, tool_ingest
+from vector_lake.schema_validator import SchemaViolationException
 from tests.test_controlled_recompile import scope_files, _dispatch, _claim
 
 
 def _unknown(fixture, index=30):
     row = fixture['rows'][index]
     name = 'Source_public-%02d.md' % index
-    data = {'page_key': name[:-3], 'title': 'Synthetic unknown owner', 'type': 'source', 'sources': []}
+    frontmatter = {
+        'id': f'source_unknown_{index}', 'entity_id': f'unknown-{index}',
+        'title': 'Synthetic unknown owner', 'type': 'source', 'domain': 'General',
+        'status': 'Active', 'epistemic-status': 'seed', 'categories': ['System_Architecture'],
+        'updated': '2026-10-21T00:00:00Z', 'sources': [],
+    }
+    body = 'UNRELATED_PRIVATE_BODY_SENTINEL\n'
+    data = claim_extractor.extract_page_objects(name, frontmatter, body)['entities'][0]
     conn = db_store.get_connection()
     conn.execute('INSERT INTO entities(entity_id,type,data_json) VALUES(?,?,?)',
-                 ('unknown-%d' % index, 'source', json.dumps(data)))
+                 (data['entity_id'], 'source', json.dumps(data)))
     conn.commit()
     page = fixture['memory'] / 'wiki' / name
-    page.write_text('---\nsources: []\n---\nUNRELATED_PRIVATE_BODY_SENTINEL\n', encoding='utf-8')
+    page.write_text('---\n' + json.dumps(frontmatter) + '\n---\n' + body, encoding='utf-8')
     return row, page
+
+
+def test_malformed_unknown_owner_schema_propagates_without_writes(scope_files):
+    row, page = _unknown(scope_files)
+    page.write_text('---\nsources: []\n---\nUNRELATED_PRIVATE_BODY_SENTINEL\n', encoding='utf-8')
+    before = page.read_bytes()
+    conn = db_store.get_connection()
+    database_before = list(conn.iterdump())
+    with pytest.raises(SchemaViolationException, match="Missing required frontmatter field 'id'"):
+        tool_ingest.current_source_publication_proven(row['filepath'], row['current_md5'])
+    assert list(conn.iterdump()) == database_before
+    assert page.read_bytes() == before
+    assert scope_files['seen'] == []
 
 
 def test_explicit_deferral_retains_source_and_allows_safe_suffix(scope_files):

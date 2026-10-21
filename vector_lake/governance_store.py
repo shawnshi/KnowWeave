@@ -51,6 +51,7 @@ VALIDITY_FACTORS = {
     "superseded": 0.08,
     "expired": 0.0,
     "archived": 0.0,
+    "not-yet-valid": 0.0,
 }
 
 
@@ -784,6 +785,7 @@ def _refresh_operational_memory_delta(old_claim_ids: set[str], proposed_claims: 
     impacted_keys = set()
     for memory in [*old_memories, *new_memories]:
         related_claim_ids.update(memory.get("contradicts_claim_ids", []))
+        related_claim_ids.update(memory.get("supersedes_claim_ids", []))
         if memory.get("memory_type") != "fact":
             impacted_keys.add((memory.get("memory_type"), memory.get("memory_key")))
 
@@ -796,6 +798,14 @@ def _refresh_operational_memory_delta(old_claim_ids: set[str], proposed_claims: 
                 (_json_id_list(related_claim_ids),),
             ).fetchall()
         )
+    if related_claim_ids:
+        for field in ("supersedes_claim_ids", "contradicts_claim_ids"):
+            peer_rows.extend(conn.execute(
+                "SELECT DISTINCT m.data_json FROM operational_memory m, "
+                f"json_each(m.data_json, '$.{field}') r "
+                "WHERE r.value IN (SELECT value FROM json_each(?))",
+                (_json_id_list(related_claim_ids),),
+            ).fetchall())
     for memory_type, memory_key in sorted(impacted_keys):
         peer_rows.extend(
             conn.execute(
@@ -809,10 +819,7 @@ def _refresh_operational_memory_delta(old_claim_ids: set[str], proposed_claims: 
     for row in peer_rows:
         memory = json.loads(row["data_json"])
         if (memory.get("conflict_resolution") or {}).get("state") == "superseded":
-            memory["validity_state"] = "active"
-            memory.pop("superseded_by", None)
-            memory.pop("conflict_resolution", None)
-            memory.update(score_memory_object(memory))
+            memory = _current_memory(memory, restore_supersession=True)
         peer_store["items"][memory["memory_id"]] = memory
     if peer_store["items"]:
         _resolve_memory_conflicts(peer_store)
@@ -981,6 +988,84 @@ def _freshness_score(record: dict, now=None) -> float:
     return round(0.5 ** (age_days / ttl_days), 4)
 
 
+def _memory_now():
+    from vector_lake import governance_metrics
+
+    return governance_metrics._utc_now()
+
+
+def _current_memory(memory: dict, now=None, *, restore_supersession=False) -> dict:
+    """Derive query-time base validity; supersession is a separate overlay.
+
+    Minimal legacy memory fixtures may have only a stored score/state. Preserve
+    those values unless temporal fields change validity; claim-backed payloads
+    carry evidence_ids and can be fully re-derived without reading claims.
+    """
+    from vector_lake import governance_metrics
+
+    now = now or _memory_now()
+    item = dict(memory)
+    state = str(item.get("validity_state", "active")).lower()
+    if state in {"expired", "archived"}:
+        base_state, reasons = state, item.get("validity_reasons", [])
+    elif "evidence_ids" in item:
+        claim = dict(item, contradicts=item.get("contradicts_claim_ids", []))
+        validity = governance_metrics.infer_claim_validity(claim, now=now)
+        base_state, reasons = validity["validity_state"], validity["reasons"]
+    else:
+        base_state = state if state != "superseded" else item.get("base_validity_state", "needs-review")
+        reasons = item.get("validity_reasons", [])
+        if str(item.get("status", "Active")).lower() in {"deprecated", "archived", "inactive"}:
+            base_state, reasons = "expired", ["status"]
+        elif (valid_to := _parse_dt(item.get("valid_to"))) and valid_to < now:
+            base_state, reasons = "expired", ["valid_to"]
+        elif (valid_from := _parse_dt(item.get("valid_from"))) and valid_from > now:
+            base_state, reasons = "not-yet-valid", ["valid_from"]
+        elif (review_after := _parse_dt(item.get("review_after"))) and review_after < now:
+            base_state, reasons = "review-due", ["review_after"]
+    item["base_validity_state"] = base_state
+    item["base_validity_reasons"] = reasons
+    holds = state == "superseded" and not restore_supersession
+    if not restore_supersession and "supersession_bases" in item:
+        live_bases = []
+        for basis in item["supersession_bases"]:
+            rule = basis.get("basis_rule") or (item.get("conflict_resolution") or {}).get("rule", "")
+            allowed = {"active", "expiring-soon"}
+            if rule.startswith("explicit-contradiction:"):
+                allowed.add("conflicted")
+            current = _current_memory(basis, now, restore_supersession=True)
+            if current["validity_state"] in allowed:
+                live_bases.append(current)
+        holds = bool(live_bases)
+        if holds:
+            winner = max(live_bases, key=lambda basis: _rank_memory_for_conflict(basis, explicit_contradiction=True))
+            if winner.get("memory_id"):
+                item["superseded_by"] = winner["memory_id"]
+            if item.get("conflict_resolution"):
+                item["conflict_resolution"] = dict(item["conflict_resolution"], state="superseded")
+        elif item.get("conflict_resolution"):
+            item["conflict_resolution"] = dict(item["conflict_resolution"], state="pending")
+    item["validity_state"] = "superseded" if holds else base_state
+    item["validity_reasons"] = reasons
+    if not holds:
+        item.pop("superseded_by", None)
+    if restore_supersession:
+        item.pop("conflict_resolution", None)
+        item.pop("supersession_bases", None)
+    if "confidence" in item or item["validity_state"] != state:
+        item.update(score_memory_object(item, now=now))
+    return item
+
+
+def _query_memory_functions(conn, now):
+    # SQL must apply current validity/score *before* LIMIT. These connection-local
+    # functions do not mutate persisted payloads or require an index migration.
+    conn.create_function("memory_current_state", 1,
+                         lambda raw: _current_memory(json.loads(raw), now)["validity_state"])
+    conn.create_function("memory_current_score", 1,
+                         lambda raw: _memory_score_value(_current_memory(json.loads(raw), now).get("memory_score")))
+
+
 def score_memory_object(memory: dict, now=None) -> dict:
     confidence_score = _coerce_float(memory.get("confidence"), 0.72)
     authority_score = _coerce_float(memory.get("authority_score"), 0.65)
@@ -998,7 +1083,7 @@ def score_memory_object(memory: dict, now=None) -> dict:
                 
     importance_score = min(1.0, importance_score + intent_weight)
     
-    freshness_score = _freshness_score(memory, now=now)
+    freshness_score = _freshness_score(memory, now=now or _memory_now())
     reinforcement_count = int(memory.get("reinforcement_count") or 0)
     reinforcement_score = min(1.0, math.log1p(max(0, reinforcement_count)) / math.log(8))
     validity_factor = VALIDITY_FACTORS.get(str(memory.get("validity_state", "active")).lower(), 0.5)
@@ -1037,6 +1122,10 @@ def _memory_object_from_claim(claim: dict) -> dict:
         "locator": claim.get("locator", {}),
         "subject_entity_ids": list(claim.get("subject_entity_ids", [])),
         "evidence_ids": evidence_ids,
+        "evidence_support": claim.get("evidence_support"),
+        "verified_evidence_ids": list(claim.get("verified_evidence_ids", [])),
+        "evidence_gap": claim.get("evidence_gap"),
+        "freshness_tier": claim.get("freshness_tier", "unknown"),
         "source_ids": source_ids,
         "source_count": len(source_ids),
         "status": claim.get("status", "Active"),
@@ -1054,9 +1143,10 @@ def _memory_object_from_claim(claim: dict) -> dict:
         "reinforcement_count": claim.get("reinforcement_count", len(evidence_ids)),
         "ttl_days": claim.get("ttl_days") or MEMORY_TTL_DAYS.get(memory_type, 365),
         "contradicts_claim_ids": list(claim.get("contradicts", [])),
+        "supersedes_claim_ids": list(claim.get("supersedes", claim.get("supersedes_claim_ids", []))),
+        "revision_of": claim.get("revision_of"),
     }
-    memory.update(score_memory_object(memory))
-    return memory
+    return _current_memory(memory)
 
 
 def _rank_memory_for_conflict(memory: dict, explicit_contradiction: bool = False) -> tuple:
@@ -1075,6 +1165,22 @@ def _rank_memory_for_conflict(memory: dict, explicit_contradiction: bool = False
     )
 
 
+def _supersession_basis(memory: dict, rule: str = "") -> dict:
+    """Store verdict inputs, not another copy of the winner's private text."""
+    keys = ("memory_id", "authority_score", "updated_at", "status", "validity_state", "validity_reasons", "confidence", "evidence_ids",
+            "evidence_support", "verified_evidence_ids", "contradicts_claim_ids", "valid_from",
+            "valid_to", "review_after", "freshness_tier", "base_validity_state", "base_validity_reasons")
+    return {**{key: copy.deepcopy(memory[key]) for key in keys if key in memory}, "basis_rule": rule}
+
+
+def _merge_supersession_bases(*groups) -> list[dict]:
+    by_edge = {}
+    for group in groups:
+        for basis in group:
+            by_edge[(basis.get("memory_id"), basis.get("basis_rule", ""))] = basis
+    return list(by_edge.values())
+
+
 def _mark_superseded(loser: dict, winner: dict, reason: str):
     loser["validity_state"] = "superseded"
     loser["superseded_by"] = winner["memory_id"]
@@ -1084,11 +1190,28 @@ def _mark_superseded(loser: dict, winner: dict, reason: str):
         "rule": reason,
         "resolved_at": _utc_now(),
     }
+    if reason.startswith(("preference:", "decision:", "task_state:", "explicit-supersession:", "explicit-contradiction:")):
+        loser["supersession_bases"] = _merge_supersession_bases(
+            loser.get("supersession_bases", []), [_supersession_basis(winner, reason)],
+        )
     loser.update(score_memory_object(loser))
 
 
 def _resolve_memory_conflicts(store: dict) -> dict:
     items = store.get("items", {})
+    _assert_claim_relation_acyclic({
+        memory.get("source_claim_id"): list(memory.get("supersedes_claim_ids", []))
+        for memory in items.values() if memory.get("source_claim_id")
+    })
+    now = _memory_now()
+    memory_ids = {memory.get("memory_id") for memory in items.values()}
+    for memory in items.values():
+        resolution = memory.get("conflict_resolution", {})
+        typed = resolution.get("rule") == f"{memory.get('memory_type')}:newer-authority-confidence" or resolution.get("rule", "").startswith("explicit-supersession:")
+        orphaned = memory.get("validity_state") == "superseded" and memory.get("superseded_by") not in memory_ids
+        refreshed = _current_memory(memory, now, restore_supersession=typed or orphaned)
+        memory.clear()
+        memory.update(refreshed)
     by_claim_id = {
         memory.get("source_claim_id"): memory
         for memory in items.values()
@@ -1100,6 +1223,12 @@ def _resolve_memory_conflicts(store: dict) -> dict:
         for right_claim_id in memory.get("contradicts_claim_ids", []):
             other = by_claim_id.get(right_claim_id)
             if not other or other["memory_id"] == memory["memory_id"]:
+                continue
+            left_base = _current_memory(memory, now, restore_supersession=True)
+            right_base = _current_memory(other, now, restore_supersession=True)
+            if any(base["validity_state"] not in {"active", "expiring-soon", "conflicted"} for base in (left_base, right_base)):
+                continue
+            if any("evidence_ids" in base and (base.get("evidence_support") != "verified" or not (set(base.get("verified_evidence_ids", [])) & set(base["evidence_ids"]))) for base in (left_base, right_base)):
                 continue
             left_rank = _rank_memory_for_conflict(memory, explicit_contradiction=True)
             right_rank = _rank_memory_for_conflict(other, explicit_contradiction=True)
@@ -1117,43 +1246,62 @@ def _resolve_memory_conflicts(store: dict) -> dict:
             else:
                 _mark_superseded(memory, other, "explicit-contradiction:authority-confidence-recency")
 
+    explicit_candidates = {}
+    for memory in items.values():
+        base = _current_memory(memory, now, restore_supersession=True)
+        eligible = base["validity_state"] in {"active", "expiring-soon"}
+        starts = _parse_dt(base.get("valid_from"))
+        pending = base["validity_state"] == "not-yet-valid" and starts and _current_memory(base, starts, restore_supersession=True)["validity_state"] in {"active", "expiring-soon"}
+        if not eligible and not pending:
+            continue
+        for target in memory.get("supersedes_claim_ids", []):
+            if target in by_claim_id:
+                explicit_candidates.setdefault(target, []).append(base)
+    for target, candidates in explicit_candidates.items():
+        current = [item for item in candidates if item["validity_state"] in {"active", "expiring-soon"}]
+        winner = max(current or candidates, key=lambda item: _rank_memory_for_conflict(item, explicit_contradiction=True))
+        loser = by_claim_id[target]
+        _mark_superseded(loser, winner, "explicit-supersession:validated")
+        loser["supersession_bases"] = _merge_supersession_bases(
+            loser.get("supersession_bases", []),
+            [_supersession_basis(item, "explicit-supersession:validated") for item in candidates],
+        )
+        refreshed = _current_memory(loser, now)
+        loser.clear()
+        loser.update(refreshed)
+
     grouped = {}
     for memory in items.values():
         if memory.get("memory_type") == "fact":
             continue
-        if str(memory.get("validity_state", "")).lower() in {"expired", "archived"}:
+        if str(memory.get("validity_state", "")).lower() in HIDDEN_MEMORY_STATES:
             continue
         grouped.setdefault((memory.get("memory_type"), memory.get("memory_key")), []).append(memory)
 
     for (memory_type, memory_key), candidates in grouped.items():
-        # Reset validity state so superseded ones can compete again
-        for c in candidates:
-            if c.get("validity_state") == "superseded":
-                c["validity_state"] = "active"
-                c.pop("superseded_by", None)
-                c.pop("conflict_resolution", None)
-                
         if len(candidates) <= 1:
-            if len(candidates) == 1 and candidates[0].get("validity_state") != "active":
-                candidates[0]["validity_state"] = "active"
-                candidates[0].update(score_memory_object(candidates[0]))
             continue
-        ordered = sorted(candidates, key=_rank_memory_for_conflict, reverse=True)
+        eligible = [item for item in candidates if item["validity_state"] in {"active", "expiring-soon"}]
+        if not eligible:
+            continue
+        ordered = sorted(eligible, key=_rank_memory_for_conflict, reverse=True)
         winner = ordered[0]
         winner["conflict_resolution"] = {
             "state": "winner",
             "rule": f"{memory_type}:newer-authority-confidence",
             "resolved_at": _utc_now(),
-            "competing_memory_ids": [item["memory_id"] for item in ordered[1:]],
+            "competing_memory_ids": [item["memory_id"] for item in candidates if item is not winner],
         }
-        for loser in ordered[1:]:
+        for loser in candidates:
+            if loser is winner:
+                continue
             _mark_superseded(loser, winner, f"{memory_type}:newer-authority-confidence")
         conflict_events.append({
             "type": "typed-memory-supersession",
             "memory_type": memory_type,
             "memory_key": memory_key,
             "winner": winner["memory_id"],
-            "losers": [item["memory_id"] for item in ordered[1:]],
+            "losers": [item["memory_id"] for item in candidates if item is not winner],
         })
 
     store["conflict_events"] = conflict_events
@@ -1237,7 +1385,7 @@ def _memory_relevance(
     return score
 
 
-HIDDEN_MEMORY_STATES = frozenset({"archived", "expired", "superseded"})
+HIDDEN_MEMORY_STATES = frozenset({"archived", "expired", "superseded", "not-yet-valid"})
 
 
 def _memory_score_value(value) -> float:
@@ -1300,6 +1448,7 @@ def score_memory_items(
     include_history: bool = False,
     df: dict[str, int] | None = None,
     total: int | None = None,
+    now=None,
 ) -> list[dict]:
     """Rank an already-loaded memory collection by relevance, then memory score.
 
@@ -1307,8 +1456,10 @@ def score_memory_items(
     the active and the history-inclusive view (the Memory Packet) scores one
     loaded collection twice instead of loading the whole store twice.
     """
+    now = now or _memory_now()
     ranked = []
     for memory in memories:
+        memory = _current_memory(memory, now)
         memory_type = str(memory.get("memory_type", "fact")).lower()
         if allowed_types and memory_type not in allowed_types:
             continue
@@ -1369,6 +1520,7 @@ def _gram_memory_candidates(
     include_history: bool,
     window: int,
     context: tuple | None = None,
+    now=None,
 ) -> list[str] | None:
     """Exact relevance from the n-gram index, ordered by the documented key.
 
@@ -1388,24 +1540,26 @@ def _gram_memory_candidates(
     if not memory_gram_index.ensure_memory_gram_index():
         return None
     conn = get_connection()
+    _query_memory_functions(conn, now or _memory_now())
     if not terms:
         # No terms means "everything, ordered by memory score" for the legacy
         # scorer; skipping the index is both correct and far cheaper.
         sql = (
-            "SELECT memory_id FROM operational_memory_index"
+            "SELECT i.memory_id FROM operational_memory_index i "
+            "JOIN operational_memory m ON m.memory_id = i.memory_id"
         )
         params: list = []
         where = []
         if allowed_types:
-            where.append("memory_type IN (%s)" % ",".join("?" for _ in allowed_types))
+            where.append("i.memory_type IN (%s)" % ",".join("?" for _ in allowed_types))
             params.extend(sorted(allowed_types))
         if not include_history:
-            where.append("validity_state NOT IN (%s)" % ",".join("?" for _ in HIDDEN_MEMORY_STATES))
+            where.append("memory_current_state(m.data_json) NOT IN (%s)" % ",".join("?" for _ in HIDDEN_MEMORY_STATES))
             params.extend(sorted(HIDDEN_MEMORY_STATES))
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += (
-            " ORDER BY memory_score DESC, updated_rank DESC, memory_id ASC"
+            " ORDER BY memory_current_score(m.data_json) DESC, i.updated_rank DESC, i.memory_id ASC"
             f" LIMIT {int(window)}"
         )
         return [str(row[0]) for row in conn.execute(sql, params)]
@@ -1454,16 +1608,18 @@ def _gram_memory_candidates(
         # The scoring documents are ordered by identity, and the payload still lives in the
         # projection: one more join, on a ``doc IN (...)`` list that is already 4 000 wide.
         sql = (
-            "SELECT g.doc AS doc, i.memory_id, i.memory_type, i.memory_score, i.updated_rank "
+            "SELECT g.doc AS doc, i.memory_id, i.memory_type, "
+            "memory_current_score(m.data_json) AS memory_score, i.updated_rank "
             "FROM operational_memory_gram_docs AS g "
             "JOIN operational_memory_index AS i ON i.memory_id = g.memory_id "
+            "JOIN operational_memory AS m ON m.memory_id = i.memory_id "
             f"WHERE g.doc IN ({placeholders})"
         )
         if allowed_types:
             sql += " AND i.memory_type IN (%s)" % ",".join("?" for _ in allowed_types)
             params.extend(sorted(allowed_types))
         if not include_history:
-            sql += " AND i.validity_state NOT IN (%s)" % ",".join("?" for _ in HIDDEN_MEMORY_STATES)
+            sql += " AND memory_current_state(m.data_json) NOT IN (%s)" % ",".join("?" for _ in HIDDEN_MEMORY_STATES)
             params.extend(sorted(HIDDEN_MEMORY_STATES))
         for row in get_connection().execute(sql, params):
             doc = int(row["doc"])
@@ -1503,6 +1659,7 @@ def _indexed_memory_candidates(
     limit: int,
     df: dict[str, int] | None = None,
     total: int | None = None,
+    now=None,
 ) -> list[str]:
     """Top ``limit`` memory ids by the projected relevance score.
 
@@ -1514,6 +1671,7 @@ def _indexed_memory_candidates(
     ``instr()`` per row per term -- the dominant cost of a plain scan.
     """
     conn = get_connection()
+    _query_memory_functions(conn, now or _memory_now())
     from vector_lake.memory_gram_index import idf_weight
 
     factor_of = {
@@ -1568,19 +1726,21 @@ def _indexed_memory_candidates(
         where.append("memory_type IN (%s)" % ", ".join(bound(item) for item in sorted(allowed_types)))
     if not include_history:
         where.append(
-            "validity_state NOT IN (%s)"
+            "memory_current_state(data_json) NOT IN (%s)"
             % ", ".join(bound(item) for item in sorted(HIDDEN_MEMORY_STATES))
         )
     if candidate_parts:
         where.append("(" + " OR ".join(candidate_parts) + ")")
 
     sql = (
-        f"SELECT memory_id, ({relevance}) AS relevance FROM operational_memory_index"
+        f"SELECT i.memory_id, ({relevance}) AS relevance FROM operational_memory_index i "
+        "JOIN (SELECT memory_id AS payload_memory_id, data_json FROM operational_memory) m "
+        "ON m.payload_memory_id = i.memory_id"
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += (
-        " ORDER BY relevance DESC, memory_score DESC, updated_rank DESC, memory_id ASC"
+        " ORDER BY relevance DESC, memory_current_score(data_json) DESC, updated_rank DESC, i.memory_id ASC"
         f" LIMIT {int(limit)}"
     )
     return [str(row["memory_id"]) for row in conn.execute(sql, params)]
@@ -1691,6 +1851,7 @@ def search_operational_memory(
     domain: str | None = None,
     cluster: str | None = None,
     _gram_context: tuple | None = None,
+    _now=None,
 ) -> list[dict]:
     """Rank operational memory for ``query``.
 
@@ -1702,12 +1863,13 @@ def search_operational_memory(
     if top_k <= 0:
         raise ValueError('top_k must be positive')
     allowed_types = _normalize_memory_types(memory_types)
+    now = _now or _memory_now()
     terms = _query_terms(query)
     if domain or cluster:
         # Scope and full scoped DF precede TopK; only the winners are retained.
         from vector_lake.scoped_memory_search import search_views
         return search_views(
-            terms, [(top_k, include_history, allowed_types)], domain=domain, cluster=cluster,
+            terms, [(top_k, include_history, allowed_types)], domain=domain, cluster=cluster, now=now,
         )[0]
     backend = _memory_search_backend()
 
@@ -1716,7 +1878,7 @@ def search_operational_memory(
         df, total = _memory_term_frequencies(memories, terms), len(memories)
         return score_memory_items(
             memories, terms, top_k,
-            allowed_types=allowed_types, include_history=include_history, df=df, total=total,
+            allowed_types=allowed_types, include_history=include_history, df=df, total=total, now=now,
         )
 
     # Creating the projection, its triggers and the initial backfill is memoised
@@ -1736,20 +1898,20 @@ def search_operational_memory(
         ensure_operational_memory_index_cheap()
         if backend == "gram":
             memory_ids = _gram_memory_candidates(terms, allowed_types, include_history, window,
-                                                 context=_gram_context)
+                                                 context=_gram_context, now=now)
             if memory_ids is not None:
                 if not memory_ids:
                     return []
                 return score_memory_items(
                     _memory_payloads(memory_ids), terms, top_k,
-                    allowed_types=allowed_types, include_history=include_history, df=df, total=total,
+                    allowed_types=allowed_types, include_history=include_history, df=df, total=total, now=now,
                 )
             log.info(
                 "Memory gram index is not usable; answering from the projected scan "
                 "(run rebuild_memory_gram_index to restore the indexed path)."
             )
         memory_ids = _indexed_memory_candidates(
-            terms, allowed_types, include_history, window, df=df, total=total
+            terms, allowed_types, include_history, window, df=df, total=total, now=now
         )
     except sqlite3.Error as exc:
         log.warning(
@@ -1760,7 +1922,7 @@ def search_operational_memory(
         return score_memory_items(
             memories, terms, top_k,
             allowed_types=allowed_types, include_history=include_history,
-            df=_memory_term_frequencies(memories, terms), total=len(memories),
+            df=_memory_term_frequencies(memories, terms), total=len(memories), now=now,
         )
 
     if not memory_ids:
@@ -1774,7 +1936,7 @@ def search_operational_memory(
                 return score_memory_items(
                     items, terms, top_k,
                     allowed_types=allowed_types, include_history=include_history,
-                    df=_memory_term_frequencies(items, terms), total=len(items),
+                    df=_memory_term_frequencies(items, terms), total=len(items), now=now,
                 )
         return []
 
@@ -1782,7 +1944,7 @@ def search_operational_memory(
     # the previous implementation produced, not SQL's rounding of it.
     return score_memory_items(
         _memory_payloads(memory_ids), terms, top_k,
-        allowed_types=allowed_types, include_history=include_history, df=df, total=total,
+        allowed_types=allowed_types, include_history=include_history, df=df, total=total, now=now,
     )
 
 
@@ -1825,12 +1987,13 @@ def search_memory_packet_views(
     Unscoped ``legacy`` calls share a loaded collection. Unscoped ``gram`` and
     ``index`` calls retain their independent projected searches and filters.
     """
+    now = _memory_now()
     terms = _query_terms(query)
     if domain or cluster:
         from vector_lake.scoped_memory_search import search_views
         active, history = search_views(
             terms, [(active_top_k, False, None), (history_top_k, True, None)],
-            domain=domain, cluster=cluster,
+            domain=domain, cluster=cluster, now=now,
         )
         return active, history
     if _memory_search_backend() == "legacy":
@@ -1841,10 +2004,10 @@ def search_memory_packet_views(
         total = len(memories)
         return (
             score_memory_items(
-                memories, terms, active_top_k, include_history=False, df=df, total=total
+                memories, terms, active_top_k, include_history=False, df=df, total=total, now=now
             ),
             score_memory_items(
-                memories, terms, history_top_k, include_history=True, df=df, total=total
+                memories, terms, history_top_k, include_history=True, df=df, total=total, now=now
             ),
         )
     # One pass over the postings serves both windows: the packet runs them on every request, and
@@ -1852,9 +2015,9 @@ def search_memory_packet_views(
     context = gram_context(terms) if _memory_search_backend() == "gram" else None
     return (
         search_operational_memory(query, top_k=active_top_k, include_history=False,
-                                  _gram_context=context),
+                                  _gram_context=context, _now=now),
         search_operational_memory(query, top_k=history_top_k, include_history=True,
-                                  _gram_context=context),
+                                  _gram_context=context, _now=now),
     )
 
 
@@ -1987,6 +2150,20 @@ def build_claim_graph_projection(limit_nodes: int | None = None) -> dict:
         "updated_at": _utc_now(),
         "nodes": nodes,
         "edges": edges,
+        "graph_kind": "claim-cooccurrence",
+        "is_evidence_graph": False,
+        "edge_semantics": {
+            "shared-entity": "shared subject entity, not evidential support",
+            "shared-source": "shared attributed source, not independent corroboration",
+            "contradiction": "explicit declared contradiction, not automatic detection",
+        },
+        "sparsification": {
+            "node_limit": limit_nodes,
+            "entity_window": entity_window,
+            "source_window": source_window,
+            "max_degree": max_degree,
+            "contradictions_bypass_degree_limit": True,
+        },
     }
 
 
@@ -2280,6 +2457,135 @@ def create_change_set_from_content(
     return change_set
 
 
+CLAIM_RELATION_FIELDS = ("contradicts", "supersedes", "revision_of")
+
+
+def _assert_claim_relation_acyclic(graph: dict[str, list[str]]):
+    nodes = set(graph) | {target for targets in graph.values() for target in targets}
+    degrees = dict.fromkeys(nodes, 0)
+    for targets in graph.values():
+        for target in targets:
+            degrees[target] += 1
+    ready = [node for node, degree in degrees.items() if degree == 0]
+    visited = 0
+    while ready:
+        node = ready.pop()
+        visited += 1
+        for target in graph.get(node, []):
+            degrees[target] -= 1
+            if degrees[target] == 0:
+                ready.append(target)
+    if visited != len(nodes):
+        raise ValueError("Cyclic explicit supersession/revision relation")
+
+
+def _claim_relation_targets(record: dict, field: str) -> list[str]:
+    value = record.get(field, [])
+    if field == "revision_of" and isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise ValueError(f"{field} must contain explicit claim ids")
+    if field == "revision_of" and len(value) > 1:
+        raise ValueError("revision_of must name one claim")
+    return value
+
+
+def _validate_claim_relation_delta(proposed_claims: list[dict], old_claim_ids: set[str], page_keys: set[str], *, connection=None):
+    """Resolve explicit legacy references and reject dangling or cross-page identity writes."""
+    conn = connection if connection is not None else get_connection()
+    proposed_ids = [record["claim_id"] for record in proposed_claims]
+    if len(proposed_ids) != len(set(proposed_ids)):
+        raise ValueError("Duplicate claim identity in canonical delta")
+    proposed_id_set = set(proposed_ids)
+    rows = conn.execute(
+        "SELECT claim_id, f_page_key FROM claims WHERE claim_id IN (SELECT value FROM json_each(?))",
+        (_json_id_list(proposed_id_set),),
+    )
+    for row in rows:
+        if row["f_page_key"] not in page_keys:
+            raise ValueError(f"Claim identity belongs to another page: {row['claim_id']}")
+
+    aliases: dict[str, set[str]] = {}
+    for record in proposed_claims:
+        owner = (record.get("locator") or {}).get("page_key") or os.path.splitext(os.path.basename(record.get("source_page", "")))[0]
+        if owner not in page_keys:
+            raise ValueError("Proposed claim is outside the explicit affected page scope")
+        for alias in record.get("legacy_claim_ids", []):
+            aliases.setdefault(str(alias), set()).add(record["claim_id"])
+    targets = set()
+    for record in proposed_claims:
+        for field in CLAIM_RELATION_FIELDS:
+            targets.update(_claim_relation_targets(record, field))
+    existing_targets = {
+        row["claim_id"] for row in conn.execute(
+            "SELECT claim_id FROM claims WHERE claim_id IN (SELECT value FROM json_each(?))",
+            (_json_id_list(targets),),
+        )
+    } - old_claim_ids
+    unresolved = targets - proposed_id_set - existing_targets
+    if unresolved:
+        for row in conn.execute(
+            "SELECT c.claim_id, a.value AS alias FROM claims c, "
+            "json_each(c.data_json, '$.legacy_claim_ids') a "
+            "WHERE a.value IN (SELECT value FROM json_each(?))",
+            (_json_id_list(unresolved),),
+        ):
+            if row["claim_id"] not in old_claim_ids:
+                aliases.setdefault(row["alias"], set()).add(row["claim_id"])
+    for record in proposed_claims:
+        for field in CLAIM_RELATION_FIELDS:
+            if field not in record:
+                continue
+            resolved = []
+            for target in _claim_relation_targets(record, field):
+                if target not in proposed_id_set | existing_targets:
+                    candidates = aliases.get(target, set())
+                    if len(candidates) != 1:
+                        raise ValueError(f"Missing or ambiguous {field} target: {target}")
+                    target = next(iter(candidates))
+                if target == record["claim_id"]:
+                    raise ValueError(f"Self-referential {field}: {target}")
+                resolved.append(target)
+            record[field] = resolved[0] if field == "revision_of" and resolved else sorted(set(resolved))
+            if field in {"contradicts", "supersedes"} and f"{field}_claim_ids" in record:
+                record[f"{field}_claim_ids"] = list(record[field])
+
+    graph = {
+        record["claim_id"]: _claim_relation_targets(record, "supersedes") + _claim_relation_targets(record, "revision_of")
+        for record in proposed_claims if record.get("supersedes") or record.get("revision_of")
+    }
+    frontier = {target for values in graph.values() for target in values} - set(graph)
+    while frontier:
+        batch = frontier
+        frontier = set()
+        for row in conn.execute(
+            "SELECT claim_id, data_json FROM claims WHERE claim_id IN (SELECT value FROM json_each(?))",
+            (_json_id_list(batch - old_claim_ids),),
+        ):
+            record = json.loads(row["data_json"])
+            graph[row["claim_id"]] = _claim_relation_targets(record, "supersedes") + _claim_relation_targets(record, "revision_of")
+        for key in batch:
+            graph.setdefault(key, [])
+        frontier = {target for values in graph.values() for target in values} - set(graph)
+    _assert_claim_relation_acyclic(graph)
+
+    removed = old_claim_ids - proposed_id_set
+    if removed:
+        for field in CLAIM_RELATION_FIELDS:
+            rows = conn.execute(
+                "SELECT DISTINCT c.claim_id, c.f_page_key FROM claims c, "
+                f"json_each(c.data_json, '$.{field}') r "
+                "WHERE r.value IN (SELECT value FROM json_each(?)) "
+                "AND c.claim_id NOT IN (SELECT value FROM json_each(?))",
+                (_json_id_list(removed), _json_id_list(old_claim_ids)),
+            )
+            for row in rows:
+                raise ValueError(
+                    f"Updating claims would orphan {field} from {row['claim_id']}; "
+                    f"include page {row['f_page_key']} in the same explicit migration"
+                )
+
+
 def _apply_change_sets_batch_unchecked(change_sets: list[dict]) -> list[dict]:
     """Apply a page-scoped canonical delta inside an existing transaction."""
     if not change_sets:
@@ -2290,7 +2596,7 @@ def _apply_change_sets_batch_unchecked(change_sets: list[dict]) -> list[dict]:
         for page in change_set.get("affected_pages", [])
     }
     affected_page_keys = {
-        page[:-3] if page.endswith(".md") else page
+        page[:-3] if page.lower().endswith(".md") else page
         for page in affected_pages
     }
     proposed_entities = [record for item in change_sets for record in item.get("proposed_entities", [])]
@@ -2298,6 +2604,8 @@ def _apply_change_sets_batch_unchecked(change_sets: list[dict]) -> list[dict]:
     proposed_evidence = [record for item in change_sets for record in item.get("proposed_evidence", [])]
     proposed_sources = [record for item in change_sets for record in item.get("proposed_source_updates", [])]
     proposed_edges = [record for item in change_sets for record in item.get("proposed_edges", [])]
+    if proposed_claims and not affected_page_keys:
+        raise ValueError("Claims require an explicit affected page scope")
 
     conn = get_connection()
     old_entity_ids: set[str] = set()
@@ -2319,6 +2627,7 @@ def _apply_change_sets_batch_unchecked(change_sets: list[dict]) -> list[dict]:
             affected_page_params,
         ).fetchall()
         old_claim_ids = {row["claim_id"] for row in old_claim_rows}
+        _validate_claim_relation_delta(proposed_claims, old_claim_ids, affected_page_keys)
         # ``claim_graph_edges`` carries two key spaces and the previous predicate used one for
         # the other.  Its rows are page keys on the live corpus (``Concept_...``/``Source_...``,
         # plus the ``entity_<hex>`` ids ``delete_node_cascade`` removes by), while

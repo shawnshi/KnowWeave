@@ -33,15 +33,22 @@ def isolate(monkeypatch):
     return catalog
 
 
-def test_ppr_failure_preserves_scored_pages(monkeypatch):
+@pytest.mark.parametrize('domain,kernel', [
+    ('Medical_IT', 'fast_personalized_pagerank'),
+    (None, 'prepared_personalized_pagerank'),
+], ids=['scoped', 'unscoped'])
+def test_ppr_failure_preserves_scored_pages(monkeypatch, domain, kernel):
     catalog = isolate(monkeypatch)
     catalog.graph = {'Source_Audit': [('Source_Next', 1.0)], 'Source_Next': [('Source_Audit', 1.0)]}
+    calls = []
     def broken(*a):
+        calls.append(a)
         raise RuntimeError('DO_NOT_EXPOSE_PPR_DETAILS')
     monkeypatch.setattr(search, 'HAVE_CORE', True)
-    monkeypatch.setattr(search, 'vector_lake_core', SimpleNamespace(prepared_personalized_pagerank=broken))
+    monkeypatch.setattr(search, 'vector_lake_core', SimpleNamespace(**{kernel: broken}))
     monkeypatch.setattr(search, '_ppr_index', lambda *a: object())
-    rows, notes, error = search._search_scored_pages('audit', 1, domain='Medical_IT', catalog=catalog, allow_external_embedding=False)
+    rows, notes, error = search._search_scored_pages('audit', 1, domain=domain, catalog=catalog, allow_external_embedding=False)
+    assert len(calls) == 1, 'fault injection must reach the selected PPR kernel'
     assert error is None and rows[0][1]['_key'] == 'Source_Audit'
     assert any('PPR' in n and 'RuntimeError' in n for n in notes)
     assert 'DO_NOT_EXPOSE' not in str(notes)
@@ -121,7 +128,7 @@ def test_provider_error_details_are_not_returned(monkeypatch):
         raise RuntimeError('DO_NOT_EXPOSE_PROVIDER_DETAILS')
     monkeypatch.setattr(embedding_scheduler, 'embed_texts', broken)
     values, error = search._get_query_embedding('synthetic-RSP-provider')
-    assert not values and 'RuntimeError' in error and 'DO_NOT_EXPOSE' not in error
+    assert not values and error is not None and 'RuntimeError' in error and 'DO_NOT_EXPOSE' not in error
 
 
 def test_vector_error_details_are_not_returned(monkeypatch):
@@ -130,7 +137,7 @@ def test_vector_error_details_are_not_returned(monkeypatch):
         raise sqlite3.OperationalError('DO_NOT_EXPOSE_SQL_DETAILS')
     monkeypatch.setattr(db_store, 'get_connection', broken)
     values, error = search._get_vector_search_results([1.0, 0.0])
-    assert values == {} and 'OperationalError' in error and 'DO_NOT_EXPOSE' not in error
+    assert values == {} and error is not None and 'OperationalError' in error and 'DO_NOT_EXPOSE' not in error
 
 
 def test_failed_dependency_is_not_business_no_match(monkeypatch):

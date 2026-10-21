@@ -3,7 +3,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from vector_lake.wiki_utils import canonical_source_name, enforce_claim_dict, normalize_sources
+from vector_lake.wiki_utils import canonical_source_name, normalize_sources
 from vector_lake.node_vocabulary import is_generated_artifact
 from vector_lake.schema_validator import validate_schema, SchemaViolationException
 import logging
@@ -205,7 +205,7 @@ def _is_page_scope_disclaimer(text) -> bool:
     return _collapse_text(text).lower().startswith(PAGE_SCOPE_MARKER)
 
 
-def _body_summary(body: str, limit: int = 320) -> str:
+def _body_summary(body: str, limit: int | None = None, *, raw: bool = False) -> str:
     """The page's own first words, not its scaffolding.
 
     The fallback used to be the first ``limit`` characters of the raw body, which on every page
@@ -228,6 +228,8 @@ def _body_summary(body: str, limit: int = 320) -> str:
             continue
         # Cleaned: this string becomes both a claim text and the ``page-summary`` evidence text, so
         # raw markup and inline anchors must not travel into either.
+        if raw:
+            return block.get("raw_text", text)[:limit]
         return _clean_claim_text(text, limit=limit)
     return _collapse_text(body)[:limit]
 
@@ -236,7 +238,7 @@ def _heading_to_text(line: str) -> str:
     return re.sub(r"^#+\s*", "", line).strip()
 
 
-def _clean_claim_text(text: str, limit: int = 360) -> str:
+def _clean_claim_text(text: str, limit: int | None = None) -> str:
     cleaned = _collapse_text(text)
     # Strip inline sources completely to reduce RAG noise
     cleaned = re.sub(r"\(Source[s]?:\s*(.*?)\)", "", cleaned, flags=re.IGNORECASE)
@@ -378,7 +380,87 @@ def _source_key(value: str) -> str:
     id the append branch invents) rather than to a declared file.  926 claims still sit behind
     that gate.  One question, one comparison.
     """
-    return str(value or "").strip().replace(".md", "")
+    return str(value or "").strip().removesuffix(".md")
+
+
+def _canonical_source_page(raw_ref: str) -> str:
+    name = os.path.basename(raw_ref)
+    if name.startswith("Source_") and os.path.splitext(name)[1] in ("", ".md"):
+        return name if name.endswith(".md") else name + ".md"
+    return canonical_source_name(raw_ref)
+
+
+def _apply_claim_relations(frontmatter: dict, claims: list[dict]) -> None:
+    """Apply only explicit block/claim declarations, never page-wide relationships.
+
+    ``claim_relations`` is a list of mappings with ``block_index`` (positive, 1-based)
+    or ``claim_id`` and optional ``scope`` (block/claim, requiring the matching locator).
+    Relations are ``contradicts`` /
+    ``contradicts_claim_ids``, ``supersedes`` / ``supersedes_claim_ids`` (ID or ID list),
+    and ``revision_of`` (one ID). Top-level relations bind ``frontmatter.claim_id`` to
+    the first block; without it only a single eligible occurrence is unambiguous.
+    Target existence belongs to the integration owner, not this pure extractor.
+    """
+    fields = ("contradicts", "contradicts_claim_ids", "supersedes", "supersedes_claim_ids", "revision_of")
+    declarations = frontmatter.get("claim_relations", [])
+    if not isinstance(declarations, list) or any(not isinstance(d, dict) for d in declarations):
+        raise SchemaViolationException("claim_relations must be a list of scoped mappings")
+    declarations = list(declarations)
+    root_relations = {field: frontmatter[field] for field in fields
+                      if field in frontmatter and (field == "revision_of" or frontmatter[field] != [])}
+    if root_relations:
+        declaration = dict(root_relations)
+        if frontmatter.get("claim_id"):
+            declaration["claim_id"] = frontmatter["claim_id"]
+        else:
+            occurrences = [o for c in claims for o in c["occurrences"]]
+            if len(occurrences) != 1:
+                raise SchemaViolationException("Top-level claim relationship scope is ambiguous; specify claim_id or claim_relations.block_index")
+            declaration["block_index"] = occurrences[0]["locator"]["block_index"]
+        declarations.insert(0, declaration)
+
+    def ids(value, field):
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() for v in value):
+            raise SchemaViolationException(f"{field} must contain explicit nonempty claim IDs")
+        return list(dict.fromkeys(v.strip() for v in value))
+
+    for declaration in declarations:
+        if set(declaration) - set(fields) - {"scope", "block_index", "claim_id"}:
+            raise SchemaViolationException("Unknown claim_relations fields")
+        scope = declaration.get("scope", "block" if "block_index" in declaration else "claim")
+        if not isinstance(scope, str) or scope not in {"block", "claim"}:
+            raise SchemaViolationException("Only block/claim relationship scope is supported")
+        block_index = declaration.get("block_index")
+        claim_id = declaration.get("claim_id")
+        if (scope == "block" and block_index is None) or (scope == "claim" and claim_id is None):
+            raise SchemaViolationException("Relationship scope requires its matching locator")
+        if block_index is not None and (type(block_index) is not int or block_index < 1):
+            raise SchemaViolationException("Relationship block_index must be a positive integer")
+        if claim_id is not None and (not isinstance(claim_id, str) or not claim_id.strip()):
+            raise SchemaViolationException("Relationship claim_id must be a nonempty string")
+        if block_index is None and claim_id is None:
+            raise SchemaViolationException("Relationship requires a block_index or claim_id")
+        matches = [c for c in claims
+                   if (claim_id is None or c["claim_id"] == claim_id)
+                   and (block_index is None or any(o["locator"]["block_index"] == block_index for o in c["occurrences"]))]
+        if len(matches) != 1:
+            raise SchemaViolationException("Claim relationship scope is ambiguous or unresolved")
+        claim = matches[0]
+        for field, alias in (("contradicts", "contradicts_claim_ids"), ("supersedes", "supersedes_claim_ids")):
+            values = list(claim.get(field, []))
+            for key in (field, alias):
+                if key in declaration:
+                    values.extend(ids(declaration[key], key))
+            if field in declaration or alias in declaration:
+                claim[field] = list(dict.fromkeys(values))
+                claim[alias] = list(claim[field])
+        if "revision_of" in declaration:
+            revisions = ids(declaration["revision_of"], "revision_of")
+            if len(revisions) != 1 or (claim.get("revision_of") and claim["revision_of"] != revisions[0]):
+                raise SchemaViolationException("revision_of requires one non-conflicting explicit claim ID")
+            claim["revision_of"] = revisions[0]
 
 
 def extract_page_objects(
@@ -401,8 +483,6 @@ def extract_page_objects(
     still gets one answer for the question instead of two.  A page with no index to resolve
     against keeps the literal target, as before.
     """
-    if resolve_target is None:
-        resolve_target = _link_target_resolver()
     now = _utc_now()
     page_name = os.path.basename(page_path)
     page_key = os.path.splitext(page_name)[0]
@@ -421,7 +501,12 @@ def extract_page_objects(
             "edges": [],
             "page_key": page_key,
             "page_type": str(frontmatter.get("type", "system")).lower(),
+            "extraction_status": "skipped",
+            "skip_reason": "generated_artifact",
         }
+    validate_schema(frontmatter, body, page_name)
+    if resolve_target is None:
+        resolve_target = _link_target_resolver()
     title = frontmatter.get("title", page_key)
     page_type = str(frontmatter.get("type", "concept")).lower()
     aliases = frontmatter.get("aliases") or []
@@ -429,22 +514,10 @@ def extract_page_objects(
         aliases = [aliases]
     aliases = [str(alias).strip() for alias in aliases if alias and str(alias).strip()]
     sources = normalize_sources(frontmatter.get("sources") or [])
-    summary = frontmatter.get("summary") or _body_summary(body)
+    summary_raw = frontmatter.get("summary") or _body_summary(body, raw=True)
+    summary = _clean_claim_text(summary_raw)
+    legacy_summary = frontmatter.get("summary") or _body_summary(body, limit=320)
     validity_defaults = _validity_defaults(frontmatter)
-
-    try:
-        validate_schema(frontmatter, body, page_name)
-    except SchemaViolationException as e:
-        log.warning(f"Validation failed for {page_name}, skipping extraction: {e}")
-        return {
-            "entities": [],
-            "claims": [],
-            "evidence": [],
-            "sources": [],
-            "edges": [],
-            "page_key": page_key,
-            "page_type": page_type,
-        }
 
     def _parse_temporal(text: str):
         """The date a ledger entry carries as a ``[...]`` prefix, or ``None``.
@@ -472,7 +545,8 @@ def extract_page_objects(
         for match in re.finditer(r"\(Source[s]?:\s*(.*?)\)", raw_text, flags=re.IGNORECASE):
             content = match.group(1)
             for m2 in re.finditer(r"\[\[(.*?)\]\]", content):
-                found_sources.append(m2.group(1).split("|")[0].strip().replace(".md", ""))
+                ref = normalize_sources([m2.group(1).split("|")[0]])[0]
+                found_sources.append(ref.removesuffix(".md"))
         return found_sources
 
     subject_entity_ids = []
@@ -537,178 +611,158 @@ def extract_page_objects(
         entity_records[-1]["source_hash"] = _jsonable(frontmatter["source_hash"])
         entity_records[-1]["source_frontmatter"] = _jsonable(frontmatter)
 
-    source_ids = []
+    source_by_ref = {}
+    evidence_by_id = {}
+    claim_by_text = {}
+
+    def ensure_source(raw_ref):
+        if raw_ref not in source_by_ref:
+            source_id = _stable_id("source", raw_ref)
+            record = {
+                "source_id": source_id,
+                "raw_ref": raw_ref,
+                "canonical_source_page": page_name if page_type == "source" else _canonical_source_page(raw_ref),
+                "source_type": os.path.splitext(raw_ref)[1].lstrip(".").lower() or "md",
+                "title": title if page_type == "source" else os.path.basename(raw_ref),
+                "ingested_at": now,
+                # References establish identity, not a hash of unread source bytes (GC-05).
+                "content_hash": "",
+                "reference_identity": source_id,
+            }
+            source_by_ref[raw_ref] = record
+            source_records.append(record)
+        return source_by_ref[raw_ref]
+
     for raw_ref in sources:
-        source_id = _stable_id("source", raw_ref)
-        source_ids.append(source_id)
-        source_records.append({
-            "source_id": source_id,
-            "raw_ref": raw_ref,
-            "canonical_source_page": (page_name if page_type == "source"
-                else canonical_source_name(raw_ref)),
-            "source_type": os.path.splitext(raw_ref)[1].lstrip(".").lower() or "md",
-            "title": title if page_type == "source" else os.path.basename(raw_ref),
-            "ingested_at": now,
-            "content_hash": frontmatter.get("id") or _stable_id("hash", raw_ref + page_name),
-        })
+        ensure_source(raw_ref)
+
+    def attributed_sources(inline_sources):
+        anchored = []
+        for anchor in inline_sources:
+            exact = [ref for ref in sources if _source_key(ref) == _source_key(anchor)]
+            matches = exact or [ref for ref in sources
+                                if _source_key(source_by_ref[ref]["canonical_source_page"]) == _source_key(anchor)]
+            matches = list(dict.fromkeys(matches))
+            if len(matches) > 1:
+                raise SchemaViolationException("Inline source anchor is ambiguous; name the explicit raw reference")
+            ref = matches[0] if matches else anchor
+            ensure_source(ref)
+            if ref not in anchored:
+                anchored.append(ref)
+        if len(set(sources)) > 1 and page_type != "source":
+            return anchored
+        return list(dict.fromkeys([*sources, *anchored]))
+
+    def make_claim(text, kind, scope, locator, raw_text, *, explicit_id=None, legacy_text=None) -> dict:
+        identity_text = f"{page_key}:summary:{text}" if scope == "page" else f"{page_key}:{text}"
+        claim_id = explicit_id or _stable_id("claim", identity_text)
+        legacy_text = text[:360] if legacy_text is None else legacy_text
+        legacy_identity = f"{page_key}:summary:{legacy_text}" if scope == "page" else f"{page_key}:{legacy_text}"
+        legacy_id = _stable_id("claim", legacy_identity)
+        inline_sources = _parse_inline_sources(raw_text)
+        refs = attributed_sources(inline_sources)
+        evidence_ids = []
+        for ref in refs:
+            source = ensure_source(ref)
+            evidence_identity = f"{page_key}:summary:{ref}" if scope == "page" else f"{page_key}:{ref}:{text}"
+            evidence_id = _stable_id("evidence", evidence_identity)
+            evidence_ids.append(evidence_id)
+            evidence_type = "page-summary" if scope == "page" else f"block-{kind}"
+            occurrence = {"locator": dict(locator), "evidence_type": evidence_type}
+            if evidence_id not in evidence_by_id:
+                evidence_record = {
+                    "evidence_id": evidence_id,
+                    "source_id": source["source_id"],
+                    "locator": dict(locator),
+                    "occurrences": [],
+                    "evidence_text": text,
+                    "evidence_type": evidence_type,
+                    "provenance_kind": "declared-source",
+                    "support_status": "unverified",
+                    "created_at": now,
+                    "supports_claim_ids": [],
+                    "contradicts_claim_ids": [],
+                }
+                evidence_by_id[evidence_id] = evidence_record
+                evidence_records.append(evidence_record)
+            evidence = evidence_by_id[evidence_id]
+            evidence["occurrences"].append(occurrence)
+            if claim_id not in evidence["supports_claim_ids"]:
+                evidence["supports_claim_ids"].append(claim_id)
+        claim_type = "summary" if scope == "page" else claim_type_for_heading(kind, locator["heading"], text)
+        temporal = _parse_temporal(text) or validity_defaults.get("temporal_anchor")
+        attached_ids = sorted({evidence_by_id[eid]["source_id"] for eid in evidence_ids})
+        occurrence = {
+            "locator": dict(locator), "claim_type": claim_type, "temporal_anchor": temporal,
+            "evidence_ids": list(evidence_ids), "source_ids": attached_ids, "inline_sources": inline_sources,
+        }
+        return {
+            "claim_id": claim_id,
+            "claim_text": text,
+            "display_text": text[:360],
+            "identity_version": 2,
+            "legacy_claim_ids": [legacy_id] if not explicit_id and legacy_id != claim_id else [],
+            "claim_type": claim_type,
+            "claim_types": [claim_type],
+            "claim_scope": scope,
+            "occurrences": [occurrence],
+            "metadata_conflicts": [],
+            "status": frontmatter.get("status", "Active"),
+            "confidence": frontmatter.get("confidence", (0.65 if page_type == "synthesis" else 0.82)
+                                         if scope == "page" else (0.6 if page_type == "synthesis" else 0.8)),
+            "subject_entity_ids": list(subject_entity_ids),
+            "evidence_ids": evidence_ids,
+            "evidence_support": "declared",
+            "verified_evidence_ids": [],
+            "evidence_gap": "" if evidence_ids else ("no_source" if not sources else "ambiguous_source"),
+            "source_ids": attached_ids,
+            "inline_sources": inline_sources,
+            "locator": dict(locator),
+            **validity_defaults,
+            "temporal_anchor": temporal,
+            "created_at": _jsonable(frontmatter.get("created", now)),
+            "updated_at": _jsonable(frontmatter.get("updated", now)),
+            "source_page": page_name,
+        }
 
     blocks = _iter_blocks(body)
     if not blocks and summary:
-        blocks = [{
-            "kind": "paragraph",
-            "heading": title,
-            "text": summary,
-        }]
+        blocks = [{"kind": "paragraph", "heading": title, "text": summary, "raw_text": summary_raw}]
 
     for block_index, block in enumerate(blocks, start=1):
-        if _is_page_boilerplate(block["text"]) or _is_page_boilerplate(block.get("raw_text")):
-            continue
-        if _is_run_state_or_placeholder(block["text"]):
-            # A placeholder or a run's own packet state is not knowledge: it must not reach the
-            # claim or timeline projection, where it would be re-minted as an Active assertion.
-            continue
-        block_temporal = _parse_temporal(block["text"])
-        final_temporal = block_temporal or validity_defaults.get("temporal_anchor")
-        # ``_iter_blocks`` already cleaned this; ``_parse_temporal`` adds an anchor without
-        # editing it, so the claim text is the block text verbatim.
         block_text = block["text"]
-
-        raw_text = block.get("raw_text", block["text"])
-        inline_sources = _parse_inline_sources(raw_text)
-
-        custom_claim_type = claim_type_for_heading(
-            block["kind"], block.get("heading") or title, block_text
+        if (_is_page_boilerplate(block_text) or _is_page_boilerplate(block.get("raw_text"))
+                or _is_run_state_or_placeholder(block_text)):
+            continue
+        existing = claim_by_text.get(block_text)
+        explicit_id = existing["claim_id"] if existing else (frontmatter.get("claim_id") if not claim_records else None)
+        claim = make_claim(
+            block_text, block["kind"], "block",
+            {"page_key": page_key, "heading": block.get("heading") or title, "block_index": block_index},
+            block.get("raw_text", block_text), explicit_id=explicit_id,
         )
-            
-        combined_sources = list(sources)
-        combined_source_ids = list(source_ids)
-        for isrc in inline_sources:
-            # Compared as keys: an anchor that spells a declared source without its extension is
-            # that source, not a second one -- appending it would mint a second id for one file.
-            if _source_key(isrc) not in {_source_key(item) for item in combined_sources}:
-                combined_sources.append(isrc)
-                sid = _stable_id("source", isrc)
-                combined_source_ids.append(sid)
-                if not any(s["source_id"] == sid for s in source_records):
-                    source_records.append({
-                        "source_id": sid,
-                        "raw_ref": isrc,
-                        "canonical_source_page": canonical_source_name(isrc),
-                        "source_type": os.path.splitext(isrc)[1].lstrip(".").lower() or "md",
-                        "title": os.path.basename(isrc),
-                        "ingested_at": now,
-                        "content_hash": _stable_id("hash", isrc + page_name),
-                    })
+        if existing:
+            existing["occurrences"].extend(claim["occurrences"])
+            for field in ("claim_type", "temporal_anchor"):
+                if existing[field] != claim[field] and field not in existing["metadata_conflicts"]:
+                    existing["metadata_conflicts"].append(field)
+            for field in ("claim_types", "evidence_ids", "source_ids", "inline_sources", "legacy_claim_ids"):
+                existing[field] = list(dict.fromkeys([*existing[field], *claim[field]]))
+            existing["source_ids"].sort()
+            if existing["evidence_ids"]:
+                existing["evidence_gap"] = ""
+        else:
+            claim_by_text[block_text] = claim
+            claim_records.append(claim)
 
-        evidence_ids = []
-        inline_source_keys = {_source_key(item) for item in inline_sources}
-        for raw_ref, source_id in zip(combined_sources, combined_source_ids):
-            # Why this gate exists: with several declared sources, a block that names none of them
-            # must not be attached to all of them.  It said that, and then asked the question in
-            # two different spellings.
-            if len(sources) > 1 and page_type != "source" and _source_key(raw_ref) not in inline_source_keys:
-                continue
-            evidence_id = _stable_id("evidence", f"{page_key}:{raw_ref}:{block_text}")
-            evidence_ids.append(evidence_id)
-            evidence_records.append({
-                "evidence_id": evidence_id,
-                "source_id": source_id,
-                "locator": {
-                    "page_key": page_key,
-                    "heading": block.get("heading") or title,
-                    "block_index": block_index,
-                },
-                "evidence_text": block_text,
-                "evidence_type": f"block-{block['kind']}",
-                "created_at": now,
-                "supports_claim_ids": [],
-                "contradicts_claim_ids": [],
-            })
-
-        # Why this block carries no evidence, kept distinct from the other gap: a page that
-        # records no source at all is an ingest-contract problem, while a page that records
-        # several and a block that does not say which is the block's own missing anchor.
-        evidence_gap = ""
-        if not evidence_ids:
-            evidence_gap = "no_source" if not sources else "ambiguous_source"
-
-        claim_id = frontmatter.get("claim_id") if block_index == 1 else None
-        claim_id = claim_id or _stable_id("claim", f"{page_key}:{block_text}")
-        claim_record = enforce_claim_dict({
-            "claim_id": claim_id,
-            "claim_text": block_text,
-            "claim_type": custom_claim_type,
-            "claim_scope": "block",
-            "status": frontmatter.get("status", "Active"),
-            "confidence": frontmatter.get("confidence", 0.6 if page_type == "synthesis" else 0.8),
-            "subject_entity_ids": list(subject_entity_ids),
-            "evidence_ids": evidence_ids,
-            # Why a block carries no evidence, recorded rather than flattened into one number:
-            # "the page records no source at all" and "the page records several and this block
-            # does not say which" are different problems with different owners -- an ingest
-            # contract that let a page land without provenance, against a block that owes its
-            # inline anchor.  Both used to read as the same ``unsupported``.
-            "evidence_gap": evidence_gap,
-            "source_ids": list(source_ids),
-            "inline_sources": inline_sources,
-            "locator": {
-                "page_key": page_key,
-                "heading": block.get("heading") or title,
-                "block_index": block_index,
-            },
-            **validity_defaults,
-            "temporal_anchor": final_temporal,
-            "created_at": _jsonable(frontmatter.get("created", now)),
-            "updated_at": _jsonable(frontmatter.get("updated", now)),
-            "source_page": page_name,
-        })
-        claim_records.append(claim_record)
-        if evidence_ids:
-            for evidence_record in evidence_records[-len(evidence_ids):]:
-                evidence_record["supports_claim_ids"].append(claim_id)
-
+    _apply_claim_relations(frontmatter, claim_records)
     if summary:
-        summary_temporal = _parse_temporal(summary)
-        final_summary_temporal = summary_temporal or validity_defaults.get("temporal_anchor")
-
-        summary_evidence_ids = []
-        for raw_ref, source_id in zip(sources, source_ids):
-            evidence_id = _stable_id("evidence", f"{page_key}:summary:{raw_ref}")
-            summary_evidence_ids.append(evidence_id)
-            evidence_records.append({
-                "evidence_id": evidence_id,
-                "source_id": source_id,
-                "locator": {"page_key": page_key, "heading": title, "block_index": 0},
-                "evidence_text": summary,
-                "evidence_type": "page-summary",
-                "created_at": now,
-                "supports_claim_ids": [],
-                "contradicts_claim_ids": [],
-            })
-
-        summary_claim_id = _stable_id("claim", f"{page_key}:summary:{summary}")
-        summary_claim = enforce_claim_dict({
-            "claim_id": summary_claim_id,
-            "claim_text": summary,
-            "claim_type": "summary",
-            "claim_scope": "page",
-            "status": frontmatter.get("status", "Active"),
-            "confidence": frontmatter.get("confidence", 0.65 if page_type == "synthesis" else 0.82),
-            "subject_entity_ids": list(subject_entity_ids),
-            "evidence_ids": summary_evidence_ids,
-            "evidence_gap": "" if summary_evidence_ids else "no_source",
-            "source_ids": list(source_ids),
-            "locator": {"page_key": page_key, "heading": title, "block_index": 0},
-            **validity_defaults,
-            "temporal_anchor": final_summary_temporal,
-            "created_at": _jsonable(frontmatter.get("created", now)),
-            "updated_at": _jsonable(frontmatter.get("updated", now)),
-            "source_page": page_name,
-        })
-        if summary_evidence_ids:
+        summary_claim = make_claim(
+            summary, "summary", "page", {"page_key": page_key, "heading": title, "block_index": 0},
+            summary_raw, legacy_text=legacy_summary,
+        )
+        if summary_claim["evidence_ids"]:
             claim_records.append(summary_claim)
-            for evidence_record in evidence_records[-len(summary_evidence_ids):]:
-                evidence_record["supports_claim_ids"].append(summary_claim_id)
 
     return {
         "entities": entity_records,
@@ -718,5 +772,6 @@ def extract_page_objects(
         "edges": page_edges,
         "page_key": page_key,
         "page_type": page_type,
+        "extraction_status": "extracted",
     }
 

@@ -30,6 +30,7 @@ class _Budget:
         self.deadline = time.monotonic() + runtime.remaining_seconds()
         self.rows = self.bytes = self.retained_rows = self.retained_bytes = 0
         self.passes = 0
+        self.now = store._memory_now()
 
     def check(self):
         runtime.checkpoint()
@@ -171,6 +172,7 @@ def _scan_scope(conn, domain, cluster, terms, budget):
                 raise ValueError('Invalid scoped operational memory payload') from exc
             if not isinstance(item, dict):
                 raise ValueError('Scoped operational memory payload must be an object')
+            item = store._current_memory(item, budget.now)
             total += 1
             spool.append((
                 _field_masks(item, terms) if terms else (),
@@ -283,9 +285,10 @@ def _index_rows(conn, docs):
         chunk = ordered[start : start + 400]
         placeholders = ','.join('?' for _ in chunk)
         for row in conn.execute(
-            'SELECT g.doc, i.memory_id, i.memory_type, i.validity_state, i.memory_score, i.updated_rank '
+            'SELECT g.doc, i.memory_id, i.memory_type, memory_current_state(m.data_json), '
+            'memory_current_score(m.data_json), i.updated_rank '
             'FROM operational_memory_gram_docs g JOIN operational_memory_index i '
-            'ON i.memory_id = g.memory_id '
+            'ON i.memory_id = g.memory_id JOIN operational_memory m ON m.memory_id = i.memory_id '
             f'WHERE g.doc IN ({placeholders})',
             chunk,
         ):
@@ -343,6 +346,7 @@ def _index_views(terms, windows, domain, cluster, budget):
     from vector_lake import scoped_retrieval_index as indexes
 
     conn = store.get_connection()
+    store._query_memory_functions(conn, budget.now)
     # Cheapest gates first: a stale base costs one COUNT to refuse, while enumerating the scope
     # costs a few hundred milliseconds.  Asking the gram index first keeps that state at "no work"
     # instead of "30 613 rows read, then fall back".
@@ -363,23 +367,22 @@ def _index_views(terms, windows, domain, cluster, budget):
     skip = gram.skip_doc_set(conn)
     total = len(scope)
     with runtime.timed_stage('memory_scope_df'):
-        df, relevance = gram.fused_term_frequencies_and_relevance(
-            terms, skip_docs=skip, total_docs=total, docs=scope
-        )
+        if terms:
+            df, relevance = gram.fused_term_frequencies_and_relevance(
+                terms, skip_docs=skip, total_docs=total, docs=scope
+            )
+        else:
+            df, relevance = {}, dict.fromkeys(scope, 0.0)
     with runtime.timed_stage('memory_scope_weights'):
         type_weights = _type_weight_factors(conn, terms, df, total)
-        max_type_bonus = max(type_weights.values(), default=0.0)
     with runtime.timed_stage('memory_scope_rank'):
         if not relevance:
             return [[] for _ in windows]
         ranked = sorted(relevance.items(), key=lambda item: (-item[1], item[0]))
-        if len(ranked) > MAX_INDEX_CANDIDATES:
-            cutoff = ranked[MAX_INDEX_CANDIDATES - 1][1]
-            # The type constant can lift a lower-relevance row over the cut, so the cut is taken on
-            # relevance and then widened by the largest constant any type can add.
-            ranked = [item for item in ranked if item[1] + max_type_bonus >= cutoff]
-            if len(ranked) > MAX_INDEX_CANDIDATES * 2:
-                return None
+        # A relevance-only cut can be filled by hidden/expired rows. Fall back
+        # to the bounded exact scan rather than dropping lower eligible rows.
+        if len(ranked) > MAX_INDEX_CANDIDATES * 2:
+            return None
         index_rows = _index_rows(conn, [doc for doc, _ in ranked])
     runtime.backend('memory_index')
     results = []
@@ -406,7 +409,7 @@ def _index_views(terms, windows, domain, cluster, budget):
             view = store.score_memory_items(
                 ordered, terms, top_k,
                 allowed_types=allowed_types, include_history=include_history,
-                df=df, total=total,
+                df=df, total=total, now=budget.now,
             )
             budget.retain(sum(len(json.dumps(item)) for item in ordered), len(ordered))
         results.append(view)
@@ -419,7 +422,7 @@ def _index_views(terms, windows, domain, cluster, budget):
     return results
 
 
-def search_views(terms, windows, *, domain, cluster):
+def search_views(terms, windows, *, domain, cluster, now=None):
     """Return independent (top_k, include_history, allowed_types) result windows."""
     if not domain and not cluster:
         raise ValueError('Scoped memory search requires a scope')
@@ -430,6 +433,7 @@ def search_views(terms, windows, *, domain, cluster):
     if not any(top_k for top_k, _, _ in windows):
         return [[] for _ in windows]
     budget = _Budget()
+    budget.now = now or store._memory_now()
     heaps = [[] for _ in windows]
     conn = store.get_connection()
     try:
@@ -498,7 +502,7 @@ def search_views(terms, windows, *, domain, cluster):
                         # The row went away between the scan and the fetch; a missing winner is a
                         # shorter window, never a fabricated one.
                         continue
-                    item = copy.deepcopy(payload)
+                    item = copy.deepcopy(store._current_memory(payload, budget.now))
                     item['retrieval_score'] = -entry.key[0]
                     view.append(item)
                 results.append(view)

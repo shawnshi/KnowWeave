@@ -31,6 +31,13 @@ from vector_lake.link_resolution import (
     resolve_link_target,
 )
 from vector_lake.node_vocabulary import NON_NODE_WIKI_FILES
+from vector_lake.relation_policy import (
+    PRED_WEIGHT_TAXONOMY as PRED_WEIGHT_TAXONOMY,
+    PRED_WEIGHT_RELATION as PRED_WEIGHT_RELATION,
+    PRED_WEIGHT_MENTION as PRED_WEIGHT_MENTION,
+    pair_relation_weight,
+    predicate_weight,
+)
 from vector_lake.schema_validator import validate_schema, SchemaViolationException
 
 try:
@@ -74,19 +81,22 @@ MAX_EDGES_PER_NODE = 15
 # index.json.lock is shared with the outbox consumer's partial updates.
 INDEX_LOCK_TIMEOUT_SECONDS = 120
 
-PRED_WEIGHT_TAXONOMY = frozenset({"属于", "parent", "is-a", "belongs_to", "instance_of", "has_part", "核心构件"})
-PRED_WEIGHT_RELATION = frozenset({"类似", "related_to", "see_also", "peer", "关联"})
-PRED_WEIGHT_MENTION = frozenset({"mentions", "提及", "引用"})
-
 def get_pred_weight(pred: str) -> float:
-    pred_lower = pred.lower()
-    if pred_lower in PRED_WEIGHT_TAXONOMY:
-        return RELEVANCE_WEIGHTS["direct_link"] * 3.0
-    if pred_lower in PRED_WEIGHT_RELATION:
-        return RELEVANCE_WEIGHTS["direct_link"] * 1.5
-    if pred_lower in PRED_WEIGHT_MENTION:
-        return RELEVANCE_WEIGHTS["direct_link"] * 0.4
-    return RELEVANCE_WEIGHTS["direct_link"]
+    return predicate_weight(pred, RELEVANCE_WEIGHTS["direct_link"])
+
+
+def _resolved_triple_weights(triples, alias_map, unique_cores, valid_keys):
+    weights = {}
+    for triple in triples or []:
+        target = triple.get("target")
+        if not target:
+            continue
+        target = resolve_link_target(target, alias_map, unique_cores)
+        if target not in valid_keys:
+            continue
+        weight = get_pred_weight(triple.get("predicate", "mentions"))
+        weights[target] = max(weights.get(target, weight), weight)
+    return weights
 
 TYPE_AFFINITY = {
     "vendor": {"vendor": 0.8, "product": 1.2, "person": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
@@ -645,27 +655,24 @@ def calculate_relevance(node_a: dict, node_b: dict, all_nodes: dict,
     if links_a is None: links_a = frozenset((node_a.get("links") or []))
     if links_b is None: links_b = frozenset((node_b.get("links") or []))
     
-    if key_b in links_a:
-        if triples_a is not None:
-            pred = triples_a.get(key_b, "mentions")
-        else:
-            pred = "mentions"
-            for t in (node_a.get("triples") or []):
-                if t.get("target") == key_b:
-                    pred = t.get("predicate", "mentions")
-                    break
-        score += get_pred_weight(pred)
-        
-    if key_a in links_b:
-        if triples_b is not None:
-            pred = triples_b.get(key_a, "mentions")
-        else:
-            pred = "mentions"
-            for t in (node_b.get("triples") or []):
-                if t.get("target") == key_a:
-                    pred = t.get("predicate", "mentions")
-                    break
-        score += get_pred_weight(pred)
+    if triples_a is None or triples_b is None:
+        alias_map = _link_map_for_nodes(all_nodes)
+        _core_pages, unique_cores = core_name_maps(all_nodes.keys())
+        if triples_a is None:
+            triples_a = _resolved_triple_weights(node_a.get("triples"), alias_map, unique_cores, all_nodes)
+        if triples_b is None:
+            triples_b = _resolved_triple_weights(node_b.get("triples"), alias_map, unique_cores, all_nodes)
+    weight_a, weight_b = triples_a.get(key_b), triples_b.get(key_a)
+    # Keep the optional predicate-map calling convention while incremental callers
+    # pass already-resolved numeric maxima, just like the native payload.
+    if isinstance(weight_a, str):
+        weight_a = get_pred_weight(weight_a)
+    if isinstance(weight_b, str):
+        weight_b = get_pred_weight(weight_b)
+    score += pair_relation_weight(
+        weight_a, weight_b, linked=key_b in links_a or key_a in links_b,
+        direct_link=RELEVANCE_WEIGHTS["direct_link"],
+    )
 
     if sources_a is None: sources_a = frozenset((node_a.get("sources") or []))
     if sources_b is None: sources_b = frozenset((node_b.get("sources") or []))
@@ -817,12 +824,7 @@ def _calculate_weighted_edges(index_data: dict, alias_map: dict | None = None) -
     node_triples = {}
     node_sources = {}
     node_degrees = {}
-    pred_weights = {}
-
-    if "mentions" not in pred_weights:
-        pred_weights["mentions"] = get_pred_weight("mentions")
-    # ⚡ Bolt: Cache the fallback mention weight to avoid lookups in the hot loop
-    mention_weight = pred_weights["mentions"]
+    declared_weights = {}
 
     for key, node in nodes_dict.items():
         resolved_links = set()
@@ -832,18 +834,9 @@ def _calculate_weighted_edges(index_data: dict, alias_map: dict | None = None) -
 
         node_types[key] = node.get("type", "concept").lower()
         
-        td = {link: mention_weight for link in resolved_links}
-        for t in (node.get("triples") or []):
-            if t.get("target"):
-                pred = t.get("predicate", "mentions")
-                if pred not in pred_weights:
-                    pred_weights[pred] = get_pred_weight(pred)
-                target = t["target"]
-                # ⚡ Bolt: Store the pre-calculated numeric weight directly in the triples dict
-                # instead of the string predicate name. This eliminates a secondary dictionary
-                # lookup during the expensive O(N^2) _calculate_weighted_edges inner loop.
-                td[resolve_link_target(target, alias_map, unique_cores) or target] = pred_weights[pred]
-        node_triples[key] = td
+        declared_weights[key] = _resolved_triple_weights(
+            node.get("triples"), alias_map, unique_cores, nodes_dict,
+        )
 
         node_sources[key] = frozenset((node.get("sources") or []))
 
@@ -852,6 +845,30 @@ def _calculate_weighted_edges(index_data: dict, alias_map: dict | None = None) -
             node_degrees[key] = (1.0 / math.log(links_len)) * RELEVANCE_WEIGHTS["common_neighbor"]
         else:
             node_degrees[key] = 0.0
+
+    # Preserve the native target->float ABI without inventing links or reverse
+    # facts. One existing link/declaration direction owns the pair's MAX; an
+    # existing opposite direction carries zero. Canonical triples stay intact.
+    for key in node_keys:
+        node_triples[key] = dict.fromkeys(node_links[key] | declared_weights[key].keys(), 0.0)
+    for key, targets in node_triples.items():
+        for target in targets:
+            reverse = node_triples.get(target, {})
+            if key in reverse and key > target:
+                continue
+            targets[target] = pair_relation_weight(
+                declared_weights[key].get(target), declared_weights.get(target, {}).get(key),
+                linked=target in node_links[key] or key in node_links.get(target, ()),
+                direct_link=RELEVANCE_WEIGHTS["direct_link"],
+            )
+
+    # Match native candidate retention for declarations not present in links.
+    # This does not add candidates: only existing source/neighbor postings count.
+    triple_only_endpoints = set()
+    for key, targets in node_triples.items():
+        for target in targets:
+            if target in nodes_dict and target not in node_links[key]:
+                triple_only_endpoints.update((key, target))
 
     # Bolt Optimization: Pre-populate node_degrees with 0.0 for all unresolved links
     # to avoid expensive dictionary .get() fallbacks in the O(N^2) inner loop.
@@ -898,7 +915,7 @@ def _calculate_weighted_edges(index_data: dict, alias_map: dict | None = None) -
 
     reverse_links = {k: frozenset(v) for k, v in _temp_reverse_links.items()}
 
-    if HAVE_CORE and hasattr(vector_lake_core, "fast_calculate_weighted_edges"):
+    if HAVE_CORE and vector_lake_core is not None and hasattr(vector_lake_core, "fast_calculate_weighted_edges"):
         payload = {}
         for key in node_keys:
             payload[key] = {
@@ -928,11 +945,10 @@ def _calculate_weighted_edges(index_data: dict, alias_map: dict | None = None) -
         triples_a = node_triples[key_a]
         multiplier_a = node_multipliers[key_a]
         affinity_dict_a = type_affinity_precomputed[type_a]
-        reverse_links_a = reverse_links.get(key_a, frozenset())
 
         candidate_source_overlaps = {}
         candidate_neighbor_scores = {}
-        skip_zero_postings = _zero_evidence_below_threshold(max_affinity, multiplier_a, max_multiplier)
+        skip_zero_postings = key_a not in triple_only_endpoints and _zero_evidence_below_threshold(max_affinity, multiplier_a, max_multiplier)
 
         if overlap_weight != 0.0 or not skip_zero_postings:
             for source in sources_a:
@@ -968,11 +984,8 @@ def _calculate_weighted_edges(index_data: dict, alias_map: dict | None = None) -
 
             score = 0.0
 
-            if key_b in links_a:
-                score += triples_a[key_b]
-
-            if key_b in reverse_links_a:
-                score += node_triples[key_b][key_a]
+            score += triples_a.get(key_b, 0.0)
+            score += node_triples[key_b].get(key_a, 0.0)
 
             if key_b in candidate_source_overlaps:
                 score += candidate_source_overlaps[key_b] * overlap_weight
@@ -1267,14 +1280,9 @@ def update_index_items(filenames: list[str]):
                 # it is present before its own pass runs.
                 all_nodes_triples = {}
                 for k, v in nodes_for_maps.items():
-                    td = {}
-                    for t in ((v or {}).get("triples") or []):
-                        target = t.get("target")
-                        if target:
-                            td[resolve_link_target(target, alias_map, unique_cores) or target] = (
-                                t.get("predicate", "mentions")
-                            )
-                    all_nodes_triples[k] = td
+                    all_nodes_triples[k] = _resolved_triple_weights(
+                        (v or {}).get("triples"), alias_map, unique_cores, nodes_for_maps,
+                    )
 
                 for filename in valid_filenames:
                     node_key = filename[:-3]
@@ -1360,15 +1368,7 @@ def update_index_items(filenames: list[str]):
                                         for name in names
                                     }
 
-                                td = {}
-                                for t in (node_data.get("triples") or []):
-                                    if t.get("target"):
-                                        target = t["target"]
-                                        td[resolve_link_target(target, alias_map, unique_cores) or target] = (
-                                            t.get("predicate", "mentions")
-                                        )
-                                all_nodes_triples[node_key] = td
-                                triples_a = td
+                                triples_a = all_nodes_triples[node_key]
                                 
                                 node_links = _resolved(node_data.get("links") or [])
                                 node_sources = set((node_data.get("sources") or []))

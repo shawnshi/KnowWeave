@@ -93,6 +93,48 @@ def test_core_fallback_is_real_even_when_host_has_a_native_module(tmp_path):
     assert receipt['exit_code'] == 0
 
 
+@pytest.mark.parametrize('backend', ['fallback', 'native'])
+def test_native_marker_partition_is_explicit_and_never_filters_native_gate(monkeypatch, backend):
+    import ci_core
+    class Item:
+        def __init__(self, name, native):
+            self.nodeid, self.native = name, native
+        def get_closest_marker(self, name):
+            assert name == 'requires_native_core'
+            return self.native
+    class Config:
+        def __init__(self):
+            self.hook = self
+            self.deselected = []
+        def pytest_deselected(self, items):
+            self.deselected.extend(item.nodeid for item in items)
+    items = [Item('portable', False), Item('native-only', True)]
+    config = Config()
+    monkeypatch.setenv('VL_CI_CORE_BACKEND', backend)
+    ci_core.pytest_collection_modifyitems(config, items)
+    assert ci_core._STATE['collected_nodeids'] == ['portable', 'native-only']
+    assert ci_core._STATE['native_only_nodeids'] == ['native-only']
+    assert config.deselected == (['native-only'] if backend == 'fallback' else [])
+    assert [item.nodeid for item in items] == (['portable'] if backend == 'fallback' else ['portable', 'native-only'])
+
+
+def test_native_only_deselection_has_an_auditable_subprocess_receipt(tmp_path):
+    probe = tmp_path / 'test_partition.py'
+    probe.write_text('import pytest\nfrom vector_lake import indexer\ndef test_portable():\n    assert indexer.HAVE_CORE is False\n@pytest.mark.requires_native_core\ndef test_actual_native():\n    assert indexer.HAVE_CORE and indexer.vector_lake_core is not None\n', encoding='utf-8')
+    receipt = tmp_path / 'partition.json'
+    env = dict(os.environ)
+    env.pop('PYTEST_ADDOPTS', None)
+    result = subprocess.run([sys.executable, '-B', str(SCRIPT), 'test', '--backend', 'fallback', '--receipt', str(receipt), '--', '-q', str(probe)], cwd=REPO, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(receipt.read_text(encoding='utf-8'))
+    assert len(data['collected_nodeids']) == 2
+    assert len(data['selected_nodeids']) == len(data['backend_deselected_nodeids']) == 1
+    assert data['backend_deselected_nodeids'] == data['native_only_nodeids']
+    assert data['selected_nodeids'][0].endswith('::test_portable')
+    assert data['backend_deselected_nodeids'][0].endswith('::test_actual_native')
+    assert data['start']['HAVE_CORE'] is data['end']['HAVE_CORE'] is False
+
+
 def test_reusing_successful_probe_invalidates_it_before_native_failure(tmp_path):
     success = _run(tmp_path, 'fallback')
     assert success.returncode == 0

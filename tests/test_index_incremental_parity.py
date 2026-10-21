@@ -15,6 +15,8 @@ term, and the per-node cap re-ranks), so "equivalent to a rebuild" is a claim ab
 
 import json
 
+import pytest
+
 from vector_lake import db_store, governance_store, indexer
 
 
@@ -71,6 +73,36 @@ def _incremental_matches_rebuild(isolated_memory, items, victim: str):
 
     assert after_full_build == oracle, "two full builds disagree, so this comparison is meaningless"
     return oracle, incrementally
+
+
+@pytest.mark.parametrize("native", [False, pytest.param(True, marks=pytest.mark.requires_native_core)], ids=["python", "native"])
+@pytest.mark.parametrize("linked", [False, True], ids=["source-candidate", "linked"])
+def test_relation_maxima_match_incremental_rebuild_without_fact_loss(isolated_memory, monkeypatch, native, linked):
+    if native:
+        assert indexer.vector_lake_core is not None
+    monkeypatch.setattr(indexer, "HAVE_CORE", native)
+    items = [
+        _entity("e-a", "Concept_A", links=["Alias-B"] if linked else []),
+        _entity("e-b", "Concept_B", aliases=["Alias-B"], links=["Concept_A"] if linked else []),
+    ]
+    triples = [
+        {"predicate": "has_part", "target": "Alias-B"},
+        {"predicate": "related_to", "target": "Alias-B"},
+        {"predicate": "has_part", "target": "Alias-B"},
+        {"predicate": "mentions", "target": "Alias-B"},
+    ]
+    items[0]["triples"] = triples
+    items[1]["triples"] = [{"predicate": "part-of", "target": "Concept_A"}]
+    for item in items:
+        item["sources"] = ["synthetic-source"]
+    oracle, incrementally = _incremental_matches_rebuild(isolated_memory, items, "Concept_A")
+    assert oracle == incrementally == [("Concept_A", "Concept_B", 13.8)]
+    projected = _published(isolated_memory)
+    assert projected["nodes"]["Concept_A"]["triples"] == triples
+    stored = db_store.get_connection().execute(
+        "SELECT data_json FROM entities WHERE entity_id = ?", ("e-a",)
+    ).fetchone()
+    assert json.loads(stored["data_json"])["triples"] == triples
 
 
 def test_a_core_name_link_survives_an_incremental_update(isolated_memory):

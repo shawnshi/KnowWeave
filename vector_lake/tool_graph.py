@@ -2,8 +2,10 @@ import json
 import logging
 import math
 import os
+import re
 import webbrowser
 from datetime import datetime, timezone
+from pathlib import Path
 
 from filelock import FileLock, Timeout
 
@@ -236,8 +238,30 @@ def _build_page_graph(
     nodes_dict = index_data.get("nodes", {})
     communities = index_data.get("communities", {})
     raw_weighted_edges = index_data.get("weighted_edges", [])
-    aliases = index_data.get("aliases", {})
     valid_node_ids = set(nodes_dict.keys())
+    from vector_lake.relation_catalog import build_relation_catalog, node_field
+
+    # Old snapshots can carry aliases only in the index-level projection.
+    catalog_nodes = {key: dict(node) for key, node in nodes_dict.items()}
+    for alias, target in (index_data.get("aliases") or {}).items():
+        if isinstance(alias, str) and isinstance(target, str) and target in valid_node_ids:
+            aliases = catalog_nodes[target].get("aliases") or []
+            aliases = [aliases] if isinstance(aliases, str) else list(aliases)
+            if alias not in aliases:
+                aliases.append(alias)
+            catalog_nodes[target]["aliases"] = aliases
+    # The snapshot already selects the page population, including historical pages.
+    catalog = build_relation_catalog(catalog_nodes, include_history=True)
+    links_by_source: dict[str, set[str]] = {}
+    relations_by_source: dict[str, set[tuple[str, str]]] = {}
+    for relation in catalog["relations"]:
+        source, target = relation["source"], relation["target"]
+        if source not in valid_node_ids or target not in valid_node_ids or source == target:
+            continue
+        if relation["layer"] in {"declared", "navigation"}:
+            links_by_source.setdefault(source, set()).add(target)
+        if relation["layer"] == "declared":
+            relations_by_source.setdefault(source, set()).add((target, relation["predicate"]))
 
     # True undirected degree from the weighted edge set.  The previous version
     # incremented the source once per declared link (resolved or not) while
@@ -276,13 +300,11 @@ def _build_page_graph(
 
     graph_nodes = []
     for key, node in nodes_dict.items():
-        valid_links = set()
-        for target in node.get("links", []):
-            target_key = aliases.get(target, target)
-            if target_key in nodes_dict:
-                valid_links.add(target_key)
-        # Combine explicitly declared links with high-salience backbone edges
-        valid_links.update(backbone_adjacency.get(key, set()))
+        declared_links = links_by_source.get(key, set())
+        declared_relations = relations_by_source.get(key, set())
+        # Keep declaration identity separate from the budgeted relevance backbone.
+        # A degree/weight cutoff is a drawing choice, not a deletion of a page's assertion.
+        valid_links = declared_links | backbone_adjacency.get(key, set())
 
         local_degree = backbone_degrees.get(key, 0)
         graph_nodes.append({
@@ -299,16 +321,37 @@ def _build_page_graph(
             "summary": node.get("summary", ""),
             "sources": node.get("sources", []),
             "semantic_links": sorted(valid_links),
+            "declared_links": sorted(declared_links),
+            "declared_relations": [
+                {"target": target, "predicate": predicate}
+                for target, predicate in sorted(declared_relations)
+            ],
             "node_kind": "page",
             "status": node.get("status", ""),
+            "epistemic_status": node_field(node, "epistemic_status", node_field(node, "epistemic-status")),
+            "lifecycle_status": node_field(node, "lifecycle_status"),
             "domain": node.get("domain", ""),
             "alignment_score": node.get("alignment_score", 100),
             "decay_weight": node.get("decay_weight", 1.0),
         })
 
+    declared_connected = {
+        node_id
+        for node in graph_nodes
+        for target in node["declared_links"]
+        for node_id in (node["id"], target)
+    }
+    for node in graph_nodes:
+        if node["id"] in declared_connected:
+            node["is_orphan"] = False
+
     return {
         "nodes": graph_nodes,
         "edges": backbone_edges,
+        "relations": catalog["relations"],
+        "relation_diagnostics": catalog["diagnostics"],
+        "relation_scope": catalog["scope"],
+        "relations_truncated": catalog["truncated"],
         "community_labels": index_data.get("community_labels", {}),
         "total_raw_edges": len(raw_weighted_edges),
     }
@@ -357,6 +400,8 @@ def _build_claim_graph(
             "semantic_links": adjacency.get(nid, []),
             "node_kind": "claim",
             "validity_state": node.get("validity_state", "unknown"),
+            "status": node.get("status", ""),
+            "epistemic_status": node.get("epistemic_status", node.get("epistemic-status")),
             "claim_type": node.get("claim_type", "claim"),
             "confidence": node.get("confidence"),
             "subject_entities": node.get("subject_entities", []),
@@ -414,6 +459,24 @@ def _build_graph_payload(
         "governanceMetrics": index_data.get("governance_metrics", {}),
         "meta": meta,
     }
+
+
+def _render_graph_html(graph_data: dict, memory_dir: str) -> str:
+    """Read UI assets and render a snapshot without accessing lake state or launching a browser."""
+    templates = Path(get_extension_root()) / "templates"
+    html = (templates / "topology.html").read_text(encoding="utf-8")
+    def script_json(value):
+        return json.dumps(value, ensure_ascii=False).replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
+
+    replacements = {
+        "%%GRAPH_DATA%%": script_json(graph_data),
+        "%%MEMORY_BASE_PATH%%": script_json(Path(memory_dir).resolve().as_uri().rstrip("/") + "/")[1:-1],
+    }
+    for marker in replacements:
+        if html.count(marker) != 1:
+            raise ValueError(f"Graph template requires exactly one {marker}")
+    # A single pass prevents marker-looking source text from becoming executable code.
+    return re.sub(r"%%(?:GRAPH_DATA|MEMORY_BASE_PATH)%%", lambda match: replacements[match.group()], html)
 
 
 def visualize_vector_lake(
@@ -480,13 +543,7 @@ def visualize_vector_lake(
         read_consistency=read_consistency,
     )
 
-    with open(template_path, "r", encoding="utf-8") as handle:
-        html = handle.read()
-
-    # 🛡️ Sentinel: Escape HTML characters to prevent XSS when injecting JSON into a <script> block
-    safe_graph_data = json.dumps(graph_data, ensure_ascii=False).replace('<', r'\u003c').replace('>', r'\u003e').replace('&', r'\u0026')
-    html = html.replace("%%GRAPH_DATA%%", safe_graph_data)
-    html = html.replace("%%MEMORY_BASE_PATH%%", f"file:///{memory_dir.replace(os.sep, '/')}/")
+    html = _render_graph_html(graph_data, memory_dir)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as handle:
@@ -498,11 +555,12 @@ def visualize_vector_lake(
         and not os.environ.get("HEADLESS")
         and not os.environ.get("CI")
     )
+    browser_opened = False
     if should_open:
         try:
-            webbrowser.open(f"file:///{output_path.replace(os.sep, '/')}")
-        except Exception as e:
-            log.warning(f"Failed to open browser automatically: {e}")
+            browser_opened = bool(webbrowser.open(Path(output_path).resolve().as_uri()))
+        except (OSError, webbrowser.Error) as exc:
+            log.warning("Failed to request browser opening: %s", exc)
     meta = graph_data.get("meta", {})
     page_edges_str = f"{meta.get('rendered_page_edges', len(graph_data['pageGraph']['edges']))} backbone edges"
     if meta.get("pruned"):
@@ -521,9 +579,10 @@ def visualize_vector_lake(
         warnings.append("index.json was read without its lock (index busy, degraded consistency)")
     warning_str = f" WARNING: {'; '.join(warnings)}." if warnings else ""
 
+    browser_action = "Requested browser opening" if browser_opened else "Generated graph"
     return (
         f"Visualized {len(graph_data['pageGraph']['nodes'])} page nodes ({page_edges_str}) / "
-        f"{len(graph_data['claimGraph']['nodes'])} claim nodes. Opened graph in browser: {output_path}"
+        f"{len(graph_data['claimGraph']['nodes'])} claim nodes. {browser_action}: {output_path}"
         f"{warning_str}"
     )
 

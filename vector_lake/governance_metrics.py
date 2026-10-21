@@ -14,7 +14,8 @@ def _parse_dt(value):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -42,6 +43,7 @@ def _name_keys(names) -> frozenset[str]:
 
 def infer_claim_validity(claim: dict, now=None) -> dict:
     now = now or _utc_now()
+    valid_from = _parse_dt(claim.get("valid_from"))
     valid_to = _parse_dt(claim.get("valid_to"))
     review_after = _parse_dt(claim.get("review_after"))
     freshness_tier = str(claim.get("freshness_tier", "unknown")).lower()
@@ -57,6 +59,8 @@ def infer_claim_validity(claim: dict, now=None) -> dict:
     if valid_to and valid_to < now:
         reasons.append("valid_to")
         return {"validity_state": "expired", "reasons": reasons}
+    if valid_from and valid_from > now:
+        return {"validity_state": "not-yet-valid", "reasons": ["valid_from"]}
     if contradictions:
         reasons.append("conflicts")
         return {"validity_state": "conflicted", "reasons": reasons}
@@ -67,6 +71,11 @@ def infer_claim_validity(claim: dict, now=None) -> dict:
         # written before the field existed still lands on the general reason.
         reasons.append(str(claim.get("evidence_gap") or "missing_evidence"))
         return {"validity_state": "unsupported", "reasons": reasons}
+    support = claim.get("evidence_support")
+    verified = set(claim.get("verified_evidence_ids", [])) & set(claim.get("evidence_ids", []))
+    if support != "verified" or not verified:
+        reason = "legacy-unverified" if not support else "declared-unverified"
+        return {"validity_state": "needs-review", "reasons": [reason]}
     if review_after and review_after < now:
         reasons.append("review_after")
         return {"validity_state": "review-due", "reasons": reasons}

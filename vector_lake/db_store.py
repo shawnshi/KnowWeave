@@ -2902,7 +2902,7 @@ def delete_search_index(node_key: str):
         conn.execute("DELETE FROM vec_embedding_inputs WHERE node_key = ?", (node_key,))
         _enqueue_tantivy_intent(conn, node_key, "delete", None)
 
-def delete_node_cascade(node_key: str):
+def delete_node_cascade(node_key: str, *, affected_page_keys: set[str] | None = None):
     with _fts_mutation() as conn:
         rows = conn.execute(
             "SELECT entity_id FROM entities "
@@ -2919,6 +2919,22 @@ def delete_node_cascade(node_key: str):
             "f_source_page IN (?, ?)",
             (node_key, node_key, node_key + ".md"),
         ).fetchall()
+        from vector_lake.governance_store import _refresh_operational_memory_delta, _validate_claim_relation_delta
+
+        old_claim_ids = {row["claim_id"] for row in old_claim_rows}
+        scope = set(affected_page_keys or {node_key})
+        if node_key not in scope:
+            raise ValueError("Deleted page is outside the canonical batch scope")
+        scoped_ids = old_claim_ids | {
+            row[0] for row in conn.execute(
+                "SELECT claim_id FROM claims WHERE f_page_key IN (SELECT value FROM json_each(?)) "
+                "OR f_source_page IN (SELECT value FROM json_each(?))",
+                (json.dumps(sorted(scope)), json.dumps(sorted(scope | {key + '.md' for key in scope}))),
+            )
+        }
+        _validate_claim_relation_delta([], scoped_ids, scope)
+        # Preserve the old supersession targets before removing their winner's memory.
+        _refresh_operational_memory_delta(old_claim_ids, [])
 
         # By rowid when it was recorded: `WHERE node_key = ?` scans the whole FTS index
         # (52.4 ms per row measured against 0.33 ms), and the node_key form stays as the
@@ -2934,11 +2950,6 @@ def delete_node_cascade(node_key: str):
         _delete_vectors(conn, related_ids)
         conn.execute(f"DELETE FROM vec_embedding_inputs WHERE node_key IN ({placeholders})", related_ids)
         _enqueue_tantivy_intent(conn, node_key, "delete", None)
-        conn.execute(
-            "DELETE FROM operational_memory WHERE f_source_claim_id IN ("
-            "SELECT claim_id FROM claims WHERE f_page_key = ? OR f_source_page IN (?, ?))",
-            (node_key, node_key, node_key + ".md"),
-        )
         conn.execute(
             "DELETE FROM claims WHERE "
             "f_page_key = ? OR "

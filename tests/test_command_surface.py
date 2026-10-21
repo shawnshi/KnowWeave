@@ -128,13 +128,18 @@ def test_mcp_server_registers_its_tool_surface():
     """The server registers the optional strict facade and inline preview."""
     names = mcp_server.registered_tool_names(mcp_server.mcp)
 
-    assert len(names) == 21, f"expected exactly 21 core tools, got {len(names)}: {names}"
-    assert "get_query_evidence" in names
-    assert "preview_query_context" in names
-    assert "search_vector_lake" in names
-    assert "query_logic_lake" in names
-    assert "doctor_vector_lake" in names
-    assert "runtime_identity" in names
+    # Retain the original 21-tool boundary and admit only the two reviewed additions:
+    # scoped relation reads and canonical/outbox mutation receipts.
+    expected = {
+        "search_timeline", "inspect_projections", "get_query_evidence", "search_vector_lake",
+        "update_operational_memory", "lint_vector_lake", "preview_query_context",
+        "query_logic_lake", "finalize_query_synthesis", "review_governance_list",
+        "resolve_governance_item", "get_governance_debt", "trigger_audit_graph",
+        "runtime_identity", "doctor_vector_lake", "rename_entity", "trace_vector_lake",
+        "merge_suggestions_vector_lake", "check_duplicate_entity", "visualize_vector_lake",
+        "write_wiki_page", "get_relations", "get_mutation_status",
+    }
+    assert set(names) == expected
 
 
 def test_operations_maintenance_examples_match_parser_and_bind_approval():

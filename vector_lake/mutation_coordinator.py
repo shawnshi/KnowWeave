@@ -306,7 +306,12 @@ def execute_mutation_batch(
                 content = mutation["content"]
                 if mutation["mutation_type"] == "delete":
                     node_key = Path(filename).stem
-                    db_store.delete_node_cascade(node_key)
+                    if len(prepared) == 1:
+                        db_store.delete_node_cascade(node_key)
+                    else:
+                        db_store.delete_node_cascade(
+                            node_key, affected_page_keys={Path(item["filename"]).stem for item in prepared},
+                        )
             governance_store.apply_change_sets_batch(prepared_change_sets)
             published_at = datetime.now(timezone.utc).isoformat()
             for change_set in prepared_change_sets:

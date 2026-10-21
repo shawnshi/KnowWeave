@@ -1,99 +1,136 @@
+import hashlib
 import json
 import logging
-import os
+import math
 import time
 
-from vector_lake.wiki_utils import get_wiki_dir
+from vector_lake.link_resolution import build_link_map, declared_names_from_nodes, resolve_link_target
+from vector_lake.wiki_utils import get_wiki_dir, split_frontmatter
 
 log = logging.getLogger("vector-lake-gc")
 
 
-def gc_vector_lake(days: int = 30, dry_run: bool = True, force: bool = False) -> str:
-    from vector_lake.governance_store import load_claims, load_entities
+def _in_scope(node: dict, domain: str, cluster: str) -> bool:
+    return (not domain or node.get("domain") == domain) and (
+        not cluster or node.get("topic_cluster") == cluster
+    )
 
-    entities = load_entities().get("items", {})
-    nodes = {
-        str(node.get("page_key") or entity_id): node
-        for entity_id, node in entities.items()
-    }
-    identity = {
-        str(entity_id): str(node.get("page_key") or entity_id)
-        for entity_id, node in entities.items()
-    }
-    canonical_id_of = {page_key: entity_id for entity_id, page_key in identity.items()}
 
-    # Orphan detection needs topological connectivity, not the weighted/pruned
-    # edge set used to render the force graph.  The visualization edges have a
-    # relevance threshold that drops weak-but-real relations, which made every
-    # page look isolated.
-    degrees = _topological_degrees(nodes, identity, load_claims().get("items", {}))
+def _snapshot():
+    """Bind all inputs to the destructive decision, not just its selected victims."""
+    from vector_lake import governance_store
 
+    entities = governance_store.load_entities().get("items", {})
+    claims = governance_store.load_claims().get("items", {})
+    versions = governance_store.canonical_page_versions()
+    files = {}
+    wiki_dir = get_wiki_dir().resolve()
+    for path in sorted(wiki_dir.glob("*.md")):
+        if path.is_symlink() or not path.resolve().is_relative_to(wiki_dir):
+            raise ValueError("Maintenance refuses symlinked wiki pages.")
+        raw = path.read_bytes()
+        files[path.stem] = (hashlib.sha256(raw).hexdigest(), path.stat().st_mtime_ns)
+    state = json.dumps([entities, claims, versions, files], sort_keys=True, ensure_ascii=False, default=str)
+    return entities, claims, versions, files, hashlib.sha256(state.encode("utf-8")).hexdigest()
+
+
+def gc_vector_lake(days: int = 30, dry_run: bool = True, force: bool = False, *,
+                   domain: str = "", cluster: str = "", expected_plan=None) -> str:
+    """Preview returns ``Expected plan: <JSON>``; execution requires that unchanged plan."""
+    if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+        raise ValueError("days must be a nonnegative integer")
+    if not isinstance(domain, str) or not isinstance(cluster, str):
+        raise ValueError("domain and cluster must be strings")
+    if not dry_run and expected_plan is None:
+        return "GC aborted: expected_plan from a dry-run preview is required."
+    if isinstance(expected_plan, str):
+        try:
+            expected_plan = json.loads(expected_plan)
+        except json.JSONDecodeError as exc:
+            raise ValueError("expected_plan must contain valid preview JSON") from exc
+    if expected_plan is not None and not isinstance(expected_plan, dict):
+        raise ValueError("expected_plan must be a preview object or its JSON string")
+    cutoff = time.time() - days * 86400
+    if expected_plan is not None:
+        cutoff = expected_plan.get("cutoff")
+        if isinstance(cutoff, bool) or not isinstance(cutoff, (float, int)) or not math.isfinite(cutoff):
+            raise ValueError("expected_plan.cutoff must be finite")
+        if cutoff > time.time() - days * 86400:
+            return "GC aborted: stale or invalid preview plan."
+
+    entities, claims, versions, files, state = _snapshot()
+    nodes = {str(node.get("page_key") or entity_id): node for entity_id, node in entities.items()}
+    identity = {str(entity_id): str(node.get("page_key") or entity_id) for entity_id, node in entities.items()}
+    canonical_id_of = {key: entity_id for entity_id, key in identity.items()}
+    # Connectivity is global and conservative; a scope must not manufacture an orphan
+    # by hiding a real neighbour. Only candidate selection is scoped.
+    degrees = _topological_degrees(nodes, identity, claims)
     wiki_dir = get_wiki_dir()
-    now = time.time()
-    cutoff = now - (days * 86400)
-
     orphans = []
     typed_pages = 0
-    for page_key, node in nodes.items():
-        if str(node.get("type") or "").lower() not in ("vendor", "product", "person", "event"):
+    for key, node in sorted(nodes.items()):
+        if not _in_scope(node, domain, cluster):
+            continue
+        if str(node.get("type") or "").lower() not in {"vendor", "product", "person", "event"}:
             continue
         typed_pages += 1
-        if degrees.get(page_key, 0) <= 1:
-            file_path = wiki_dir / f"{page_key}.md"
-            if file_path.exists():
-                mtime = os.path.getmtime(file_path)
-                if mtime < cutoff:
-                    orphans.append((file_path, canonical_id_of.get(page_key, page_key), degrees.get(page_key, 0)))
+        if key not in files or key not in versions or degrees.get(key, 0) > 1:
+            continue
+        frontmatter, _ = split_frontmatter((wiki_dir / f"{key}.md").read_text(encoding="utf-8"))
+        # Absence of an active marker is not disposal authority. Only explicit retired
+        # records qualify; frontmatter additionally protects legacy core classification.
+        if str(node.get("status", "")).lower() not in {"archived", "deprecated", "retracted"}:
+            continue
+        if str(frontmatter.get("status", "")).lower() == "active":
+            continue
+        if any(str(record.get("strategic_scope", "")).lower() == "core" for record in (node, frontmatter)):
+            continue
+        if files[key][1] / 1e9 < cutoff:
+            orphans.append(key)
 
+    plan = {"version": 1, "days": days, "domain": domain, "cluster": cluster,
+            "cutoff": cutoff, "state": state, "pages": orphans}
+    if expected_plan is not None and plan != expected_plan:
+        return "GC aborted: stale preview plan; run dry-run again."
     if dry_run:
         if not orphans:
-            return f"[DRY-RUN] No orphan entities older than {days} days found."
-        lines = [
-            f"[DRY-RUN] Found {len(orphans)} orphan entities older than {days} days "
-            f"(page-edge degree <= 1) out of {typed_pages} typed pages. "
-            f"Re-run with dry_run=False to execute:"
-        ]
-        for p, nid, degree in orphans[:20]:
-            lines.append(f"  - {p.name} (ID: {nid}, degree: {degree})")
-        if len(orphans) > 20:
-            lines.append(f"  ... and {len(orphans) - 20} more.")
+            lines = [f"[DRY-RUN] No orphan entities older than {days} days found."]
+        else:
+            lines = [f"[DRY-RUN] Found {len(orphans)} retired orphan entities older than {days} days "
+                     f"(page-edge degree <= 1) out of {typed_pages} typed pages. "
+                     "Re-run with dry_run=False and expected_plan to execute:"]
+            for key in orphans[:20]:
+                lines.append(f"  - {key}.md (ID: {canonical_id_of[key]}, degree: {degrees.get(key, 0)})")
+        lines.append("Expected plan: " + json.dumps(plan, sort_keys=True, ensure_ascii=False))
         return "\n".join(lines)
-
     if not orphans:
         return f"GC complete. No orphan entities older than {days} days found."
-
-    # Mass-deletion circuit breaker: a degree signal that collapses for any
-    # structural reason must not silently remove most of the entity corpus.
     if not force and len(orphans) >= 5 and len(orphans) > typed_pages * 0.5:
-        return (
-            f"GC aborted: {len(orphans)} of {typed_pages} typed pages ({len(orphans) / max(1, typed_pages):.0%}) "
-            "would be deleted, which exceeds the 50% safety threshold. "
-            "Inspect the page-key edge projection first (`projection-report`), then re-run with force=True "
-            "if the corpus really is that sparse."
-        )
+        return f"GC aborted: {len(orphans)} of {typed_pages} typed pages exceeds the 50% safety threshold; inspect then use force=True."
 
-    deleted = 0
-    skipped = []
     import shutil
+    from vector_lake.mutation_coordinator import execute_mutation_batch
     backup_dir = wiki_dir.parent / "backup" / "gc" / _utc_stamp()
-    backup_dir.mkdir(parents=True, exist_ok=True)
 
-    for path, nid, degree in orphans:
-        try:
-            shutil.copy2(path, backup_dir / path.name)
-            from vector_lake.mutation_coordinator import execute_mutation_plan
-            execute_mutation_plan(path.name, is_delete=True)
-            deleted += 1
-        except Exception as e:
-            skipped.append(path.name)
-            log.error(f"Failed to GC {path.name}: {e}")
+    def precondition():
+        if _snapshot()[-1] != state:
+            raise ValueError("stale preview plan; no pages deleted")
+        # Native CAS runs in this same write transaction; backup is after every stale
+        # check and before the first canonical delete. A failed backup aborts the batch.
+        backup_dir.mkdir(parents=True, exist_ok=False)
+        for key in orphans:
+            shutil.copy2(wiki_dir / f"{key}.md", backup_dir / f"{key}.md")
 
-    prune_note = _prune_change_sets(cutoff, backup_dir)
-
-    result = f"GC complete. Deleted {deleted} orphan pages (backed up to {backup_dir})."
-    if skipped:
-        result += f" Skipped: {', '.join(skipped[:10])}."
-    return result + prune_note
+    try:
+        _, receipt = execute_mutation_batch(
+            [{"filename": f"{key}.md", "is_delete": True, "expected_version": versions[key]} for key in orphans],
+            canonical_precondition=precondition,
+        )
+    except (ValueError, OSError) as exc:
+        return f"GC aborted: {exc}"
+    # Ledger retention is not part of a page preview, and must not silently delete
+    # unrelated audit rows (especially during scoped maintenance).
+    return f"GC canonical commit. Deleted {len(orphans)} orphan pages (backed up to {backup_dir}). {receipt}"
 
 
 def _topological_degrees(nodes: dict, identity: dict, claims: dict) -> dict:
@@ -105,12 +142,7 @@ def _topological_degrees(nodes: dict, identity: dict, claims: dict) -> dict:
       * pages whose entities co-occur in the same claim.
     """
     keys = set(nodes)
-    resolve = {}
-    for key, node in nodes.items():
-        resolve[key] = key
-        for alias in [node.get("title"), *(node.get("aliases") or [])]:
-            if alias:
-                resolve.setdefault(str(alias), key)
+    link_map, _, unique_cores, _ = build_link_map(nodes, declared_names_from_nodes(nodes))
 
     adjacency = {key: set() for key in keys}
 
@@ -122,7 +154,10 @@ def _topological_degrees(nodes: dict, identity: dict, claims: dict) -> dict:
     source_to_pages = {}
     for key, node in nodes.items():
         for link in [*(node.get("links") or []), *(node.get("outbound_links") or [])]:
-            _connect(key, resolve.get(str(link), str(link)))
+            target = str(link).split("|", 1)[0].split("#", 1)[0].removesuffix(".md").strip()
+            resolved = resolve_link_target(target, link_map, unique_cores)
+            if resolved:
+                _connect(key, resolved)
         for source in node.get("sources") or []:
             source_to_pages.setdefault(str(source), []).append(key)
     for pages in source_to_pages.values():

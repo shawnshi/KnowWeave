@@ -31,8 +31,9 @@ graph TD
     end
     subgraph proj [投影：可重建；落后时读侧降级而不隐藏]
         MD --> IDX["index.json"]
-        DB --> CG["claim_graph_edges"]
-        CG --> CT["claim_topology.json"]
+        DB --> CG["claim_graph_edges<br>page / explicit relation records"]
+        DB --> CLAIMS["canonical claims<br>subject / source attribution"]
+        CLAIMS --> CT["claim_topology.json<br>cooccurrence display graph"]
         IDX --> PINDEX["page_index_* + FTS5"]
         DB --> VEC["vec_embeddings<br>sqlite-vec"]
         DB --> OM["operational_memory"]
@@ -168,6 +169,12 @@ owner 侧收口，读侧不重建。
 `title` / `aliases` 是**实体名**，参与链接解析（连 core 名回退也认它们）；`tags` 是**标签**，从不参与链接解析。两者刻意保持不相交：标签撞上任何实体名会被拒绝（`Tag Collision`），而 `aliases` 里以 `#` 开头的条目会被视为把标签塞进实体命名空间、写入即拒绝（改用 `tags:`）。
 
 
+## Claim identity, provenance and graph semantics
+
+`claim_extractor` 从页面提取片段，不执行原文蕴含核验。Claim、来源声明和已核验证据必须分开；`compiled-truth` 是页面位置分类，不是事实认证。完整身份、显式关系、时间有效性和受保护迁移流程见 [CLAIMS.md](CLAIMS.md)。
+
+`claim_graph_edges` 与 `claim_topology.json` 不构成直接的表到文件映射。前者保存页面关系及部分显式关系记录；后者由 `build_claim_graph_projection` 从 canonical claims 的共同主体、共同来源和显式矛盾关系计算。JSON 声明 `graph_kind: claim-cooccurrence`、`is_evidence_graph: false`，并携带稀疏化参数。共享实体／来源不是支持关系，权重不是证据强度，默认截取的图不是全库图。
+
 ## Operational Memory
 
 运行态记忆由 `vector_lake/governance_store.py` 从 canonical claims 编译生成。它解决的问题是：Agent 常常只需要一个事实、偏好、决策或任务状态，不应该每次加载整页 Markdown。
@@ -232,7 +239,7 @@ MEMORY/
   wiki/
     *.md
     index.json          <-- Page index projection: nodes (summary only) + weighted edges
-    claim_topology.json <-- Claim topology projection (claim_graph_edges -> JSON)
+    claim_topology.json <-- Claim cooccurrence projection (canonical claims -> JSON)
     .meta/
       purpose_vectors.json <-- Legacy fallback for intent weights
       vector_lake.db       <-- Unified SQLite Store (entities, claims, graph, timeline,

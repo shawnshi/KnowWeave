@@ -120,7 +120,9 @@ def test_visualize_default_and_explicit_none_preserve_runtime_dispatch():
 
 def test_registered_surface_count_and_nullable_visualizer_schema():
     listed = asyncio.run(mcp_server.mcp.list_tools())
-    assert len(listed) == 21
+    assert len(listed) == 23
+    assert any(tool.name == 'get_relations' for tool in listed)
+    assert any(tool.name == 'get_mutation_status' for tool in listed)
     field = next(t for t in listed if t.name == 'visualize_vector_lake').parameters['properties']['output_dir']
     assert field['default'] is None
     assert any(v.get('type') == 'null' for v in field['anyOf'])

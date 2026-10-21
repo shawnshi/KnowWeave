@@ -1,3 +1,4 @@
+import json
 import os
 import time
 
@@ -26,7 +27,7 @@ def _vendor(page_key, entity_id, **extra):
         "canonical_name": page_key.split("_", 1)[-1],
         "page_key": page_key,
         "type": "vendor",
-        "status": "Active",
+        "status": "Archived",
         "links": [],
         "sources": [],
     }
@@ -56,7 +57,7 @@ def test_gc_keeps_page_connected_by_two_links(isolated_memory):
 
     # Degree 2 from two explicit links: not an orphan.
     assert "Vendor_Acme" not in result, result
-    # Degree 1 (single inbound link) stays an orphan under the documented contract.
+    # A retired degree-1 page remains eligible; active/core leaves are protected.
     assert "Vendor_Beta.md" in result, result
 
 
@@ -117,7 +118,8 @@ def test_gc_ignores_claim_space_edges(isolated_memory):
 def test_gc_safety_valve_blocks_mass_deletion(isolated_memory):
     _seed(isolated_memory, [_vendor(f"Vendor_Page{index}", f"entity-{index}") for index in range(10)])
 
-    result = gc_vector_lake(days=30, dry_run=False)
+    plan = json.loads(gc_vector_lake(days=30).split("Expected plan: ", 1)[1])
+    result = gc_vector_lake(days=30, dry_run=False, expected_plan=plan)
 
     assert "GC aborted" in result
     for index in range(10):
@@ -127,7 +129,8 @@ def test_gc_safety_valve_blocks_mass_deletion(isolated_memory):
 def test_gc_force_bypasses_safety_valve(isolated_memory):
     _seed(isolated_memory, [_vendor(f"Vendor_Page{index}", f"entity-{index}") for index in range(10)])
 
-    gc_vector_lake(days=30, dry_run=False, force=True)
+    plan = json.loads(gc_vector_lake(days=30).split("Expected plan: ", 1)[1])
+    gc_vector_lake(days=30, dry_run=False, force=True, expected_plan=plan)
 
     assert not (isolated_memory / "wiki" / "Vendor_Page0.md").exists()
     backups = list((isolated_memory / "backup" / "gc").rglob("Vendor_Page0.md"))

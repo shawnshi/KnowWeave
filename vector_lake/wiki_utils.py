@@ -615,7 +615,8 @@ def atomic_write_text(
             
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    with open(temp_path, "w", encoding="utf-8") as handle:
+    # The payload owns its newlines; Windows translation would turn CRLF into CRCRLF.
+    with open(temp_path, "w", encoding="utf-8", newline="") as handle:
         handle.write(content)
         flush_durable(handle)
     os.replace(temp_path, path)

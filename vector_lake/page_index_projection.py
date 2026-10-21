@@ -46,6 +46,7 @@ import time
 from vector_lake.db_store import get_connection, get_db_path, init_db, transaction
 from vector_lake.link_resolution import build_link_map, declared_names_from_nodes, resolve_link_target
 from vector_lake.wiki_utils import get_index_path
+from vector_lake.schema_validator import canonical_domain
 from vector_lake.wiki_utils import get_meta_dir
 
 log = logging.getLogger("vector-lake-page-index")
@@ -504,6 +505,23 @@ class _SqliteCatalog:
     def adjacency(self) -> dict[str, list[tuple[str, float]]]:
         return adjacency()
 
+    def scoped_adjacency(self, domain="", cluster="") -> dict[str, list[tuple[str, float]]]:
+        conn = get_connection()
+        conn.create_function('vl_page_scope_domain', 1, lambda value: canonical_domain(value).lower(), deterministic=True)
+        conn.create_function('vl_page_scope_cluster', 1, lambda value: str(value or '').lower(), deterministic=True)
+        table: dict[str, list[tuple[str, float]]] = {}
+        for source, target, weight in conn.execute(
+            "SELECT e.source_key, e.target_key, e.weight FROM page_index_edges e "
+            "JOIN page_index_nodes s ON s.node_key=e.source_key "
+            "JOIN page_index_nodes t ON t.node_key=e.target_key "
+            "WHERE (? = '' OR (vl_page_scope_domain(s.domain) = ? AND vl_page_scope_domain(t.domain) = ?)) "
+            "AND (? = '' OR (vl_page_scope_cluster(s.topic_cluster) = ? AND vl_page_scope_cluster(t.topic_cluster) = ?)) ORDER BY e.sequence",
+            (domain, canonical_domain(domain).lower(), canonical_domain(domain).lower(), cluster, cluster.lower(), cluster.lower()),
+        ):
+            table.setdefault(source, []).append((target, float(weight)))
+            table.setdefault(target, []).append((source, float(weight)))
+        return table
+
     def node_summary_lines(self, limit: int = 50) -> list[str]:
         return node_summary_lines(limit)
 
@@ -555,6 +573,13 @@ class _FileCatalog:
                 table.setdefault(target, []).append((source, weight))
             self._adjacency = table
         return self._adjacency
+
+    def scoped_adjacency(self, domain="", cluster="") -> dict[str, list[tuple[str, float]]]:
+        visible = {key for key, node in self._nodes.items()
+                   if (not domain or canonical_domain(node.get("domain")).lower() == canonical_domain(domain).lower())
+                   and (not cluster or str(node.get("topic_cluster") or "").lower() == cluster.lower())}
+        return {key: [(target, weight) for target, weight in neighbors if target in visible]
+                for key, neighbors in self.adjacency().items() if key in visible}
 
     def node_summary_lines(self, limit: int = 50) -> list[str]:
         return [

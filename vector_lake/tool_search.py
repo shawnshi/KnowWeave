@@ -688,13 +688,14 @@ def _get_fts_search_results(query: str, limit: int = 50) -> list[dict]:
             if scope is not None:
                 join = ' JOIN page_index_nodes p ON p.node_key=wiki_search_index.node_key'
                 if scope['domain']:
-                    # Connection-local, read-only UDF: exactly the Python selector's alias,
-                    # case and Unicode-whitespace semantics, not a schema installation.
+                    # Match the public page selector's registered aliases and Unicode
+                    # whitespace normalization before limiting candidates.
                     conn.create_function('vl_canonical_domain', 1, lambda value: canonical_domain(value).lower(), deterministic=True)
                     clauses.append('vl_canonical_domain(p.domain)=?')
                     params.append(canonical_domain(scope['domain']).lower())
                 if scope['cluster']:
-                    clauses.append('lower(p.topic_cluster)=?')
+                    conn.create_function('vl_page_scope_cluster', 1, lambda value: str(value or '').lower(), deterministic=True)
+                    clauses.append('vl_page_scope_cluster(p.topic_cluster)=?')
                     params.append(scope['cluster'].lower())
                 if not scope['include_history']:
                     clauses.append("lower(COALESCE(p.status,'')) NOT IN ('deprecated','archived')")
@@ -1829,7 +1830,23 @@ def _search_scored_pages(
     # P2-1: Dynamic Graph Expansion via Multi-hop PPR (Personalized PageRank)
     top_keys = {node["_key"] for _, node in scored[:5]}
     try:
-        adj = catalog.adjacency() if top_keys and not runtime.expired() else None
+        adj = None
+        scoped_walk = bool(domain or cluster)
+        if top_keys and not runtime.expired():
+            scoped_adjacency = getattr(catalog, "scoped_adjacency", None)
+            if scoped_walk and scoped_adjacency is not None:
+                adj = scoped_adjacency(domain=domain or "", cluster=cluster or "")
+            else:
+                adj = catalog.adjacency()
+                if scoped_walk:
+                    # Injectable/legacy catalogs still need an induced graph,
+                    # not a result-only filter after hidden bridge propagation.
+                    keys = set(adj) | {target for values in adj.values() for target, _ in values}
+                    cheap = getattr(catalog, "filter_fields", catalog.nodes_by_key)
+                    visible = {key for key, node in cheap(keys).items()
+                               if _passes_filters(node, domain, cluster, True, None)}
+                    adj = {key: [(target, weight) for target, weight in values if target in visible]
+                           for key, values in adj.items() if key in visible}
         if top_keys and adj:
             # PPR parameters.  Non-seed nodes must still receive teleportation mass,
             # otherwise the walk collapses to "adjacent to a seed" after two steps.
@@ -1837,7 +1854,7 @@ def _search_scored_pages(
             existing_keys = {node["_key"] for _, node in scored}
             expansion_limit = 12 if intent == "entity" else 5
 
-            if HAVE_CORE and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
+            if HAVE_CORE and not scoped_walk and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
                 # The same walk on a prebuilt index.  Measured 31.9 -> 1.5 ms per query (20.7x) and
                 # verified bit-identical on 16 edge cases plus the live graph: the legacy call pays for
                 # moving the 39 382-edge dict into Rust and cloning ~150k strings per call, which the

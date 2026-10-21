@@ -114,6 +114,10 @@ def _snapshot() -> dict:
     return {'backend': mode, 'HAVE_CORE': True, 'native_path': str(actual), 'sha256': _digest(actual), 'version': core.version(), 'loaded_core_modules': loaded}
 
 
+def pytest_configure(config):
+    config.addinivalue_line('markers', 'requires_native_core: requires the real checkout-built core in the native CI gate')
+
+
 def pytest_sessionstart(session):
     _STATE['start'] = _snapshot()
 
@@ -124,11 +128,30 @@ def pytest_runtest_logreport(report):
             _STATE.setdefault('semantic_observations', {})[name] = value
 
 
+def pytest_collection_modifyitems(config, items):
+    """Native-only contracts run in the mandatory native gate, never against a fake core."""
+    _STATE['collected_nodeids'] = [item.nodeid for item in items]
+    native_only = [item for item in items if item.get_closest_marker('requires_native_core')]
+    _STATE['native_only_nodeids'] = [item.nodeid for item in native_only]
+    deselected = native_only if os.environ['VL_CI_CORE_BACKEND'] == 'fallback' else []
+    _STATE['backend_deselected_nodeids'] = [item.nodeid for item in deselected]
+    if deselected:
+        ids = {item.nodeid for item in deselected}
+        items[:] = [item for item in items if item.nodeid not in ids]
+        config.hook.pytest_deselected(items=deselected)
+
+
+def pytest_collection_finish(session):
+    _STATE['selected_nodeids'] = [item.nodeid for item in session.items]
+
+
 def pytest_sessionfinish(session, exitstatus):
     _STATE['end'] = _snapshot()
     _STATE['exit_code'] = int(exitstatus)
     Path(os.environ['VL_CI_CORE_RECEIPT']).write_text(json.dumps(_STATE, indent=2), encoding='utf-8')
-    print('\nCI core backend probe: ' + json.dumps(_STATE))
+    summary = {key: value for key, value in _STATE.items() if not key.endswith('_nodeids')}
+    summary['collection_counts'] = {key: len(value) for key, value in _STATE.items() if key.endswith('_nodeids')}
+    print('\nCI core backend probe: ' + json.dumps(summary))
 
 
 def main(argv=None) -> int:

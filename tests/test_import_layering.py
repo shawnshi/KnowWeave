@@ -173,7 +173,7 @@ def test_the_cycle_checker_detects_a_synthetic_cycle():
     assert _cycles({"a": {"b"}, "b": {"c"}, "c": set()}) == []
 
 
-def test_only_the_two_documented_pairs_are_deferred_and_upward():
+def test_only_documented_pairs_are_deferred_and_upward():
     """Extra upward edges mean a new load-order dependency; review it, do not absorb it.
 
     Adding a third pair is not automatically wrong, but it is a new structural
@@ -182,6 +182,10 @@ def test_only_the_two_documented_pairs_are_deferred_and_upward():
     assert _deferred_upward_edges() == {
         ("wiki_utils", "mutation_coordinator"),
         ("db_store", "tool_timeline"),
+        # Node deletion must check Claim references and refresh predecessor memory BEFORE
+        # deleting a winner. governance_store owns those rules and already imports db_store,
+        # so this bounded deletion-only dependency is deferred, like the timeline delta.
+        ("db_store", "governance_store"),
         # ``scoped_memory_search`` imports ``governance_store`` at module level (it is the store's
         # scoped reader), so the store's own two call sites defer the import back to it.  Same
         # shape as the two above: a recorded inversion, not an absorbed one.

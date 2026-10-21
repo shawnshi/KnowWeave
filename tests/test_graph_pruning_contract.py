@@ -32,11 +32,11 @@ def test_capped_equal_weight_runtime_graph_matches_common_lex_contract(monkeypat
     # This fixture's identical finite score is not universal scoring/qualifying-set parity.
 
 
+@pytest.mark.requires_native_core
 @pytest.mark.parametrize('cap',[0,1,2,5,15,64])
 def test_native_cap_counts_both_incident_endpoints_and_stable_ties(cap):
-    if not indexer.HAVE_CORE:
-        pytest.skip('native raw API; portable public runtime assertions remain mandatory')
     core = indexer.vector_lake_core
+    assert core is not None
     keys = list(_nodes(64))
     def calc(order):
         payload={k:{'type':'concept','links':[j for j in keys if j != k],'sources':[],'triples':{},'multiplier':1.0,'degree_weight':0.0} for k in order}

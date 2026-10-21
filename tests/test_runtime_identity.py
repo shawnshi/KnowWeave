@@ -134,3 +134,184 @@ def test_mcp_surface_is_readonly_structured_json():
     for name in ('runtime_identity', 'doctor_vector_lake'):
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
         assert len(function.decorator_list) == 1
+
+
+DEPENDENCY_PROBES = {
+    'vector_lake.wiki_utils': ('split_frontmatter', 'atomic_write_text', 'flush_durable', 'fsync_directory', 'entity_identity_key'),
+    'vector_lake.yaml_utils': ('load_yaml', 'dump_yaml'),
+    'vector_lake.link_resolution': ('build_link_map', 'resolve_link_target', 'core_name_maps', 'declaration_map', 'declared_names_from_nodes'),
+    'vector_lake.relation_catalog': ('build_relation_catalog', 'identity_resolver', 'in_scope', 'node_field', 'validate_limit'),
+    'vector_lake.relation_policy': ('predicate_weight', 'pair_relation_weight'),
+    'vector_lake.tool_relations': ('get_relations',),
+    'vector_lake.tool_graph': ('visualize_vector_lake', 'audit_graph', '_build_page_graph', '_build_graph_payload', '_extract_backbone_edges'),
+}
+
+
+@pytest.mark.parametrize('name,functions', DEPENDENCY_PROBES.items())
+def test_dependency_probe_inventory_and_loaded_code_drift(tmp_path, monkeypatch, name, functions):
+    from vector_lake import runtime_identity as ri
+    assert set(functions) <= set(ri.MODULE_PROBES[name])
+    body = ''.join(f'def {function}():\n    return 1\n' for function in functions)
+    mod, path = _fake(tmp_path, monkeypatch, body)
+    monkeypatch.setitem(sys.modules, name, mod)
+    assert ri._module_record(name, path, functions)['status'] == 'matches_function_code'
+    path.write_text(body.replace('return 1', 'return 2', 1), encoding='utf-8')
+    assert ri._module_record(name, path, functions)['status'] == 'function_code_mismatch'
+
+
+@pytest.mark.parametrize('name', DEPENDENCY_PROBES)
+def test_missing_dependency_coverage_is_explicit_without_import(name, monkeypatch):
+    from vector_lake import runtime_identity as ri
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    report = ri.runtime_identity()
+    assert report['modules'][name]['status'] == 'not_loaded'
+    assert name not in sys.modules
+    assert report['production_acceptance'] == 'not_established'
+
+
+@pytest.mark.parametrize('name', ('vector_lake.mcp_server', 'vector_lake.watchdog_app', 'vector_lake.indexer'))
+def test_known_main_host_is_observed_without_import(tmp_path, monkeypatch, name):
+    from vector_lake import runtime_identity as ri
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    functions = ri.MODULE_PROBES[name]
+    body = ''.join(f'def {function}():\n    return 1\n' for function in functions)
+    mod, path = _fake(tmp_path, monkeypatch, body)
+    monkeypatch.setitem(sys.modules, '__main__', mod)
+    record = ri._module_record(name, path, functions)
+    assert record['status'] == 'matches_function_code'
+    assert record['loaded_as'] == '__main__'
+    assert name not in sys.modules
+    alias = types.ModuleType(name)
+    alias.__file__ = str(path)
+    alias.__dict__.update(mod.__dict__)
+    def stale():
+        return 99
+    alias.__dict__[functions[0]] = stale
+    monkeypatch.setitem(sys.modules, name, alias)
+    assert ri._module_record(name, path, functions)['loaded_as'] == '__main__'
+    assert ri._module_record(name, path, functions)['status'] == 'matches_function_code'
+    path.write_text(body.replace('return 1', 'return 2', 1), encoding='utf-8')
+    assert ri._module_record(name, path, functions)['status'] == 'function_code_mismatch'
+
+
+def test_unknown_main_origin_and_unlisted_host_are_not_claimed(tmp_path, monkeypatch):
+    from vector_lake import runtime_identity as ri
+    mod, path = _fake(tmp_path, monkeypatch, 'def runtime_identity():\n    return 1\n')
+    monkeypatch.setitem(sys.modules, '__main__', mod)
+    monkeypatch.delitem(sys.modules, 'vector_lake.mcp_server', raising=False)
+    assert ri._module_record('vector_lake.mcp_server', tmp_path / 'other.py', ('runtime_identity',))['status'] == 'not_loaded'
+    assert ri._module_record('not_a_known_host', path, ('runtime_identity',))['status'] == 'not_loaded'
+
+
+def test_explicit_public_constants_detect_drift_without_exposing_values(tmp_path, monkeypatch):
+    from vector_lake import runtime_identity as ri
+    name = 'vector_lake.relation_policy'
+    body = 'PRED_WEIGHT_TAXONOMY = frozenset({"parent"})\ndef sample():\n    return 1\n'
+    mod, path = _fake(tmp_path, monkeypatch, body)
+    monkeypatch.setitem(sys.modules, name, mod)
+    record = ri._module_record(name, path, ('sample',), ('PRED_WEIGHT_TAXONOMY',))
+    assert record['status'] == 'matches_function_code'
+    assert record['constants']['PRED_WEIGHT_TAXONOMY']['matches'] is True
+    mod.__dict__['PRED_WEIGHT_TAXONOMY'] = frozenset({'changed'})
+    record = ri._module_record(name, path, ('sample',), ('PRED_WEIGHT_TAXONOMY',))
+    assert record['status'] == 'constant_mismatch'
+    assert record['constants']['PRED_WEIGHT_TAXONOMY']['matches'] is False
+    assert 'changed' not in json.dumps(record) and 'parent' not in json.dumps(record)
+
+
+def test_missing_or_dynamic_allowlisted_constant_is_unverifiable(tmp_path, monkeypatch):
+    from vector_lake import runtime_identity as ri
+    name = 'vector_lake.tool_graph'
+    body = 'DEFAULT_MAX_PAGE_EDGES = 5000\ndef sample():\n    return 1\n'
+    mod, path = _fake(tmp_path, monkeypatch, body)
+    monkeypatch.setitem(sys.modules, name, mod)
+    constants = ('DEFAULT_MAX_PAGE_EDGES', 'DEFAULT_MAX_CLAIM_EDGES')
+    record = ri._module_record(name, path, ('sample',), constants)
+    assert record['constants']['DEFAULT_MAX_CLAIM_EDGES']['status'] == 'missing'
+    assert record['status'] == 'constant_unverifiable'
+    path.write_text(body.replace('5000', 'never_execute()'), encoding='utf-8')
+    record = ri._module_record(name, path, ('sample',), constants)
+    assert record['constants']['DEFAULT_MAX_PAGE_EDGES']['status'] == 'unverifiable'
+
+
+def test_diagnostic_newline_equivalence_preserves_bom_and_lone_cr(tmp_path, monkeypatch):
+    from vector_lake import runtime_identity as ri
+    mod, path = _fake(tmp_path, monkeypatch, 'def sample():\n    return 1\n')
+    lf = b'def sample():\n    return 1\n'
+    path.write_bytes(lf)
+    first = ri._module_record(mod.__name__, path, ('sample',))
+    path.write_bytes(lf.replace(b'\n', b'\r\n'))
+    crlf = ri._module_record(mod.__name__, path, ('sample',))
+    assert first['source_sha256'] != crlf['source_sha256']
+    assert first['source_logical_sha256'] == crlf['source_logical_sha256']
+    assert first['status'] == crlf['status'] == 'matches_function_code'
+    path.write_bytes(b'\xef\xbb\xbf' + lf)
+    bom = ri._module_record(mod.__name__, path, ('sample',))
+    assert bom['source_logical_sha256'] != first['source_logical_sha256']
+    path.write_bytes(lf.replace(b'\n', b'\r'))
+    assert ri._module_record(mod.__name__, path, ('sample',))['source_logical_sha256'] != first['source_logical_sha256']
+
+
+def test_diagnostics_do_not_change_legacy_canonical_versions():
+    from tests.test_canonical_change_sets import _concept
+    from vector_lake import governance_store
+    from vector_lake import runtime_identity as ri
+    content = _concept('Concept_Diagnostic')
+    expected = {
+        'LF': 'f62da621f3e618ca3e002a8067850b6194696899a49b23beed79ebfebefa9c55',
+        'CRLF': '916aadada8507e63450ba5addb3ed589410d8f1dd41b43ca3addd31885bcc85f',
+    }
+    for label, text in [('LF', content), ('CRLF', content.replace('\n', '\r\n'))]:
+        assert governance_store.canonical_page_version_from_content('Concept_Diagnostic.md', text) == expected[label]
+    ri.runtime_identity()
+    for label, text in [('LF', content), ('CRLF', content.replace('\n', '\r\n'))]:
+        assert governance_store.canonical_page_version_from_content('Concept_Diagnostic.md', text) == expected[label]
+
+
+def test_real_dependency_functions_and_literal_constants_match():
+    import importlib
+
+    from vector_lake import runtime_identity as ri
+    names = set(DEPENDENCY_PROBES) | set(ri.CONSTANT_PROBES)
+    for name in names:
+        importlib.import_module(name)
+    before = set(sys.modules)
+    report = ri.runtime_identity()
+    for name in names:
+        record = report['modules'][name]
+        assert record['status'] == 'matches_function_code', (name, record)
+        assert all(value.get('matches') is True for value in record.get('constants', {}).values())
+    assert set(sys.modules) == before
+
+
+def test_runtime_report_uses_main_host_without_loading_server(tmp_path, monkeypatch):
+    import builtins
+
+    from vector_lake import runtime_identity as ri
+    mod, path = _fake(tmp_path, monkeypatch, 'def runtime_identity():\n    return 1\n')
+    host_path = tmp_path / 'mcp_server.py'
+    path.rename(host_path)
+    mod.__file__ = str(host_path)
+    monkeypatch.setattr(ri, 'PACKAGE', tmp_path)
+    monkeypatch.setitem(sys.modules, '__main__', mod)
+    monkeypatch.delitem(sys.modules, 'vector_lake.mcp_server', raising=False)
+    original_import = builtins.__import__
+    def reject_server(name, *args, **kwargs):
+        if name == 'vector_lake.mcp_server':
+            raise AssertionError('Live server import is forbidden')
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', reject_server)
+    record = ri.runtime_identity()['modules']['vector_lake.mcp_server']
+    assert record['status'] == 'matches_function_code'
+    assert record['loaded_as'] == '__main__'
+    assert 'vector_lake.mcp_server' not in sys.modules
+
+
+def test_non_module_loaded_entry_and_missing_function_are_honest(tmp_path, monkeypatch):
+    from vector_lake import runtime_identity as ri
+    monkeypatch.setitem(sys.modules, 'invalid_fixture', object())
+    assert ri._module_record('invalid_fixture', tmp_path / 'unit.py', ())['status'] == 'source_unverifiable'
+    mod, path = _fake(tmp_path, monkeypatch, 'def sample():\n    return 1\n')
+    record = ri._module_record(mod.__name__, path, ('absent',))
+    assert record['functions']['absent']['status'] == 'missing'
+    assert record['status'] == 'function_code_mismatch'

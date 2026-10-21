@@ -1,10 +1,12 @@
 # 知序 · KnowWeave
 
+<img src="knowweave-app.svg" alt="KnowWeave 项目图标" width="96" height="96">
+
 **让知识可追溯，让记忆可延续。**
 
 *Traceable knowledge. Lasting context.*
 
-知序（KnowWeave）是一个本地文件优先的知识编译器：把原始材料持续编译成可审阅、可追溯的 Markdown wiki，并为 Agent 提供可调用的事实、偏好、决策和任务状态记忆。它不是传统向量数据库，也不只是一次性 RAG 检索接口。
+知序（KnowWeave）是一个本地文件优先的知识编译器：把原始材料持续编译成可审阅、可追溯的 Markdown wiki，并为 Agent 提供可调用的断言、偏好、决策和任务状态记忆。它不是传统向量数据库，也不只是一次性 RAG 检索接口。
 
 ## 适用场景与输入输出
 
@@ -22,7 +24,7 @@
 ## 目录与阅读路径
 
 * **首次使用**：[快速开始](#快速开始) → [首次摄取与验收](#首次摄取与验收) → [接入 MCP](#接入-mcp)
-* **了解设计**：[Architecture](#architecture) → [技术与进程职责](#技术与进程职责) → [详细架构](docs/ARCHITECTURE.md)
+* **了解设计**：[Architecture](#architecture) → [技术与进程职责](#技术与进程职责) → [断言与迁移契约](docs/CLAIMS.md) · [关系读取模型](docs/RELATIONS.md) · [详细架构](docs/ARCHITECTURE.md)
 * **运行与维护**：[Config](#config) → [Commands](#commands) → [运维与恢复](docs/OPERATIONS.md)
 * **开发与平台验证**：[开发测试](#开发测试) → [开发指南](docs/DEVELOPMENT.md) → [平台边界](docs/PLATFORM_SUPPORT.md)
 
@@ -190,6 +192,23 @@ flowchart LR
 
 参数和构建入口见 [配置参考](docs/CONFIGURATION.md)。合成样本与故障路径测试不代表真实相关性提升或生产 SLO 验收。
 
+## Claim、证据与关系
+
+Claim 是从 Markdown 编译出的断言片段，不是模型自动核验后的事实；`compiled-truth` 和 `fact` 分别表示页面位置与记忆槽位，不构成事实认证。
+
+- **完整身份与出现位置**：完整规范化正文参与 Claim 身份，显示摘要单独截断；重复正文保留全部 `occurrences`。历史截断 ID 通过 `legacy_claim_ids` 留下迁移线索，一对多后继必须阻塞，不能猜测。
+- **来源声明与证据核验分开**：新抽取的来源归属标记为 `declared-source / unverified`，不会仅凭 `evidence_ids` 非空变成已核验支持。多来源摘要不能绕过块级归属规则；没有原始字节依据时不伪造来源内容哈希。
+- **有效性与替代关系分开**：无竞争者不能把 unsupported、conflicted 或 review-due 提升为 active。未来生效／到期状态、显式替代与已记录竞争依据的有效性按查询时间判断，不能依赖过时的状态快照；旧记录缺少必要依据时仍需受控重编译。
+- **关系读取不冒充推理**：`get_relations` 要求明确域，按精确域／簇读取有界的声明、导航与相关性关系及缺口；它不继承页面检索的已注册宏域别名扩展。声明方向、来源归属、共现强度与已核验证据不是同一概念，不自动推导因果或矛盾。
+
+页面级迁移默认只预览，必须显式指定 MEMORY 根和页面；应用前核对计划、创建完整性检查通过的备份，并通过期望版本和事务内快照检查。普通检索、重启服务和升级源码不会替操作者授权全库迁移。入口为 [`scripts/migrate_claims.py`](scripts/migrate_claims.py)，具体边界见 [Claim 契约](docs/CLAIMS.md) 与 [关系读取模型](docs/RELATIONS.md)。
+
+## 拓扑可视化
+
+`visualize_vector_lake` 生成静态 HTML 知识经纬快照：默认离线 2D，可搜索、聚焦邻域并查看节点／边的来源说明；可选 3D 依赖外部库，仅在用户明确启用并允许联网时加载。布局可用不代表证据已核验，锁不可用的只读回退也会标注一致性边界。
+
+页面关系图与 Claim 共现图分开。Claim 图声明 `graph_kind=claim-cooccurrence`、`is_evidence_graph=false`；共同主体／来源的连边和展示权重不是支持关系或可信概率，截取快照也不是全库图。模板与外部资源边界见 [可视化说明](templates/README.md)。
+
 ## 接入 MCP
 
 GUI 客户端不会可靠继承当前终端的 venv。必须把下例解释器、仓库和 MEMORY 路径改成自己的绝对路径；macOS/Linux 的解释器通常为 `<repo>/.venv/bin/python`。
@@ -265,12 +284,14 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 
 |职责分类|工具|说明|
 |-|-|-|
-|**检索与时序**|`search_vector_lake` · `search_timeline` · `trace_vector_lake`|默认 FTS5 + 图 PPR + 本地重排；显式授权外部 embedding 时向量臂才加入（需模型与维度一致）；时间线查询与事实溯源|
+|**检索与时序**|`search_vector_lake` · `search_timeline` · `trace_vector_lake` · `get_relations`|默认 FTS5 + 图 PPR + 本地重排；显式授权外部 embedding 时向量臂才加入（需模型与维度一致）；时间线、溯源与域内有界关系读取|
 |**严格原文证据（可选）**|`get_query_evidence`|Windows 试点：仅为已有 canonical Source/Raw 绑定的记录返回有界逐字片段；缺失绑定明确拒绝，不代表原文不存在，不替代既有原文阅读。见 [证据边界](docs/QUERY_EVIDENCE.md)|
 |**推演上下文与记忆**|`preview_query_context` · `query_logic_lake` · `finalize_query_synthesis` · `update_operational_memory`|上下文预览、准备推演任务、核验提案页面与运行态记忆写入|
 |**知识治理与审查**|`review_governance_list` · `resolve_governance_item` · `get_governance_debt` · `trigger_audit_graph` · `merge_suggestions_vector_lake` · `check_duplicate_entity`|治理队列审阅与裁决、知识债务度量、拓扑审计、实体查重与候选合并|
-|**自愈体检与安全写入**|`lint_vector_lake` · `doctor_vector_lake` · `runtime_identity` · `rename_entity` · `write_wiki_page` · `inspect_projections`|Schema 审计与修复、运行环境体检、当前进程身份观察、实体重命名、单页安全写入和派生投影巡检|
-|**拓扑可视化**|`visualize_vector_lake`|3D HTML 知识拓扑交互仪表盘|
+|**自愈体检与安全写入**|`lint_vector_lake` · `doctor_vector_lake` · `runtime_identity` · `rename_entity` · `write_wiki_page` · `get_mutation_status` · `inspect_projections`|Schema 审计、运行环境体检、当前进程加载指纹、受控写入与可追踪回执；canonical 提交不等于 Markdown／索引投影完成|
+|**拓扑可视化**|`visualize_vector_lake`|离线 2D 优先、按需启用 3D 的静态 HTML 知识经纬快照；展示图不构成证据认证|
+
+写入回执区分 canonical 提交与后续发布进度；使用 `get_mutation_status` 按 Outbox ID 追踪 Markdown／索引阶段，遇到 superseded 应沿替代链查询，不能把旧意图直接当作已完成。`runtime_identity` 只观察实际调用进程的已加载代码，不会重载服务；磁盘文件更新后，仍需重启或重载相应宿主。
 
 <details>
 <summary>完整 CLI 与受控维护示例（不是安装脚本）</summary>
@@ -491,7 +512,11 @@ python -m pip install --only-binary=:all: -r requirements-test.txt
 python scripts/ci_core.py test --backend fallback --receipt scratch/dev-test-new/core.json -- -q
 ```
 
-该测试使用合成 bootstrap MEMORY，运行前确认回执路径属于本次任务且没有其他写者。
+该测试使用合成 bootstrap MEMORY，运行前确认回执路径属于本次任务且没有其他写者。fallback 物理禁用 core，原生专用用例会列入回执并留给必需的 native 门实际执行；仅 fallback 通过不能证明原生路径通过。两门与用例覆盖核对见 [开发指南](docs/DEVELOPMENT.md#ci-backend--platform-gates)。可视化交互契约另用 Node.js 内置测试运行器执行，不连接真实知识库：
+
+```powershell
+node --test tests/topology_ui.test.cjs
+```
 
 性能用 `scripts/benchmark_retrieval.py`（`page` / `memory` / `query` / `timeline`）在**实际使用的库**上测；它强制关闭审计账本以免污染运维数据，并同时报出空结果占比——空结果是最快的答案，只看延迟 p50 会把"快而空"与"慢而实"混成一个数字。绝对值只在同一主机、同一库内可比。native 构建/探针、测试依赖与 CI 细节见 [开发指南](docs/DEVELOPMENT.md)。实际 CI 平台矩阵以 [工作流](.github/workflows/test.yml) 为准，配置存在不等于远端已执行通过。
 
@@ -503,6 +528,8 @@ python scripts/ci_core.py test --backend fallback --receipt scratch/dev-test-new
 |`vector_lake/mcp_server.py`|MCP 工具注册|
 |`vector_lake/tool_ingest.py`|摄取准备、认领与完成协议|
 |`vector_lake/mutation_coordinator.py`|受控 canonical mutation 与 outbox|
+|`vector_lake/claim_extractor.py` / `claim_migration.py`|完整断言身份、来源归属及显式分页迁移|
+|`vector_lake/tool_relations.py`|有界关系读取及缺口／来源说明|
 |`vector_lake/watchdog_app.py`|常驻消费与维护|
 |`scripts/ingest_runner.py`|宿主侧模型调用与结果提交|
 

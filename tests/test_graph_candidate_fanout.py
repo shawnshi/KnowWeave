@@ -28,9 +28,11 @@ def _reference(nodes):
     multipliers = {key: math.sqrt(node.get("decay_weight", 1.0) * max(0.1, node.get("alignment_score", 100.0) / 100.0)) for key, node in nodes.items()}
     weights = {}
     for key, node in nodes.items():
-        weights[key] = {target: indexer.get_pred_weight("mentions") for target in links[key]}
+        weights[key] = {}
         for triple in node.get("triples", []):
-            weights[key][triple["target"]] = indexer.get_pred_weight(triple.get("predicate", "mentions"))
+            target = triple["target"]
+            weight = indexer.get_pred_weight(triple.get("predicate", "mentions"))
+            weights[key][target] = max(weights[key].get(target, weight), weight)
     output = []
     for a in nodes:
         for b in nodes:
@@ -41,10 +43,11 @@ def _reference(nodes):
             if not (b in links[a] or a in links[b] or shared_sources or shared_neighbors):
                 continue
             score = 0.0
-            if b in links[a]:
-                score += weights[a][b]
-            if a in links[b]:
-                score += weights[b][a]
+            declared = [weights[source][target] for source, target in ((a, b), (b, a)) if target in weights[source]]
+            if declared:
+                score += max(declared)
+            elif b in links[a] or a in links[b]:
+                score += indexer.get_pred_weight("mentions")
             if shared_sources:
                 score += len(shared_sources) * indexer.RELEVANCE_WEIGHTS["source_overlap"]
             if shared_neighbors:

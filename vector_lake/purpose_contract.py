@@ -27,6 +27,8 @@ def _as_string_list(value: Any, field: str) -> list[str]:
 
 
 def _parse_frontmatter(content: str) -> dict[str, Any]:
+    # Normalize only the parser's copy; publication must retain Windows CRLF bytes.
+    content = content.replace("\r\n", "\n")
     if not content.startswith("---\n"):
         raise PurposeContractError("purpose.md must start with YAML frontmatter.")
     _, separator, remainder = content.partition("\n---\n")

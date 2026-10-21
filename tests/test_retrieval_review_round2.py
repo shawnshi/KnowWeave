@@ -117,8 +117,27 @@ def test_rrv_term_01_index_omission_diagnostics_do_not_break_small_payloads(monk
     assert any('Index summary omitted' in n for n in events[-1]['notes'])
 
 
-@pytest.mark.parametrize('stored', [' Medical_IT ', '\tMedical_IT\n', '\u00a0Medical_IT\u3000', ' Healthcare_IT ', 'healthcare_it'])
-def test_r5678_01_domain_pushdown_equals_canonical_filter(monkeypatch, stored):
+@pytest.mark.parametrize('stored,requested,expected', [
+    ('Medical_IT', 'Medical_IT', True),
+    ('Healthcare_IT', 'Healthcare_IT', True),
+    # Registered macro-domain aliases and normalized spelling are an existing
+    # page-search contract; get_relations keeps its separate exact-scope API.
+    ('Healthcare_IT', 'Medical_IT', True),
+    ('Medical_IT', 'Healthcare_IT', True),
+    ('medical_it', 'Medical_IT', True),
+    (' Medical_IT ', 'Medical_IT', True),
+    ('\tMedical_IT\n', 'Medical_IT', True),
+    ('\u00a0Medical_IT\u3000', 'Medical_IT', True),
+    (' Healthcare_IT ', 'Medical_IT', True),
+    ('healthcare_it', 'Medical_IT', False),
+    ('Unknown_Domain', 'Medical_IT', False),
+    (None, 'Medical_IT', False),
+    ('Medical_IT', ' Medical_IT ', True),
+    ('Medical_IT', '\tMedical_IT\n', True),
+    ('Medical_IT', 'Unknown_Domain', False),
+    ('Healthcare_IT', 'Unknown_Domain', False),
+])
+def test_r5678_01_domain_pushdown_equals_canonical_filter(monkeypatch, stored, requested, expected):
     from vector_lake import db_store
     c = sqlite3.connect(':memory:')
     c.row_factory = sqlite3.Row
@@ -131,11 +150,43 @@ def test_r5678_01_domain_pushdown_equals_canonical_filter(monkeypatch, stored):
     c.execute('PRAGMA query_only=ON')
     monkeypatch.setattr(db_store, 'get_connection', lambda: c)
     try:
-        expected = search._passes_filters({'domain': stored, 'status': 'Active'}, 'Medical_IT', None, False, None)
+        assert search._passes_filters({'domain': stored, 'status': 'Active'}, requested, None, False, None) is expected
         with runtime.request_scope('needle') as state:
-            state.fts_scope = {'domain': 'Medical_IT', 'cluster': None, 'include_history': False}
+            state.fts_scope = {'domain': requested, 'cluster': None, 'include_history': False}
             rows = search._get_fts_search_results('needle', limit=1)
-        assert bool(rows) is expected
+        assert search._LAST_FTS_ERROR.msg is None
+        assert [row['node_key'] for row in rows] == (['Source_Test'] if expected else [])
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize('stored,requested,expected', [
+    ('C', 'C', True), ('c', 'C', True), (' C ', 'C', False),
+    ('\tC\n', 'C', False), ('\u00a0C\u3000', 'C', False),
+    ('C', ' C ', False), ('Unknown', 'C', False), (None, 'C', False),
+    ('Économie', 'Économie', True), ('Économie', 'économie', True),
+    ('Σύνολο', 'σύνολο', True), ('İstanbul', 'i\u0307stanbul', True),
+    (' Économie ', 'Économie', False),
+])
+def test_cluster_pushdown_is_exact_before_limit(monkeypatch, stored, requested, expected):
+    from vector_lake import db_store
+    c = sqlite3.connect(':memory:')
+    c.row_factory = sqlite3.Row
+    c.execute('CREATE VIRTUAL TABLE wiki_search_index USING fts5(node_key UNINDEXED,title,summary,text)')
+    c.execute('CREATE TABLE page_index_nodes(node_key TEXT PRIMARY KEY,domain TEXT,topic_cluster TEXT,status TEXT)')
+    c.execute("INSERT INTO wiki_search_index VALUES ('Source_Test','needle','','needle')")
+    c.execute('INSERT INTO page_index_nodes VALUES (?,?,?,?)', ('Source_Test', 'Medical_IT', stored, 'Active'))
+    c.commit()
+    c.execute('PRAGMA query_only=ON')
+    monkeypatch.setenv('VECTOR_LAKE_FTS', 'fts5')
+    monkeypatch.setattr(db_store, 'get_connection', lambda: c)
+    try:
+        assert search._passes_filters({'domain': 'Medical_IT', 'topic_cluster': stored, 'status': 'Active'}, 'Medical_IT', requested, False, None) is expected
+        with runtime.request_scope('needle') as state:
+            state.fts_scope = {'domain': 'Medical_IT', 'cluster': requested, 'include_history': False}
+            rows = search._get_fts_search_results('needle', limit=1)
+        assert search._LAST_FTS_ERROR.msg is None
+        assert [row['node_key'] for row in rows] == (['Source_Test'] if expected else [])
     finally:
         c.close()
 

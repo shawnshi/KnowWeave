@@ -1,5 +1,28 @@
+import sys
+from types import ModuleType
+from unittest.mock import Mock
+
 import pytest
+
 from vector_lake import tool_graph
+from vector_lake.relation_catalog import node_field
+
+
+@pytest.fixture(autouse=True)
+def catalog(monkeypatch):
+    """Explicit catalog contracts; the sibling implementation is integration-owned."""
+    module = ModuleType("vector_lake.relation_catalog")
+    build = Mock(return_value={"relations": [], "diagnostics": [], "scope": {}, "truncated": False})
+    vars(module)["build_relation_catalog"] = build
+    vars(module)["node_field"] = node_field
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return build
+
+
+def _declaration(source, target, predicate, layer="declared"):
+    return {"source": source, "target": target, "predicate": predicate, "layer": layer,
+            "declared": layer == "declared", "verified": False, "weight": None,
+            "origin": {"page_key": source}}
 
 
 def test_extract_backbone_edges_filters_invalid_and_self_loops():
@@ -76,6 +99,93 @@ def test_build_page_graph_structure():
 
     assert node_map["Orphan_Node"]["is_orphan"]
     assert node_map["Orphan_Node"]["backbone_degree"] == 0
+
+
+def test_declared_relations_survive_the_backbone_budget_without_becoming_weights(catalog):
+    catalog.return_value["relations"] = [
+        _declaration("Vendor_Acme", "Product_Bot", "wikilink", "navigation"),
+        _declaration("Vendor_Acme", "Product_Bot", "part-of"),
+    ]
+    index_data = {
+        "nodes": {
+            "Vendor_Acme": {"links": ["SavedBot", "Concept_Bot", "Vendor_Acme", "Missing", None],
+                            "triples": [{"target": "Concept_Bot", "predicate": "part-of"},
+                                        {"target": "Concept_Bot", "predicate": "part-of"},
+                                        {"target": {}, "predicate": "bad"}, None]},
+            "Product_Bot": {"title": "Bot"},
+            "Concept_C": {}, "Concept_D": {},
+        },
+        "aliases": {"SavedBot": "Product_Bot"},
+        "weighted_edges": [{"source": "Concept_C", "target": "Concept_D", "weight": 8}],
+    }
+    graph = tool_graph._build_page_graph(index_data, max_edges=1)
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert len(graph["edges"]) == 1
+    assert nodes["Vendor_Acme"]["declared_links"] == ["Product_Bot"]
+    assert nodes["Vendor_Acme"]["declared_relations"] == [{"target": "Product_Bot", "predicate": "part-of"}]
+    assert nodes["Vendor_Acme"]["degree"] == nodes["Vendor_Acme"]["backbone_degree"] == 0
+    assert not nodes["Vendor_Acme"]["is_orphan"]
+    assert not nodes["Product_Bot"]["is_orphan"]
+    assert "Product_Bot" in nodes["Vendor_Acme"]["semantic_links"]
+
+
+def test_declared_relation_resolution_refuses_ambiguous_core_names(catalog):
+    catalog.return_value["relations"] = [
+        _declaration("Vendor_Acme", "Product_Bot", "wikilink", "navigation"),
+    ]
+    graph = tool_graph._build_page_graph({"nodes": {
+        "Vendor_Acme": {"links": ["Bot", "Product_Bot"]},
+        "Product_Bot": {"title": "Bot"}, "Concept_Bot": {"title": "Bot"},
+    }, "aliases": {"Product_Bot": "Concept_Bot"}, "weighted_edges": []})
+    source = next(node for node in graph["nodes"] if node["id"] == "Vendor_Acme")
+    assert source["declared_links"] == ["Product_Bot"]
+    assert source["declared_relations"] == []
+
+
+def test_page_states_remain_separate_and_seed_does_not_imply_unreleased():
+    graph = tool_graph._build_page_graph({"nodes": {
+        "Product_Seed": {"status": "seed", "epistemic_status": "unverified"},
+        "Product_Released": {"status": "active", "metadata": {
+            "epistemic_status": "supported", "lifecycle_status": "released"}},
+        "Product_Absent": {},
+        "Product_Legacy": {"metadata": {"epistemic-status": "seed"}},
+    }})
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes["Product_Seed"]["status"] == "seed"
+    assert nodes["Product_Seed"]["epistemic_status"] == "unverified"
+    assert nodes["Product_Seed"]["lifecycle_status"] is None
+    assert nodes["Product_Released"]["status"] == "active"
+    assert nodes["Product_Released"]["epistemic_status"] == "supported"
+    assert nodes["Product_Released"]["lifecycle_status"] == "released"
+    assert nodes["Product_Absent"]["epistemic_status"] is None
+    assert nodes["Product_Absent"]["lifecycle_status"] is None
+    assert nodes["Product_Legacy"]["epistemic_status"] == "seed"
+    assert nodes["Product_Legacy"]["lifecycle_status"] is None
+
+
+def test_catalog_context_passes_through_without_rewriting_or_promoting_evidence(catalog):
+    relation = _declaration("Product_A", "Concept_B", "part-of") | {
+        "subject_scope": "document", "resolution_status": "resolved",
+        "context": {"claim_ids": ["synthetic-claim"], "note": "<img onerror=attack()>"},
+        "temporal": {"valid_from": "2026-01-01", "valid_until": None},
+        "provenance_status": "unverified", "epistemic_status": "unknown",
+        "lifecycle_status": "unknown",
+    }
+    catalog.return_value["relations"] = [relation]
+    graph = tool_graph._build_page_graph({"nodes": {"Product_A": {}, "Concept_B": {}},
+                                          "weighted_edges": []}, max_edges=0)
+    assert graph["relations"] == [relation]
+    assert graph["relations"][0]["weight"] is None
+    assert graph["relations"][0]["verified"] is False
+    assert graph["edges"] == []
+
+
+def test_claim_validity_record_and_epistemic_states_are_not_substituted():
+    graph = tool_graph._build_claim_graph({"nodes": [{"id": "synthetic-claim",
+        "validity_state": "active", "status": "seed", "epistemic_status": "unverified"}]})
+    claim = graph["nodes"][0]
+    assert (claim["validity_state"], claim["status"], claim["epistemic_status"]) == ("active", "seed", "unverified")
+    assert "lifecycle_status" not in claim
 
 
 def test_build_graph_payload_meta_auditing():

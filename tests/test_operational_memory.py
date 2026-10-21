@@ -9,7 +9,7 @@ from vector_lake.tool_search import build_memory_packet, search_vector_lake
 
 class TestOperationalMemory(unittest.TestCase):
     def setUp(self):
-        self.test_root = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tmp", "operational_memory_test_root")))
+        self.test_root = Path(os.environ["VECTOR_LAKE_MEMORY_DIR"])
         self.test_root.mkdir(parents=True, exist_ok=True)
         self.previous_memory_dir = os.environ.get("VECTOR_LAKE_MEMORY_DIR")
         os.environ["VECTOR_LAKE_MEMORY_DIR"] = str(self.test_root)
@@ -81,6 +81,12 @@ class TestOperationalMemory(unittest.TestCase):
 
     def test_rebuild_operational_memory_resolves_typed_conflict(self):
         self._seed_claims()
+        # Only this positive conflict fixture models reviewed evidence.
+        # Other tests retain legacy/unverified provenance.
+        claims = governance_store.load_claims()
+        for record in claims["items"].values():
+            record.update(evidence_support="verified", verified_evidence_ids=list(record["evidence_ids"]))
+        governance_store.save_claims(claims)
         store = governance_store.rebuild_operational_memory()
         preferences = [
             item for item in store["items"].values()
@@ -128,7 +134,8 @@ class TestOperationalMemory(unittest.TestCase):
 
         memories = governance_store.load_memory_objects()["items"].values()
         preference = next(item for item in memories if item.get("source_claim_id") == "claim_old")
-        self.assertEqual(preference["validity_state"], "active")
+        self.assertEqual(preference["validity_state"], "needs-review")
+        self.assertIn("legacy-unverified", preference["validity_reasons"])
         self.assertNotIn("superseded_by", preference)
         self.assertFalse(any(item.get("source_claim_id") == "claim_new" for item in memories))
 

@@ -10,8 +10,8 @@ from vector_lake import indexer
 @pytest.fixture
 def graph_contract(monkeypatch):
     monkeypatch.setattr(indexer, 'TYPE_AFFINITY', {'concept': {'concept': 0.5}})
-    monkeypatch.setattr(indexer, 'RELEVANCE_WEIGHTS', {'type_affinity': 1.0, 'source_overlap': 2.0, 'common_neighbor': 1.0})
-    monkeypatch.setattr(indexer, 'get_pred_weight', lambda predicate: 2.0)
+    # Navigation contributes 0.4 * 5 = 2 once per pair, independently of direction.
+    monkeypatch.setattr(indexer, 'RELEVANCE_WEIGHTS', {'direct_link': 5.0, 'type_affinity': 1.0, 'source_overlap': 2.0, 'common_neighbor': 1.0})
 
 
 def _calculate(nodes):
@@ -21,7 +21,7 @@ def _calculate(nodes):
     return {(edge['source'], edge['target']): edge['weight'] for edge in edges}
 
 
-@pytest.mark.parametrize('shape,expected', [('direct', 2.5), ('reciprocal', 4.5), ('source', 2.5), ('neighbor', 1.943)])
+@pytest.mark.parametrize('shape,expected', [('direct', 2.5), ('reciprocal', 2.5), ('source', 2.5), ('neighbor', 1.943)])
 def test_live_backend_qualifies_and_scores_basic_evidence(graph_contract, shape, expected):
     a, b = 'Concept_A.md', 'Concept_B.md'
     nodes = {a: {'type': 'concept', 'links': []}, b: {'type': 'concept', 'links': []}}
@@ -42,7 +42,8 @@ def test_live_backend_qualifies_and_scores_basic_evidence(graph_contract, shape,
 
 def test_live_backend_accepts_exact_threshold_and_rejects_nan(graph_contract, monkeypatch):
     a, b = 'Concept_A.md', 'Concept_B.md'
-    monkeypatch.setattr(indexer, 'get_pred_weight', lambda predicate: 1.0)
+    # 0.4 * 2.5 navigation + 0.5 affinity is exactly the admission threshold.
+    monkeypatch.setitem(indexer.RELEVANCE_WEIGHTS, 'direct_link', 2.5)
     nodes = {a: {'links': [b]}, b: {'links': []}}
     assert _calculate(nodes) == {(a, b): 1.5}
     nodes[a]['decay_weight'] = float('nan')
@@ -56,7 +57,7 @@ def test_live_backend_drops_zero_contribution_unresolved_shared_neighbors(graph_
 
 
 def test_live_backend_incident_degree_contract_is_enforced(graph_contract, monkeypatch, record_property):
-    monkeypatch.setattr(indexer, 'RELEVANCE_WEIGHTS', {'type_affinity': 1.0, 'source_overlap': 2.0, 'common_neighbor': 0.0})
+    monkeypatch.setitem(indexer.RELEVANCE_WEIGHTS, 'common_neighbor', 0.0)
     keys = [f'Concept_N{value:02}.md' for value in range(64)]
     edges = _calculate({key: {'links': [other for other in keys if other != key]} for key in keys})
     counts = Counter(endpoint for pair in edges for endpoint in pair)
