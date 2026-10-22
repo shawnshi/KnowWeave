@@ -175,7 +175,10 @@ def preview_query_context(
     options = {"domain": domain, "cluster": cluster,
                "allow_external_embedding": allow_external_embedding,
                "profile": profile, "use_chunks": use_chunks} if domain or cluster else {}
-    return _render_context_payload(query_str, assemble_context(query_str, **options))
+    with retrieval_runtime.timed_stage('query_context_assembly'):
+        context = assemble_context(query_str, **options)
+    with retrieval_runtime.timed_stage('query_context_render'):
+        return _render_context_payload(query_str, context)
 
 
 @retrieval_runtime.request_entry
@@ -187,8 +190,10 @@ def prepare_query_context(
     options = {"domain": domain, "cluster": cluster,
                "allow_external_embedding": allow_external_embedding,
                "profile": profile, "use_chunks": use_chunks} if domain or cluster else {}
-    context = assemble_context(query_str, **options)
-    context_block = _render_context_payload(query_str, context)
+    with retrieval_runtime.timed_stage('query_context_assembly'):
+        context = assemble_context(query_str, **options)
+    with retrieval_runtime.timed_stage('query_context_render'):
+        context_block = _render_context_payload(query_str, context)
 
     # The template is resolved and read *before* the payload is written.  It used to be read
     # afterwards, and a missing template merely set the template text to its own error message --
@@ -207,8 +212,14 @@ def prepare_query_context(
     instructions = render_template_text(prompt_template, payload_path=str(payload_path), query_str=query_str)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     _prune_stale_query_contexts(tmp_dir)
-    with open(payload_path, "w", encoding="utf-8") as f:
-        f.write(context_block)
+    with retrieval_runtime.timed_stage('query_payload_write'):
+        with open(payload_path, "w", encoding="utf-8") as f:
+            f.write(context_block)
+        retrieval_runtime.counter('query_payload_write')
+        try:
+            retrieval_runtime.counter('query_payload_bytes', payload_path.stat().st_size)
+        except OSError as exc:
+            log.debug('Query payload byte telemetry unavailable (%s)', type(exc).__name__)
         
     if dry_run:
         if options:

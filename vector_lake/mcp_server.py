@@ -425,7 +425,12 @@ def query_logic_lake(
     allow_external_embedding: bool = False,
     profile: str = 'auto', use_chunks: bool = False,
 ) -> str:
-    """Deep reasoning with budget-controlled context.
+    """Prepare budget-controlled context for a separate reasoning/synthesis step.
+
+    Both modes write a local envelope under the extension root's ``tmp`` and may prune
+    old query envelopes. This tool does not invoke a reasoning model or publish Wiki
+    pages. Use ``preview_query_context`` to avoid a proposal-envelope write; retrieval
+    can still record its normal audit-ledger event.
 
     Args:
         query_str: The topic or command for reasoning.
@@ -433,12 +438,8 @@ def query_logic_lake(
         cluster: Optional exact topic cluster.
         allow_external_embedding: Explicit permission to send the query to the embedding provider.
             Default False uses only local retrieval. This flag does not establish authorization.
-        dry_run: Return the provenance trace instead of the synthesis prompt.  The prompt
-            template documents this switch (``dry_run: true`` stops after the context
-            envelope is written) and this wrapper passes it through to
-            ``prepare_query_context``.  An earlier revision of this docstring claimed the
-            wrapper dropped the argument; it does not, and the flag has been honoured since
-            the test in ``tests/test_query_payload_and_writes.py`` was added.
+        dry_run: Return the provenance trace instead of the synthesis prompt, after
+            the local context envelope has been written. This is not a read-only mode.
     """
     if not domain.strip():
         raise ValueError('Explicit domain is required for context retrieval')

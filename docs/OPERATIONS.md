@@ -78,6 +78,17 @@ python cli.py retrieval-indexes --db "<existing-db-path>"
 代码验收、原生只读探针、驻留 MCP 重连和 Pi 当前会话 `/reload` 是不同层次。磁盘更新或合成测试通过不证明当前驻留查询函数、模型查询策略已生效；MCP ledger 仍可能来自旧进程。
 
 
+## Query 载荷副作用与计时边界
+
+`preview_query_context` 内联返回预算内上下文，不写 proposal envelope 或 Wiki 页面，但检索仍可能记录正常的 audit ledger。`query_logic_lake` 的两个 `dry_run` 值都会在扩展根目录的 `tmp/query_context_*.md` 写入上下文载荷，并可能清理该目录内已过期的 query 载荷；`dry_run=true` 只是写完后返回 trace，而非后续 synthesis prompt。知识库路径由 `VECTOR_LAKE_MEMORY_DIR` 重定向，不意味着扩展根的 `tmp` 也随之移动。两者均不执行生成模型推理，载荷生成不等于 canonical Wiki 写入完成。
+
+ledger 的 `timings_ms` 区分 `query_context_assembly`（包含 memory packet 和 page search）、`query_context_render`（序列化与字数预算）、`query_payload_write`（实际载荷写入）。assembly 包含内部检索阶段，不能将其与子阶段相加；模型推理、代理编排和人工原文核验不在这些接口计时内。`cache_events` 沿用现有结构计数器格式，新增 `query_payload_write` 次数和 `query_payload_bytes` 实际文件字节数；不记录载荷正文或额外复制查询内容。
+
+purpose 配置在同一请求和知识库范围内固定一次，下一请求重新检查原有文件更新时间；跨根切换不会复用前一根的评分结果。SQL 当前状态与当前分数共享有界的请求内计算，仍在 LIMIT 前计算，异常或请求结束后清理。`purpose_snapshot_load/hit`、`memory_evaluation_compute/hit/eviction` 计数用于识别重复工作，不代表事实或来源核验通过。
+
+性能探针只能对明确授权的样本运行。domain 和 profile 不是认证或隐私边界；应先排除不允许读取的对象，使用任务专用知识库与扩展根副本，关闭外部 embedding/prewarm，再分别采样进程首请求、热态往返和引擎子阶段。公开副本不自动代表生产数据、purpose 配置或服务负载，计时结果不得直接作为生产 SLO。功能测试中需要 ledger 的用例显式启用日志，不能继承性能进程的全局关闭开关。
+
+
 ## 可选严格 Source 证据读取
 
 `get_query_evidence(query, node_keys, domain, cluster='')` 为 Windows 试点的可选 MCP 门面，仅支持已有 canonical Source 版本/Raw 摘要绑定的记录，拒绝任意路径、连接和上下文参数。域仍限 `Artificial_Intelligence`／`Medical_IT`，不存在全域 fallback；缺少绑定明确拒绝，不解释为原文不存在，不从磁盘补字段。普通 Source-first 原文阅读继续走已有授权路径，不能标成严格 verified。细节见 [QUERY_EVIDENCE.md](QUERY_EVIDENCE.md)。
