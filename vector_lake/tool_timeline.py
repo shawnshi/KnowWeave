@@ -595,13 +595,9 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
                 # Use exact match with COLLATE NOCASE so SQLite uses idx_timeline_action_date_id
                 query += " AND action = ? COLLATE NOCASE"
                 params.append(action_clean)
-        # An unknown date is NULL, and SQLite orders NULLs last for DESC -- which is exactly
-        # the contract, and the reason this stays a plain order by one column: adding
-        # ``(event_date IS NULL)`` ahead of it to say the same thing replaces an index-ordered
-        # scan with a full table sort (measured on the live 10k-row projection: 0.03 ms ->
-        # 14.9 ms, plan ``USE TEMP B-TREE FOR ORDER BY``).  ``event_date_source`` tells the
-        # reader which rows those were.
-        query += " ORDER BY event_date DESC LIMIT ?"
+        # NULLs sort last for DESC without a computed leading key, so the date index
+        # remains usable.  Stable event IDs break ties before LIMIT, including unknown dates.
+        query += " ORDER BY event_date DESC, id ASC LIMIT ?"
         params.append(max(1, int(limit)))
         try:
             cursor.execute(query, params)
@@ -651,10 +647,22 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
     # Same ordering rule as the indexed path, expressed over canonical claims: a degraded
     # answer is the same answer, slower.  This used to be ``ORDER BY updated_at DESC``, so
     # with the projection one row out of parity the same query returned the *oldest* events
-    # instead of the newest.  NULLs sort last on DESC here too, and this path is a scan
-    # either way, so the computed key costs it nothing it was not already paying.
+    # instead of the newest.  Keep the canonical date expression unchanged; the
+    # additional tie key must agree with the projection before selecting the top K.
+    # Reuse the writer's identity formula, not claim_id or SQL's date coercion: JSON
+    # booleans and other date shapes must retain exactly the IDs used by the projection.
+    conn.create_function(
+        "timeline_event_id", 3,
+        lambda claim_id, claim_text, data_json: _event_from_claim_row({
+            "claim_id": claim_id, "claim_text": claim_text, "data_json": data_json,
+        })["id"],
+        deterministic=True,
+    )
     stable_date = _sql_stable_date_expr()
-    query += f" ORDER BY ({stable_date} IS NULL), {stable_date} DESC LIMIT ?"
+    query += (
+        f" ORDER BY ({stable_date} IS NULL), {stable_date} DESC, "
+        "timeline_event_id(claim_id, claim_text, data_json) ASC LIMIT ?"
+    )
     params.append(max(1, int(limit)))
     
     try:

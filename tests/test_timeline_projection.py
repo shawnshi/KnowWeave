@@ -1,4 +1,7 @@
+import hashlib
 import json
+
+import pytest
 
 from vector_lake import db_store, governance_store
 from vector_lake.tool_timeline import (
@@ -921,3 +924,132 @@ def test_lean_parity_ids_match_the_full_decode(isolated_memory):
         ).fetchall()
     }
     assert tool_timeline._expected_event_ids(conn) == full
+
+
+@pytest.mark.parametrize("date_kind", ["anchor", "text", "unknown"])
+@pytest.mark.parametrize("filters", [
+    {},
+    {"entity_name": "Concept_Tie"},
+    {"entity_name": "needle"},
+    {"action": "release"},
+    {"entity_name": "Concept_Tie", "action": "Rel%"},
+])
+@pytest.mark.parametrize("drift", ["missing", "wrong_id"])
+def test_same_date_top_k_payload_is_stable_across_projection_drift(
+    isolated_memory, date_kind, filters, drift
+):
+    from vector_lake import tool_timeline
+
+    db_store.init_db()
+    conn = db_store.get_connection()
+    events = []
+    with db_store.transaction():
+        for i in reversed(range(66)):
+            date = "2026-05-02" if date_kind != "unknown" else None
+            if i == 64:
+                date = "2027-01-01"
+            elif i == 65:
+                date = "2025-01-01"
+            entity = "Concept_Tie" if i % 2 == 0 else "Concept_Other"
+            action = "Release" if i % 3 else "Observation"
+            text = f"{'needle' if i % 2 == 0 else 'other'} tied event {i:03d}"
+            payload = {
+                "claim_type": "timeline-event",
+                "subject_entity_ids": [entity],
+                "source_ids": [f"Source_{i:03d}"],
+                "action": action,
+            }
+            if date:
+                if date_kind == "text":
+                    text = f"[{date}] [{action}] {text}"
+                else:
+                    payload["temporal_anchor"] = date
+            claim_id = f"tie-claim-{i:03d}"
+            # Freeze the pre-P3 identity formula independently of the production helper.
+            event_id = hashlib.sha256(
+                "\0".join([claim_id, date or "", text]).encode("utf-8")
+            ).hexdigest()[:24]
+            conn.execute(
+                "INSERT INTO claims (claim_id, claim_text, status, data_json, updated_at) "
+                "VALUES (?, ?, 'active', ?, ?)",
+                (claim_id, text, json.dumps(payload), f"2099-01-{i % 28 + 1:02d}T00:00:00Z"),
+            )
+            events.append({
+                "id": event_id, "date": date, "entity": entity, "action": action,
+                "text": text, "source": f"Source_{i:03d}",
+            })
+
+    assert "Rebuilt 66 timeline_events" in rebuild_timeline_events_from_claims(dry_run=False)
+    projected_ids = {row[0] for row in conn.execute("SELECT id FROM timeline_events")}
+    assert projected_ids == {event["id"] for event in events}
+    selected = [event for event in events if
+                (not filters.get("entity_name") or filters["entity_name"] in
+                 (event["entity"] + " " + event["text"])) and
+                (not filters.get("action") or event["action"] == "Release")]
+    assert sum(event["date"] == events[-1]["date"] for event in selected) > 7
+    selected.sort(key=lambda event: event["id"])
+    selected.sort(key=lambda event: event["date"] or "", reverse=True)
+    expected = "\n\n".join(
+        f"[{event['date'] or 'Unknown Date'}] <{event['entity']}>\n"
+        f"  -> {event['text']}\n  Action: {event['action']} | Source: {event['source']}"
+        for event in selected[:7]
+    )
+    projection_output = search_timeline_events(limit=7, **filters)
+    before = [tuple(row) for row in conn.execute("SELECT * FROM timeline_events ORDER BY id")]
+    victim = conn.execute("SELECT * FROM timeline_events ORDER BY id DESC LIMIT 1").fetchone()
+    try:
+        with db_store.transaction():
+            if drift == "missing":
+                conn.execute("DELETE FROM timeline_events WHERE id = ?", (victim["id"],))
+            else:
+                conn.execute("UPDATE timeline_events SET id = 'injected-wrong-id' WHERE id = ?",
+                             (victim["id"],))
+        parity = timeline_projection_parity()
+        assert (parity["missing"], parity["extra"]) == (1, int(drift == "wrong_id"))
+        fallback_output = search_timeline_events(limit=7, **filters)
+    finally:
+        with db_store.transaction():
+            conn.execute("DELETE FROM timeline_events WHERE id = 'injected-wrong-id'")
+            conn.execute(
+                "INSERT OR REPLACE INTO timeline_events "
+                "(id, claim_id, event_date, event_date_source, action, sentiment, description, "
+                "entity_id, entity_title, source_file, extracted_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", tuple(victim),
+            )
+        tool_timeline.invalidate_timeline_parity_cache()
+        after = [tuple(row) for row in conn.execute("SELECT * FROM timeline_events ORDER BY id")]
+        assert after == before
+        restored = timeline_projection_parity()
+        assert restored["missing"] == restored["extra"] == 0
+        assert restored["projection"] == 66
+
+    note = (
+        "[DEGRADED] timeline_events projection is out of parity with canonical claims "
+        f"(missing=1, extra={int(drift == 'wrong_id')}); answering from canonical claims. "
+        "Run rebuild_timeline_events(dry_run=False) to restore the indexed path.\n\n"
+    )
+    assert {"projection": projection_output, "fallback": fallback_output} == {
+        "projection": expected, "fallback": note + expected,
+    }
+    assert search_timeline_events(limit=7, **filters) == expected
+
+
+@pytest.mark.parametrize("anchor", [True, False, "", None, "2026-07", "2026-Q1"])
+def test_fallback_tie_key_preserves_python_date_identity(isolated_memory, anchor):
+    db_store.init_db()
+    conn = db_store.get_connection()
+    text = "[2026-05-02] [Release] synthetic identity edge case"
+    _insert_timeline_claim(conn, "identity-edge", text, {
+        "claim_type": "timeline-event", "temporal_anchor": anchor,
+    }, "2099-01-01T00:00:00Z")
+    assert not search_timeline_events(limit=1).startswith("Error")
+    expected = hashlib.sha256(
+        "\0".join(["identity-edge", str(anchor) if anchor else "2026-05-02", text]).encode("utf-8")
+    ).hexdigest()[:24]
+    for ingestion_date in ["2000-01-01", "2099-12-31"]:
+        with db_store.transaction():
+            conn.execute("UPDATE claims SET updated_at = ?", (ingestion_date,))
+        actual = conn.execute(
+            "SELECT timeline_event_id(claim_id, claim_text, data_json) FROM claims"
+        ).fetchone()[0]
+        assert actual == expected
