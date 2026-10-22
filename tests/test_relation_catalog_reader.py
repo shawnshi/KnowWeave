@@ -266,5 +266,5 @@ def test_sqlite_scoped_adjacency_filters_before_edges_or_payloads(projected):
     conn.commit()
     adj = pip._SqliteCatalog().scoped_adjacency(domain="General", cluster="C")
     assert "Concept_Secret" not in adj
-    assert adj == {"Concept_A": [("Concept_C", 7.0)], "Concept_C": [("Concept_A", 7.0)]}
+    assert adj == {"Concept_A": (("Concept_C", 7.0),), "Concept_C": (("Concept_A", 7.0),)}
     assert "Concept_Secret" in pip.adjacency()

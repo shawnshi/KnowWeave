@@ -42,7 +42,7 @@ def test_page_walk_uses_same_alias_scope_as_visible_results(isolated_memory, bac
                if tool_search._passes_filters(node, 'Medical_IT', cluster, False, None)}
     assert visible == {'Concept_A', 'Concept_B'}
     assert catalog.scoped_adjacency(domain='Medical_IT', cluster=cluster) == {
-        'Concept_A': [('Concept_B', 2.0)], 'Concept_B': [('Concept_A', 2.0)],
+        'Concept_A': (('Concept_B', 2.0),), 'Concept_B': (('Concept_A', 2.0),),
     }
     assert catalog.scoped_adjacency(domain='Unknown', cluster=cluster) == {}
 

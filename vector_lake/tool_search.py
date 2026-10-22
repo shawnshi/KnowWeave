@@ -35,19 +35,28 @@ except ModuleNotFoundError as exc:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 _PPR_INDEX: dict = {"generation": None, "adj": None, "index": None}
+_PPR_INDEX_LOCK = threading.Lock()
 
 
 def _ppr_index(adj, generation: int):
     """Cache a graph snapshot by its actual adjacency object and projection generation."""
     global _PPR_INDEX
-    cached = _PPR_INDEX
-    # VL-S03: file fallback graphs do not advance the SQLite generation. A strong reference
-    # distinguishes those snapshots and prevents recycled object IDs; one assignment also
-    # keeps concurrent readers from pairing an index with another snapshot's metadata.
-    if cached["generation"] != generation or cached.get("adj") is not adj or cached["index"] is None:
-        cached = {"generation": generation, "adj": adj, "index": vector_lake_core.PprIndex(adj)}
-        _PPR_INDEX = cached
-    return cached["index"]
+    core = vector_lake_core
+    if core is None:
+        raise RuntimeError("Prepared PPR requires the native core")
+    from vector_lake import page_index_projection as _pip
+    # PyO3 requires a dict; only the cold build converts immutable scoped values.
+    # Oversized/evicted scoped graphs must not be retained by the native slot.
+    with _PPR_INDEX_LOCK:
+        if not isinstance(adj, dict) and not _pip.scoped_adjacency_is_cached(adj):
+            return core.PprIndex(dict(adj))
+        cached = _PPR_INDEX
+        # A strong reference distinguishes file generations without recycled IDs.
+        if cached["generation"] != generation or cached.get("adj") is not adj or cached["index"] is None:
+            cached = {"generation": generation, "adj": adj,
+                      "index": core.PprIndex(adj if isinstance(adj, dict) else dict(adj))}
+            _PPR_INDEX = cached
+        return cached["index"]
 log = logging.getLogger("vector-lake-tool-search")
 
 BUDGET_SHARES = {
@@ -1854,7 +1863,7 @@ def _search_scored_pages(
             existing_keys = {node["_key"] for _, node in scored}
             expansion_limit = 12 if intent == "entity" else 5
 
-            if HAVE_CORE and not scoped_walk and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
+            if HAVE_CORE and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
                 # The same walk on a prebuilt index.  Measured 31.9 -> 1.5 ms per query (20.7x) and
                 # verified bit-identical on 16 edge cases plus the live graph: the legacy call pays for
                 # moving the 39 382-edge dict into Rust and cloning ~150k strings per call, which the
@@ -1865,7 +1874,7 @@ def _search_scored_pages(
                     _ppr_index(adj, _pip.adjacency_generation()), list(seed_keys), 0.85, 2
                 )
             elif HAVE_CORE:
-                sorted_ppr = vector_lake_core.fast_personalized_pagerank(adj, list(seed_keys), 0.85, 2)
+                sorted_ppr = vector_lake_core.fast_personalized_pagerank(dict(adj), list(seed_keys), 0.85, 2)
             else:
                 alpha = 0.85
                 restart_mass = (1 - alpha) / len(top_keys)

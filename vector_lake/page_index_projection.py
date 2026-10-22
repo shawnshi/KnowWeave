@@ -42,8 +42,11 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Mapping
+from types import MappingProxyType
 
-from vector_lake.db_store import get_connection, get_db_path, init_db, transaction
+from vector_lake.db_store import get_connection, get_db_path, init_db, read_snapshot, transaction
 from vector_lake.link_resolution import build_link_map, declared_names_from_nodes, resolve_link_target
 from vector_lake.wiki_utils import get_index_path
 from vector_lake.schema_validator import canonical_domain
@@ -52,6 +55,10 @@ from vector_lake.wiki_utils import get_meta_dir
 log = logging.getLogger("vector-lake-page-index")
 
 ADJACENCY_CACHE_LIMIT = 1
+SCOPED_ADJACENCY_CACHE_LIMIT = 8
+SCOPED_ADJACENCY_REFERENCE_LIMIT = 200_000
+
+ScopedAdjacency = Mapping[str, tuple[tuple[str, float], ...]]
 
 # ``link_target_resolver`` memo.  Keyed on the two index-only numbers below, so a per-page
 # caller pays one build per index change, not one per page.
@@ -329,14 +336,6 @@ def refresh_page_index_projection(index_data: dict, node_keys=None) -> dict:
     # Changed rows retain the existing REPLACE/rowid semantics and invalidate
     # the same readers as before, rather than adopting an in-place UPSERT.
     authoritative_keys = json.dumps(sorted(str(key) for key in nodes))
-    with transaction():
-        if rows:
-            conn.executemany(_node_insert(), (row + row for row in rows))
-        conn.execute(
-            "DELETE FROM page_index_nodes "
-            "WHERE node_key IS NULL OR node_key NOT IN (SELECT value FROM json_each(?))",
-            (authoritative_keys,),
-        )
     # Retain the historical count of prepared/processed rows, not SQLite's
     # affected-row count, so callers need no result-schema change.
     written = len(rows)
@@ -355,6 +354,7 @@ def refresh_page_index_projection(index_data: dict, node_keys=None) -> dict:
             for_edge_digest = _weighted_edges_digest(index_data)
             edge_changed = for_edge_digest != stored[1]
 
+    edge_rows = None
     if edge_changed and "weighted_edges" in index_data:
         edge_rows = [
             (position, str(edge.get("source") or ""), str(edge.get("target") or ""),
@@ -363,52 +363,60 @@ def refresh_page_index_projection(index_data: dict, node_keys=None) -> dict:
         ]
         if for_edge_digest is None:
             for_edge_digest = _weighted_edges_digest(index_data)
-        with transaction():
+    # Scope membership, ordered edges and their generation must become visible
+    # together. Separate commits could cache a new domain with the old graph.
+    with transaction():
+        if rows:
+            conn.executemany(_node_insert(), (row + row for row in rows))
+        conn.execute(
+            "DELETE FROM page_index_nodes "
+            "WHERE node_key IS NULL OR node_key NOT IN (SELECT value FROM json_each(?))",
+            (authoritative_keys,),
+        )
+        if edge_rows is not None:
             conn.execute("DELETE FROM page_index_edges")
             if edge_rows:
                 for start_idx in range(0, len(edge_rows), 5000):
-                    chunk = edge_rows[start_idx : start_idx + 5000]
                     conn.executemany(
                         "INSERT OR REPLACE INTO page_index_edges "
                         "(sequence, source_key, target_key, weight) VALUES (?, ?, ?, ?)",
-                        chunk,
+                        edge_rows[start_idx : start_idx + 5000],
                     )
-    if stamp is not None:
-        digest_supported = _edge_digest_supported(conn)
-        columns = (
-            "(singleton, index_mtime, index_size, node_count, edge_count, updated_at, edge_digest) "
-            if digest_supported
-            else "(singleton, index_mtime, index_size, node_count, edge_count, updated_at) "
-        )
-        placeholders = "VALUES (1, ?, ?, ?, ?, ?, ?)" if digest_supported else "VALUES (1, ?, ?, ?, ?, ?)"
-        digest_update = (
-            "edge_digest = excluded.edge_digest, " if digest_supported else ""
-        )
-        values = [
-            stamp[0], stamp[1],
-            conn.execute("SELECT COUNT(*) FROM page_index_nodes").fetchone()[0],
-            conn.execute("SELECT COUNT(*) FROM page_index_edges").fetchone()[0],
-            _utc_now(),
-        ]
-        if digest_supported:
-            # Recorded only here, after the edge rows are committed: a digest that
-            # claimed freshness for rows that were never written would let every
-            # later reader skip the repair.
-            values.append(for_edge_digest if for_edge_digest is not None else _weighted_edges_digest(index_data))
-        with transaction():
-            conn.execute(
-                "INSERT INTO page_index_state "
-                + columns
-                + placeholders
-                + " ON CONFLICT(singleton) DO UPDATE SET "
-                "index_mtime = excluded.index_mtime, index_size = excluded.index_size, "
-                "node_count = excluded.node_count, edge_count = excluded.edge_count, "
-                + digest_update
-                + "updated_at = excluded.updated_at",
-                tuple(values),
-            )
+        if stamp is not None:
+            _write_projection_state(conn, stamp, index_data, for_edge_digest)
     _invalidate_adjacency()
     return {"nodes_written": written, "partial": partial_keys is not None, "edges_rewritten": edge_changed}
+
+
+def _write_projection_state(conn, stamp, index_data, for_edge_digest):
+    digest_supported = _edge_digest_supported(conn)
+    columns = (
+        "(singleton, index_mtime, index_size, node_count, edge_count, updated_at, edge_digest) "
+        if digest_supported
+        else "(singleton, index_mtime, index_size, node_count, edge_count, updated_at) "
+    )
+    placeholders = "VALUES (1, ?, ?, ?, ?, ?, ?)" if digest_supported else "VALUES (1, ?, ?, ?, ?, ?)"
+    digest_update = "edge_digest = excluded.edge_digest, " if digest_supported else ""
+    values = [
+        stamp[0], stamp[1],
+        conn.execute("SELECT COUNT(*) FROM page_index_nodes").fetchone()[0],
+        conn.execute("SELECT COUNT(*) FROM page_index_edges").fetchone()[0],
+        _utc_now(),
+    ]
+    if digest_supported:
+        # Committed atomically with the rows it describes.
+        values.append(for_edge_digest if for_edge_digest is not None else _weighted_edges_digest(index_data))
+    conn.execute(
+        "INSERT INTO page_index_state "
+        + columns
+        + placeholders
+        + " ON CONFLICT(singleton) DO UPDATE SET "
+        "index_mtime = excluded.index_mtime, index_size = excluded.index_size, "
+        "node_count = excluded.node_count, edge_count = excluded.edge_count, "
+        + digest_update
+        + "updated_at = excluded.updated_at",
+        tuple(values),
+    )
 
 
 def ensure_page_index_projection() -> bool:
@@ -505,8 +513,22 @@ class _SqliteCatalog:
     def adjacency(self) -> dict[str, list[tuple[str, float]]]:
         return adjacency()
 
-    def scoped_adjacency(self, domain="", cluster="") -> dict[str, list[tuple[str, float]]]:
-        conn = get_connection()
+    def scoped_adjacency(self, domain="", cluster="") -> ScopedAdjacency:
+        with _adjacency_lock:
+            conn = get_connection()
+            # A caller-owned transaction may contain uncommitted projection rows.
+            # It must not populate the process cache, even if later rolled back.
+            if conn.in_transaction:
+                return _freeze_adjacency(self._build_scoped_adjacency(conn, domain, cluster))
+            with read_snapshot():
+                state = conn.execute("SELECT * FROM page_index_state WHERE singleton=1").fetchone()
+                if state is None:
+                    return _freeze_adjacency(self._build_scoped_adjacency(conn, domain, cluster))
+                key = ("projection", _scope_source_identity(), tuple(state), _normalized_scope(domain, cluster))
+                return _scoped_adjacency(key, lambda: self._build_scoped_adjacency(conn, domain, cluster))
+
+    @staticmethod
+    def _build_scoped_adjacency(conn, domain, cluster):
         conn.create_function('vl_page_scope_domain', 1, lambda value: canonical_domain(value).lower(), deterministic=True)
         conn.create_function('vl_page_scope_cluster', 1, lambda value: str(value or '').lower(), deterministic=True)
         table: dict[str, list[tuple[str, float]]] = {}
@@ -549,6 +571,12 @@ class _FileCatalog:
         self._nodes = {str(key): node for key, node in nodes.items()}
         self._weighted_edges = index_data.get("weighted_edges")
         self._adjacency: dict[str, list[tuple[str, float]]] | None = None
+        # The parsed catalog owns one file generation. A token (not id(self))
+        # avoids recycled identities without retaining the whole catalog in the LRU.
+        self._scope_identity = (_scope_source_identity(), object())
+        self._scope_fields = {key: (canonical_domain(node.get("domain")).lower(),
+                                    str(node.get("topic_cluster") or "").lower())
+                              for key, node in self._nodes.items()}
 
     def nodes_by_key(self, keys) -> dict[str, dict]:
         ordered = [str(key) for key in keys]
@@ -574,12 +602,32 @@ class _FileCatalog:
             self._adjacency = table
         return self._adjacency
 
-    def scoped_adjacency(self, domain="", cluster="") -> dict[str, list[tuple[str, float]]]:
-        visible = {key for key, node in self._nodes.items()
-                   if (not domain or canonical_domain(node.get("domain")).lower() == canonical_domain(domain).lower())
-                   and (not cluster or str(node.get("topic_cluster") or "").lower() == cluster.lower())}
-        return {key: [(target, weight) for target, weight in neighbors if target in visible]
-                for key, neighbors in self.adjacency().items() if key in visible}
+    def scoped_adjacency(self, domain="", cluster="") -> ScopedAdjacency:
+        scope = _normalized_scope(domain, cluster)
+        with _adjacency_lock:
+            return _scoped_adjacency((self.source, self._scope_identity, scope),
+                                     lambda: self._build_scoped_adjacency(scope))
+
+    def _build_scoped_adjacency(self, scope):
+        has_domain, domain, has_cluster, cluster = scope
+        visible = {key for key, (node_domain, node_cluster) in self._scope_fields.items()
+                   if (not has_domain or node_domain == domain)
+                   and (not has_cluster or node_cluster == cluster)}
+        table = {}
+        for edge in self._weighted_edges or []:
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            weight = float(edge.get("weight", 1.0) or 0.0)
+            # Preserve file-catalog key order and empty visible adjacency rows,
+            # without retaining a second, full adjacency for a scoped request.
+            if source in visible:
+                table.setdefault(source, [])
+            if target in visible:
+                table.setdefault(target, [])
+            if source in visible and target in visible:
+                table[source].append((target, weight))
+                table[target].append((source, weight))
+        return table
 
     def node_summary_lines(self, limit: int = 50) -> list[str]:
         return [
@@ -663,6 +711,8 @@ def reset_catalog_cache() -> None:
         _CATALOG_CACHE["key"] = None
         _CATALOG_CACHE["catalog"] = None
         _CATALOG_CACHE["at"] = 0.0
+    with _adjacency_lock:
+        _scoped_adjacencies.clear()
 
 
 def read_catalog():
@@ -692,7 +742,9 @@ def read_catalog():
             return _CATALOG_CACHE["catalog"], _fallback_note()
         cached = _CATALOG_CACHE["catalog"]
         age = time.monotonic() - float(_CATALOG_CACHE.get("at") or 0.0)
-        if cached is not None and age < _fallback_reparse_seconds():
+        cached_key = _CATALOG_CACHE["key"]
+        same_root = isinstance(cached_key, tuple) and cached_key[0] == key[0]
+        if cached is not None and same_root and age < _fallback_reparse_seconds():
             return cached, _fallback_note(served_from_cache_for=age)
 
     from vector_lake import retrieval_runtime as _runtime
@@ -773,8 +825,53 @@ def node_summary_lines(limit: int = 50) -> list[str]:
 
 # --- adjacency --------------------------------------------------------------
 
-_adjacency_lock = threading.Lock()
+_adjacency_lock = threading.RLock()
 _adjacency: dict = {"stamp": None, "data": None, "generation": 0}
+_scoped_adjacencies: OrderedDict = OrderedDict()
+
+
+def _scope_source_identity():
+    path = get_db_path().resolve()
+    try:
+        stat = path.stat()
+        database_identity = (str(path), stat.st_dev, stat.st_ino)
+    except FileNotFoundError:
+        database_identity = (str(path), None, None)
+    return (str(get_index_path().resolve()), database_identity)
+
+
+def _normalized_scope(domain, cluster):
+    # An explicitly blank/whitespace domain is not the unfiltered scope.
+    return (bool(domain), canonical_domain(domain).lower(), bool(cluster), str(cluster or "").lower())
+
+
+def _freeze_adjacency(table) -> ScopedAdjacency:
+    return MappingProxyType({key: tuple(neighbors) for key, neighbors in table.items()})
+
+
+def _scoped_adjacency(key, build) -> ScopedAdjacency:
+    """Called under the adjacency lock; cached snapshots never escape mutable."""
+    if key in _scoped_adjacencies:
+        _scoped_adjacencies.move_to_end(key)
+        return _scoped_adjacencies[key][0]
+    from vector_lake import retrieval_runtime as _runtime
+    _runtime.counter('adjacency_build')
+    table = _freeze_adjacency(build())
+    references = sum(len(neighbors) for neighbors in table.values())
+    if references <= SCOPED_ADJACENCY_REFERENCE_LIMIT:
+        while _scoped_adjacencies and (
+            len(_scoped_adjacencies) >= SCOPED_ADJACENCY_CACHE_LIMIT
+            or references + sum(entry[1] for entry in _scoped_adjacencies.values()) > SCOPED_ADJACENCY_REFERENCE_LIMIT
+        ):
+            _scoped_adjacencies.popitem(last=False)
+        _scoped_adjacencies[key] = (table, references)
+    return table
+
+
+def scoped_adjacency_is_cached(table) -> bool:
+    """Whether a native prepared index may retain this bounded snapshot."""
+    with _adjacency_lock:
+        return any(entry[0] is table for entry in _scoped_adjacencies.values())
 
 
 def _invalidate_adjacency() -> None:
@@ -782,6 +879,7 @@ def _invalidate_adjacency() -> None:
         _adjacency["stamp"] = None
         _adjacency["data"] = None
         _adjacency["generation"] += 1
+        _scoped_adjacencies.clear()
 
 
 def adjacency_generation() -> int:
