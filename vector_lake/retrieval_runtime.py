@@ -18,14 +18,17 @@ PROCESS_STARTED = time.monotonic()
 PROCESS_ID = os.getpid()
 PROCESS_TOKEN = f"{PROCESS_ID:x}-{int(PROCESS_STARTED):x}"
 
-#: Process-wide structural counters.  A request reports the delta it caused, which is what makes
-#: "did this call rebuild the graph" answerable from the ledger instead of inferred from a latency.
+#: Keep process aggregates for diagnostics, but ledger attribution must use request-owned events:
+#: an overlapping request's payload write must never appear as a read-only preview's side effect.
 _COUNTERS: dict[str, int] = {}
 
 
 def counter(name: str, amount: int = 1) -> None:
     """Count one structural event (a rebuild, a parse, a cache hit)."""
     _COUNTERS[name] = _COUNTERS.get(name, 0) + amount
+    state = current()
+    if state is not None:
+        state.request_events[name] = state.request_events.get(name, 0) + amount
 
 
 def counter_snapshot() -> dict[str, int]:
@@ -78,6 +81,7 @@ class RequestState:
     completion: str = 'complete'
     timings: dict[str, float] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
+    request_events: dict[str, int] = field(default_factory=dict)
 
     def problem(self, message: str):
         if message not in self.problems:
@@ -210,7 +214,7 @@ def defer_record(payload: dict) -> bool:
 def _finish(state: RequestState):
     from vector_lake import search_ledger
     total = (time.monotonic() - state.started) * 1000
-    events = counter_delta(state.counters)
+    events = dict(state.request_events)
     if not state.pending:
         state.pending.append({'query': state.query, 'mode': state.mode, 'top_k': state.top_k,
                               'returned': [], 'notes': [], 'status': 'complete'})

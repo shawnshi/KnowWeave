@@ -79,3 +79,31 @@ def test_payload_metadata_failure_does_not_replace_success(query_context, monkey
     assert event['status'] == 'complete'
     assert event['cache_events']['query_payload_write'] == 1
     assert 'query_payload_bytes' not in event['cache_events']
+
+
+def test_overlapping_preview_does_not_claim_another_requests_payload(query_context, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    started, resume = Event(), Event()
+    assemble = tool_query.assemble_context
+    def overlapping(query, *args, **kwargs):
+        if query == 'synthetic preview':
+            started.set()
+            assert resume.wait(5), 'preparation did not complete'
+        return assemble(query, *args, **kwargs)
+    monkeypatch.setattr(tool_query, 'assemble_context', overlapping)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        preview = pool.submit(tool_query.preview_query_context, 'synthetic preview', domain='Medical_IT')
+        try:
+            assert started.wait(5), 'preview did not start'
+            tool_query.prepare_query_context('synthetic prepare', domain='Medical_IT')
+        finally:
+            resume.set()
+        assert preview.result(timeout=5)
+    events = {row['q_hash']: row for row in search_ledger.entries()}
+    read = events[search_ledger.query_digest('synthetic preview')]
+    write = events[search_ledger.query_digest('synthetic prepare')]
+    assert read.get('cache_events', {}).get('query_payload_write', 0) == 0
+    assert read.get('cache_events', {}).get('query_payload_bytes', 0) == 0
+    assert write['cache_events']['query_payload_write'] == 1
+    assert write['cache_events']['query_payload_bytes'] > 0
