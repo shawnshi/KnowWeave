@@ -1,6 +1,7 @@
 """Request-local retrieval limits and terminal telemetry; not an authorization boundary."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -64,6 +65,9 @@ class RequestState:
     backends: set[str] = field(default_factory=set)
     generations: dict = field(default_factory=dict)
     pending: list[dict] = field(default_factory=list)
+    purpose_snapshot: tuple[str, dict] | None = field(default=None, repr=False)
+    memory_evaluations: OrderedDict = field(default_factory=OrderedDict, repr=False)
+    scoring_now: object | None = field(default=None, repr=False)
     connections: dict = field(default_factory=dict)
     emitted_keys: set[str] | None = None
     fts_scope: dict | None = None
@@ -276,6 +280,9 @@ def request_scope(query, *, top_k=None, max_chars=None):
             # Observation failure cannot replace the search result or its original exception.
             log.warning('Retrieval terminal observation: %s', safe_error(exc))
         finally:
+            state.purpose_snapshot = None
+            state.memory_evaluations.clear()
+            state.scoring_now = None
             _CURRENT.reset(token)
 
 

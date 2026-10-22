@@ -14,6 +14,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
+from vector_lake import retrieval_runtime
 from vector_lake.claim_extractor import extract_page_objects
 from vector_lake.db_store import (
     ensure_operational_memory_index_cheap,
@@ -57,29 +58,40 @@ VALIDITY_FACTORS = {
 
 _PURPOSE_VECTORS_CACHE = None
 _PURPOSE_VECTORS_MTIME = 0
+_PURPOSE_VECTORS_PATH = None
+_PURPOSE_VECTORS_LOCK = threading.RLock()
+MEMORY_EVALUATION_CACHE_LIMIT = 4096
+
 
 def get_purpose_vectors() -> dict:
-    global _PURPOSE_VECTORS_CACHE, _PURPOSE_VECTORS_MTIME
+    global _PURPOSE_VECTORS_CACHE, _PURPOSE_VECTORS_MTIME, _PURPOSE_VECTORS_PATH
     path = get_meta_dir() / "purpose_vectors.json"
-    
-    current_mtime = 0
-    if path.exists():
-        current_mtime = path.stat().st_mtime
-        
-    if _PURPOSE_VECTORS_CACHE is not None and _PURPOSE_VECTORS_MTIME == current_mtime:
-        return _PURPOSE_VECTORS_CACHE
-        
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                _PURPOSE_VECTORS_CACHE = json.load(f)
-        except Exception:
-            _PURPOSE_VECTORS_CACHE = {"keywords": [], "weight_boost": 0.0}
-    else:
-        _PURPOSE_VECTORS_CACHE = {"keywords": [], "weight_boost": 0.0}
-        
-    _PURPOSE_VECTORS_MTIME = current_mtime
-    return _PURPOSE_VECTORS_CACHE
+    namespace = str(path)
+    state = retrieval_runtime.current()
+    if state is not None and state.purpose_snapshot is not None:
+        if state.purpose_snapshot[0] == namespace:
+            retrieval_runtime.counter('purpose_snapshot_hit')
+            return state.purpose_snapshot[1]
+        state.memory_evaluations.clear()
+    with _PURPOSE_VECTORS_LOCK:
+        current_mtime = path.stat().st_mtime if path.exists() else 0
+        if (_PURPOSE_VECTORS_CACHE is None or _PURPOSE_VECTORS_PATH != namespace
+                or _PURPOSE_VECTORS_MTIME != current_mtime):
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as stream:
+                        _PURPOSE_VECTORS_CACHE = json.load(stream)
+                except Exception:
+                    _PURPOSE_VECTORS_CACHE = {"keywords": [], "weight_boost": 0.0}
+            else:
+                _PURPOSE_VECTORS_CACHE = {"keywords": [], "weight_boost": 0.0}
+            _PURPOSE_VECTORS_MTIME = current_mtime
+            _PURPOSE_VECTORS_PATH = namespace
+        vectors = _PURPOSE_VECTORS_CACHE
+    if state is not None:
+        state.purpose_snapshot = (namespace, vectors)
+        retrieval_runtime.counter('purpose_snapshot_load')
+    return vectors
 
 
 def _utc_now() -> str:
@@ -991,7 +1003,12 @@ def _freshness_score(record: dict, now=None) -> float:
 def _memory_now():
     from vector_lake import governance_metrics
 
-    return governance_metrics._utc_now()
+    state = retrieval_runtime.current()
+    if state is None:
+        return governance_metrics._utc_now()
+    if state.scoring_now is None:
+        state.scoring_now = governance_metrics._utc_now()
+    return state.scoring_now
 
 
 def _current_memory(memory: dict, now=None, *, restore_supersession=False) -> dict:
@@ -1058,12 +1075,29 @@ def _current_memory(memory: dict, now=None, *, restore_supersession=False) -> di
 
 
 def _query_memory_functions(conn, now):
-    # SQL must apply current validity/score *before* LIMIT. These connection-local
-    # functions do not mutate persisted payloads or require an index migration.
-    conn.create_function("memory_current_state", 1,
-                         lambda raw: _current_memory(json.loads(raw), now)["validity_state"])
-    conn.create_function("memory_current_score", 1,
-                         lambda raw: _memory_score_value(_current_memory(json.loads(raw), now).get("memory_score")))
+    def evaluate(raw):
+        state = retrieval_runtime.current()
+        key = None
+        if state is not None:
+            digest = hashlib.sha256(raw.encode('utf-8') if isinstance(raw, str) else raw).digest()
+            key = (str(get_meta_dir()), now, digest)
+            if key in state.memory_evaluations:
+                state.memory_evaluations.move_to_end(key)
+                retrieval_runtime.counter('memory_evaluation_hit')
+                return state.memory_evaluations[key]
+        current = _current_memory(json.loads(raw), now=now)
+        result = (current['validity_state'], _memory_score_value(current.get('memory_score')))
+        retrieval_runtime.counter('memory_evaluation_compute')
+        if key is not None:
+            state.memory_evaluations[key] = result
+            if len(state.memory_evaluations) > MEMORY_EVALUATION_CACHE_LIMIT:
+                state.memory_evaluations.popitem(last=False)
+                retrieval_runtime.counter('memory_evaluation_eviction')
+        return result
+
+    # SQL must share current state/score derivation before LIMIT, without persisting payloads.
+    conn.create_function('memory_current_state', 1, lambda raw: evaluate(raw)[0])
+    conn.create_function('memory_current_score', 1, lambda raw: evaluate(raw)[1])
 
 
 def score_memory_object(memory: dict, now=None) -> dict:
