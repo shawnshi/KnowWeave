@@ -195,7 +195,8 @@ def test_prior_success_survives_aggregate_budget_refusal(published, monkeypatch)
     assert result['evidence'][1]['status'] == 'refused'
 
 
-def test_sensitive_footer_and_attribution_values_do_not_escape(published):
+def test_sensitive_footer_and_attribution_values_do_not_escape(published, monkeypatch):
+    monkeypatch.setenv('VECTOR_LAKE_SEARCH_LEDGER', '1')
     root, _, add = published
     marker = 'SYNTHETIC_DO_NOT_EXPORT'
     text = ('Agent harness safe paragraph.\n\n'
