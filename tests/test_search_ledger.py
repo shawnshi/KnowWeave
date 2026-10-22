@@ -15,6 +15,11 @@ import pytest
 from vector_lake import search_ledger
 
 
+@pytest.fixture(autouse=True)
+def ledger_enabled(monkeypatch):
+    monkeypatch.setenv('VECTOR_LAKE_SEARCH_LEDGER', '1')
+
+
 def test_the_query_is_identified_not_stored(isolated_memory):
     """The line answers "same query?" without retaining caller text."""
     query = "梅奥诊所 的 数据平台"
