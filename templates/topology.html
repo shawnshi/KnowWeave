@@ -159,8 +159,29 @@ small, .small { font-size: 12px; line-height: 1.65; color: var(--muted); }
 .evidence-list, .neighbor-list { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 12px; }
 .evidence-list li { display: grid; gap: 5px; border-left: 2px solid #c6d7e7; padding-left: 12px; }
 .evidence-list a { overflow-wrap: anywhere; font-size: 13px; line-height: 1.8; }
-.neighbor-list button { width: 100%; padding: 9px 11px; font-size: 13px; overflow-wrap: anywhere; border-color: var(--line); background: var(--panel-raised); }
-.neighbor-list small { display: block; margin-top: 3px; font-size: 12px; }
+.neighbor-list { gap: 0; margin: 0; }
+.neighbor-list > li { padding: 9px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.relation-row { display: flex; align-items: flex-start; gap: 8px; }
+.relation-title { flex: 1; min-width: 0; min-height: 0; padding: 0; text-align: left; font-size: 13px; line-height: 1.65; color: var(--ink); border: 0; border-radius: 2px; background: transparent; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.relation-title:hover { color: var(--accent); background: transparent; text-decoration: underline; }
+.relation-toggle { flex-shrink: 0; min-height: 26px; padding: 1px 5px; font-size: 12px; color: var(--accent); border-color: transparent; background: transparent; }
+.relation-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; margin-top: 3px; font-size: 12px; color: var(--secondary); }
+.relation-kinds { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; gap: 2px 8px; }
+.relation-kind { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relation-state { flex-shrink: 0; color: var(--muted); }
+.relation-details { margin-top: 9px; padding: 10px 12px; border-left: 2px solid var(--line); background: var(--panel-raised); overflow-wrap: anywhere; }
+.relation-declaration + .relation-declaration { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.relation-details p, .relation-details summary { font-size: 12px; line-height: 1.7; }
+.relation-details h4 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+.relation-details summary { margin-top: 5px; cursor: pointer; color: var(--accent); }
+.relation-details pre { margin: 8px 0 0; font: 12px/1.65 var(--font-number); white-space: pre-wrap; overflow-wrap: anywhere; }
+.paged-tools { position: sticky; top: 0; z-index: 2; display: grid; gap: 7px; padding: 4px 0 9px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.paged-tools .paged-search { width: 100%; min-width: 0; margin: 0; font-size: 13px; }
+.paged-tools .pagination { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 4px; margin: 0; }
+.paged-tools .pagination button { min-height: 28px; padding: 2px 8px; font-size: 12px; }
+.paged-tools .paged-size { min-height: 28px; padding: 2px 5px; max-width: 100%; font-size: 12px; }
+.paged-page-size { justify-self: start; display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+.relation-toggle, .relation-title, .relation-details summary { scroll-margin-top: 118px; }
 .feedback { border-top: 1px solid var(--line); background: var(--panel); padding: 8px 26px; min-height: 34px; color: var(--muted); font-size: 12px; }
 .mobile-navigation { display: none; }
 dialog { color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; max-width: min(520px, 90vw); padding: 28px; box-shadow: var(--shadow-dialog); }
@@ -173,7 +194,7 @@ dialog textarea { width: 100%; margin-bottom: 16px; padding: 12px; background: v
   .inspector { padding: 24px 20px; }
   .topbar { gap: 18px; grid-template-columns: auto minmax(220px, 1fr) auto; }
 }
-@media (max-width: 950px) {
+@media (max-width: 950px), (max-width: 1250px) and (max-height: 650px) {
   .app { height: auto; min-height: 100dvh; }
   .topbar { grid-template-columns: 1fr auto; padding: 16px 20px; }
   .search { grid-row: 2; grid-column: 1 / -1; }
@@ -626,26 +647,43 @@ const memoryBasePath = "%%MEMORY_BASE_PATH%%";
       if (graph3d) state.tab === 'map' && state.dimension === '3d' && !empty && !state.paused ? graph3d.resumeAnimation() : graph3d.pauseAnimation();
     }
 
-    function pagedItems(items, { className, name, searchText, renderItem, emptyText }) {
+    function pagedItems(items, { className, name, searchText, renderItem, emptyText, pageSize = 5, pageSizes = null, controlsFirst = false }) {
       const region = element('div', undefined, 'paged-region'), list = element('ul', undefined, className), controls = element('div', undefined, 'row pagination');
+      const toolbar = controlsFirst ? element('div', undefined, 'paged-tools') : region;
       let page = 0, query = '';
-      const status = element('span', '', 'small number');
-      const previous = button('上一页', () => { page--; paint('previous'); }), next = button('下一页', () => { page++; paint('next'); });
+      const status = element('span', '', 'small number'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.tabIndex = -1;
+      const previous = button(controlsFirst ? '‹' : '上一页', () => { page--; paint('previous'); }), next = button(controlsFirst ? '›' : '下一页', () => { page++; paint('next'); });
       previous.setAttribute('aria-label', `上一页${name}`); next.setAttribute('aria-label', `下一页${name}`);
-      controls.append(previous, status, next);
-      if (items.length > 5) {
+      if (controlsFirst) controls.append(status, previous, next); else controls.append(previous, status, next);
+      if (controlsFirst || items.length > pageSize) {
         const search = element('input'); search.type = 'search'; search.placeholder = `筛选${name}`; search.className = 'paged-search'; search.setAttribute('aria-label', `筛选${name}`);
-        search.addEventListener('input', () => { query = normalize(search.value); page = 0; paint(); }); region.append(search);
+        search.addEventListener('input', () => { query = normalize(search.value); page = 0; paint(); }); toolbar.append(search);
+      }
+      if (controlsFirst) toolbar.append(controls);
+      if (pageSizes) {
+        const label = element('label', undefined, 'paged-page-size'), size = element('select', undefined, 'paged-size'); size.setAttribute('aria-label', `每页${name}数量`);
+        for (const value of pageSizes) { const option = element('option', String(value)); option.value = String(value); size.append(option); }
+        size.value = String(pageSize);
+        size.addEventListener('change', () => { pageSize = pageSizes.includes(Number(size.value)) ? Number(size.value) : 8; size.value = String(pageSize); page = 0; paint(); });
+        label.append(element('span', '每页'), size, element('span', '项'));
+        if (controlsFirst) controls.replaceChildren(status, label, previous, next); else toolbar.append(label);
       }
       function paint(direction) {
-        const matched = items.filter(item => normalize(searchText(item)).includes(query)), result = slicePage(matched, page, 5); page = result.page;
+        const matched = items.filter(item => normalize(searchText(item)).includes(query)), result = slicePage(matched, page, pageSize); page = result.page;
         list.replaceChildren(...result.items.map(renderItem));
         if (!matched.length) list.append(element('li', emptyText, 'small'));
         status.textContent = `${number(matched.length)} 项 · ${result.page + 1}/${result.pages}`;
-        previous.disabled = page === 0; next.disabled = page + 1 >= result.pages; controls.hidden = matched.length <= 5;
-        if (direction) { const preferred = direction === 'previous' ? previous : next; (preferred.disabled ? (preferred === previous ? next : previous) : preferred).focus(); }
+        previous.disabled = page === 0; next.disabled = page + 1 >= result.pages; controls.hidden = !controlsFirst && matched.length <= pageSize;
+        const pane = region.closest('.detail-pane'); if (pane) pane.scrollTop = 0;
+        if (direction) {
+          const preferred = direction === 'previous' ? previous : next, alternate = preferred === previous ? next : previous;
+          if (!preferred.disabled) preferred.focus();
+          else if (!alternate.disabled) alternate.focus();
+          else status.focus();
+        }
       }
-      region.append(list, controls); paint(); return region;
+      if (controlsFirst) region.append(toolbar, list); else region.append(list, controls);
+      paint(); return region;
     }
 
     function renderDetail() {
@@ -710,20 +748,65 @@ const memoryBasePath = "%%MEMORY_BASE_PATH%%";
       } }));
       if (wikiURL) sourcePane.append(button('查看本页 Markdown 路径', () => showPath(wikiURL)));
       const neighbors = [...graph().adjacency.get(node.id)].map(id => graph().byId.get(id)).sort(bySalience);
-      relationPane.append(element('h3', `关联邻居（${number(neighbors.length)}）`), element('p', '页面声明保留方向和谓词，不等于已核实；加权关联仅供检索，不代表支持或因果。', 'small'));
-      relationPane.append(pagedItems(neighbors, { className: 'neighbor-list', name: '关联邻居', searchText: neighbor => `${neighbor.name} ${neighbor.id}`, emptyText: '没有匹配的关联邻居。', renderItem: neighbor => {
-        const edge = graph().edges.find(item => (item.source === node.id && item.target === neighbor.id) || (item.target === node.id && item.source === neighbor.id));
-        const item = element('li'), action = button(neighbor.name, () => chooseNode(neighbor.id));
-        for (const declaration of edge?.declarations || []) {
-          const layer = declaration.layer === 'navigation' ? '导航声明' : '页面声明';
-          action.append(element('small', `${layer}：${declaration.source === node.id ? '→' : '←'} ${declaration.predicate || '显式关联（未提供谓词）'} · 声明权重：null · 核验（verified）：${recordedValue(declaration.verified)}`));
-          for (const [field, label] of [['subject_scope', '主体范围'], ['resolution_status', '解析状态'], ['context', '声明上下文'], ['origin', '声明位置'], ['provenance_status', '溯源状态'], ['temporal', '声明时间'], ['epistemic_status', '关系认知状态'], ['lifecycle_status', '关系生命周期']]) {
-            if (declaration[field] != null) action.append(element('small', `${label}（${field}）：${recordedValue(declaration[field])}`));
+      relationPane.append(element('h3', `关联邻居（${number(neighbors.length)}）`), element('p', '声明不等于已核验；检索关联不代表支持或因果。箭头以当前节点为参照。', 'small'));
+      const neighborEdges = new Map();
+      for (const edge of graph().edges) {
+        if (edge.source === node.id) neighborEdges.set(edge.target, edge);
+        else if (edge.target === node.id) neighborEdges.set(edge.source, edge);
+      }
+      const verification = value => {
+        if (value === true) return '已核验';
+        if (value === false) return '未核验';
+        return value == null ? '核验未记录' : '核验值异常';
+      };
+      const literal = value => {
+        if (value === undefined) return '未提供';
+        return typeof value === 'string' ? value : JSON.stringify(value);
+      };
+      const predicateNames = new Map([['mentions', '提及'], ['wikilink', '链接']]);
+      let expandedRelation = null, relationIndex = 0;
+      relationPane.append(pagedItems(neighbors, { className: 'neighbor-list', name: '关联邻居', pageSize: 8, pageSizes: [5, 8, 12], controlsFirst: true,
+        searchText: neighbor => `${neighbor.name} ${neighbor.id} ${(neighborEdges.get(neighbor.id)?.declarations || []).map(item => item.predicate || '').join(' ')} ${neighborEdges.get(neighbor.id)?.relation || ''}`,
+        emptyText: '没有匹配的关联邻居。', renderItem: neighbor => {
+        const edge = neighborEdges.get(neighbor.id), declarations = edge?.declarations || [];
+        const item = element('li'), row = element('div', undefined, 'relation-row'), title = button(neighbor.name, () => chooseNode(neighbor.id), 'relation-title'); title.title = neighbor.name;
+        const meta = element('div', undefined, 'relation-meta'), kinds = element('div', undefined, 'relation-kinds'), detail = element('div', undefined, 'relation-details');
+        detail.id = `relation-details-${++relationIndex}`; detail.hidden = true;
+        const setExpanded = open => { detail.hidden = !open; toggle.textContent = open ? '收起' : '详情'; toggle.setAttribute('aria-expanded', String(open)); toggle.setAttribute('aria-label', `${open ? '收起' : '展开'}${neighbor.name}的关系详情`); };
+        const toggle = button('详情', () => {
+          if (!detail.hidden) { setExpanded(false); expandedRelation = null; toggle.scrollIntoView({ block: 'nearest' }); return; }
+          if (expandedRelation) expandedRelation(false);
+          if (!detail.children.length) {
+            detail.append(element('p', `当前节点：${node.name}；关联节点：${neighbor.name}。→ 当前节点指向关联节点；← 关联节点指向当前节点。`, 'small'));
+            for (const declaration of declarations) {
+              const section = element('section', undefined, 'relation-declaration'), layer = declaration.layer === 'navigation' ? '导航声明' : '页面声明';
+              section.append(element('h4', `${layer}：${declaration.source === node.id ? '→' : '←'} ${declaration.predicate || '显式关联（未提供谓词）'}`), element('p', `声明权重：null · 核验（verified）：${literal(declaration.verified)}`));
+              for (const [field, label] of [['subject_scope', '主体范围'], ['resolution_status', '解析状态'], ['provenance_status', '溯源状态'], ['epistemic_status', '关系认知状态'], ['lifecycle_status', '关系生命周期']]) {
+                if (Object.hasOwn(declaration, field)) section.append(element('p', `${label}（${field}）：${literal(declaration[field])}`));
+              }
+              const raw = element('details'); raw.append(element('summary', '原始字段'));
+              for (const [field, label] of [['context', '声明上下文'], ['origin', '声明位置'], ['temporal', '声明时间']]) {
+                if (Object.hasOwn(declaration, field)) raw.append(element('p', `${label}（${field}）：${typeof declaration[field] === 'string' ? declaration[field] : literal(declaration[field])}`));
+              }
+              raw.append(element('pre', JSON.stringify(declaration, null, 2))); section.append(raw); detail.append(section);
+            }
+            if (finite(edge?.weight)) detail.append(element('p', `加权关联：${edge.relation} · 检索权重 ${edge.weight}（仅供检索，不是证据强度）`));
+            if (!declarations.length) detail.append(element('p', '没有记录页面声明；检索关联不提供核验结论。'));
           }
-        }
-        if (finite(edge?.weight)) action.append(element('small', `加权关联：${edge.relation} · 检索权重 ${edge.weight}`));
-        if (!action.children.length) action.append(element('small', '关联类型未提供'));
-        item.append(action); return item;
+          setExpanded(true); expandedRelation = setExpanded;
+        }, 'relation-toggle');
+        toggle.setAttribute('aria-controls', detail.id); setExpanded(false);
+        const labels = [...new Set(declarations.map(declaration => {
+          const predicate = predicateNames.get(declaration.predicate) || declaration.predicate || '显式关联';
+          return `${declaration.layer === 'navigation' ? '导航 ' : ''}${declaration.source === node.id ? '→' : '←'} ${predicate}`;
+        }))];
+        for (const label of labels.slice(0, 2)) { const kind = element('span', label, 'relation-kind'); kind.title = label; kinds.append(kind); }
+        if (labels.length > 2) kinds.append(element('span', `＋${labels.length - 2} 种`));
+        if (!labels.length) kinds.append(element('span', finite(edge?.weight) ? '检索关联' : '关联类型未提供', 'relation-kind'));
+        const states = [...new Set(declarations.map(declaration => verification(declaration.verified)))];
+        const verificationText = element('span', states.length > 1 ? '核验状态不一' : states[0] || '核验未记录', 'relation-state');
+        verificationText.title = '仅反映声明中的 verified 字段；解析状态、溯源状态和检索权重不构成核验。';
+        meta.append(kinds, verificationText); row.append(title, toggle); item.append(row, meta, detail); return item;
       } }));
       actionPane.append(element('h3', '研究与治理交接'), button('复制检索问题', () => copy(node.name)), button('复制溯源标识', () => copy(node.id)), button('复制治理建议 JSON', () => copy(JSON.stringify({ title: `复核：${node.name}`, node: node.id, status: 'pending', created_at: new Date().toISOString() }, null, 2))));
       actionPane.append(element('p', '只复制文本，不执行命令，不向治理队列提交。', 'small'));

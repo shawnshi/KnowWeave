@@ -196,9 +196,9 @@ test('neighbor sections page independently and preserve focus across page and no
   const all = () => descendants(ids.get('detail-content'));
   await all().find(node => node.id === 'detail-tab-relations').emit('click');
   const list = all().find(node => node.className === 'neighbor-list'), next = all().find(node => node.getAttribute('aria-label') === '下一页关联邻居');
-  assert.equal(list.children.length, 5); await next.emit('click'); assert.equal(list.children.length, 5);
-  await next.emit('click'); assert.equal(list.children.length, 2); assert.ok(global.document.activeElement.isConnected); assert.equal(global.document.activeElement.disabled, false);
-  await list.children[0].children[0].emit('click'); assert.notEqual(app.state.selected, root.id); assert.equal(app.state.detailTab, 'relations'); assert.equal(global.document.activeElement.tagName, 'H2');
+  assert.equal(list.children.length, 8); await next.emit('click'); assert.equal(list.children.length, 4);
+  assert.ok(global.document.activeElement.isConnected); assert.equal(global.document.activeElement.disabled, false);
+  await descendants(list).find(node => node.className === 'relation-title').emit('click'); assert.notEqual(app.state.selected, root.id); assert.equal(app.state.detailTab, 'relations'); assert.equal(global.document.activeElement.tagName, 'H2');
 });
 test('summary preview can expand and collapse without a long combined inspector', async () => {
   const payload = fixture(); payload.pageGraph.nodes[0].summary = '摘要段落'.repeat(500);
@@ -458,11 +458,12 @@ test('malformed declarations and claim-space semantic links cannot create phanto
   const graph = ui.buildGraph(raw, 'page'); assert.equal(graph.edges.length, 0); assert.ok(graph.rejected >= 4);
   assert.equal(ui.buildGraph({ nodes: [{ id: 'Claim_A', semantic_links: ['Claim_B'] }, { id: 'Claim_B' }], edges: [] }, 'claim').edges.length, 0);
 });
-test('relation inspector distinguishes an incoming declaration from relevance weights', () => {
+test('relation inspector distinguishes an incoming declaration from relevance weights', async () => {
   const payload = fixture(); payload.pageGraph.edges = [];
   payload.pageGraph.nodes[1].declared_links = ['Concept_A'];
   payload.pageGraph.nodes[1].declared_relations = [{ target: 'Concept_A', predicate: 'part-of' }];
   const { app, ids } = appFixture({ payload }); app.chooseNode('Concept_A');
+  await relationNodes(ids)[0].emit('click');
   const strings = descendants(ids.get('detail-content')).map(node => node.textContent);
   assert.ok(strings.some(text => text.includes('页面声明：← part-of')));
   assert.ok(!strings.some(text => text.includes('检索权重')));
@@ -492,7 +493,7 @@ test('record, epistemic and explicit product lifecycle remain separate; seed nev
   assert.match(text, /记录状态（status）：unknown/);
   assert.match(text, /认知状态（epistemic_status）：unknown/);
 });
-test('catalog details preserve direction, unverified null declaration weight, context and independent numeric relatedness', () => {
+test('catalog details preserve direction, unverified null declaration weight, context and independent numeric relatedness', async () => {
   const payload = fixture();
   const relation = { source: 'Source_B', target: 'Concept_A', predicate: 'part-of', layer: 'declared', declared: true, weight: null, verified: false,
     subject_scope: 'document', resolution_status: 'resolved', origin: { page_key: 'Source_B', locator: 'synthetic heading' },
@@ -505,21 +506,22 @@ test('catalog details preserve direction, unverified null declaration weight, co
   assert.equal(graph.edges.length, 1);
   assert.deepEqual(graph.edges[0].declarations, [relation]);
   const { app, ids } = appFixture({ payload }); app.chooseNode('Concept_A');
+  await relationNodes(ids)[0].emit('click');
   let text = inspectorElements(ids).map(node => node.textContent).join('\n');
   assert.match(text, /← part-of/); assert.match(text, /声明权重：null/); assert.match(text, /核验（verified）：false/);
   assert.match(text, /检索权重 4\.5/); assert.match(text, /主体范围（subject_scope）：document/);
   assert.match(text, /synthetic-claim/); assert.match(text, /synthetic-evidence/); assert.match(text, /valid_from.*2026-01-01/);
   assert.match(text, /溯源状态（provenance_status）：unverified/);
-  app.chooseNode('Source_B');
+  app.chooseNode('Source_B'); await relationNodes(ids)[0].emit('click');
   text = inspectorElements(ids).map(node => node.textContent).join('\n'); assert.match(text, /→ part-of/);
 });
-test('malicious state and optional relation text remain literal text, never HTML or network actions', () => {
+test('malicious state and optional relation text remain literal text, never HTML or network actions', async () => {
   const attack = '</script><img src="https://invalid.example/x" onerror="attack()"> & <svg onload=attack()>';
   const payload = fixture();
   payload.pageGraph.nodes[0].status = attack; payload.pageGraph.nodes[0].epistemic_status = attack; payload.pageGraph.nodes[0].lifecycle_status = attack;
   payload.pageGraph.relations = [{ source: 'Concept_A', target: 'Source_B', predicate: attack, layer: 'navigation', verified: false, weight: null,
     context: attack, origin: { locator: attack }, provenance_status: attack, temporal: { valid_from: attack } }];
-  const { app, ids } = appFixture({ payload }); app.chooseNode('Concept_A');
+  const { app, ids } = appFixture({ payload }); app.chooseNode('Concept_A'); await relationNodes(ids)[0].emit('click');
   const elements = inspectorElements(ids), text = elements.map(node => node.textContent).join('\n');
   assert.ok(text.includes(`记录状态（status）：${attack}`));
   assert.ok(text.includes(`认知状态（epistemic_status）：${attack}`));
@@ -551,4 +553,94 @@ test('scoped refresh reports its own time without claiming an all-library fresh 
   assert.equal(ids.get('generated-at').dateTime, '2026-10-21T01:26:30.000Z');
   assert.equal(ids.get('consistency-warning').hidden, false);
   assert.equal(ids.get('consistency-warning').textContent, '定向范围更新，不是全库同一时点快照');
+});
+
+function relationFixture(count = 12) {
+  const payload = fixture(), root = payload.pageGraph.nodes[0];
+  payload.pageGraph.nodes = [root, ...Array.from({ length: count }, (_, i) => ({ id: `Source_${i}`, name: `关联页面 ${i}`, raw_type: 'Source' }))];
+  payload.pageGraph.edges = [];
+  payload.pageGraph.relations = payload.pageGraph.nodes.slice(1).map(neighbor => ({ source: neighbor.id, target: root.id, layer: 'declared', predicate: 'mentions', verified: false, weight: null }));
+  return payload;
+}
+const relationNodes = ids => descendants(ids.get('detail-content')).filter(node => node.className === 'relation-toggle');
+const relationText = node => [node.textContent, ...descendants(node).map(child => child.textContent)].join('\n');
+
+test('compact relations hide technical fields, bound kinds and retain exact declarations on demand', async () => {
+  const payload = relationFixture(1), root = payload.pageGraph.nodes[0].id;
+  const incoming = payload.pageGraph.relations[0];
+  Object.assign(incoming, { context: { status: 'binding_unknown', evidence_count: null }, resolution_status: 'resolved', extra_field: { literal: false } });
+  payload.pageGraph.relations.push({ ...incoming, layer: 'navigation', predicate: 'wikilink', verified: null },
+    { source: root, target: 'Source_0', layer: 'declared', predicate: 'supports', verified: true, weight: null });
+  const original = JSON.stringify(payload), { app, ids } = appFixture({ payload }); app.chooseNode(root);
+  const all = () => descendants(ids.get('detail-content'));
+  const list = all().find(node => node.className === 'neighbor-list');
+  assert.equal(list.children.length, 1);
+  assert.ok(!relationText(list).includes('binding_unknown'));
+  assert.ok(!all().some(node => node.tagName === 'PRE'));
+  assert.equal(all().filter(node => node.className === 'relation-kind').length, 2);
+  assert.ok(relationText(list).includes('＋1 种'));
+  assert.ok(relationText(list).includes('核验状态不一'));
+  const toggle = relationNodes(ids)[0], selected = app.state.selected;
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false'); await toggle.emit('click');
+  assert.equal(app.state.selected, selected);
+  const detail = all().find(node => node.id === toggle.getAttribute('aria-controls'));
+  assert.equal(detail.hidden, false); assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  const text = relationText(detail);
+  assert.match(text, /页面声明：← mentions/); assert.match(text, /导航声明：← wikilink/); assert.match(text, /页面声明：→ supports/);
+  assert.match(text, /核验（verified）：false/); assert.match(text, /核验（verified）：null/);
+  const raw = descendants(detail).filter(node => node.tagName === 'PRE').map(node => JSON.parse(node.textContent));
+  assert.deepEqual(raw, payload.pageGraph.relations);
+  assert.equal(JSON.stringify(payload), original);
+});
+
+test('only one relation expands and collapsing retains a connected focus target', async () => {
+  const { app, ids } = appFixture({ payload: relationFixture(2) }); app.chooseNode('Concept_A');
+  const [first, second] = relationNodes(ids), details = () => descendants(ids.get('detail-content')).filter(node => node.className === 'relation-details');
+  first.focus(); await first.emit('click'); assert.equal(details().filter(node => !node.hidden).length, 1);
+  second.focus(); await second.emit('click'); assert.equal(first.getAttribute('aria-expanded'), 'false');
+  assert.equal(details().filter(node => !node.hidden).length, 1);
+  await second.emit('click'); assert.equal(details().filter(node => !node.hidden).length, 0);
+  assert.equal(global.document.activeElement, second); assert.ok(second.isConnected);
+  const title = descendants(ids.get('detail-content')).find(node => node.className === 'relation-title');
+  await title.emit('click'); assert.notEqual(app.state.selected, 'Concept_A');
+});
+
+test('relation toolbar is first, searchable by ID and predicate, with bounded 5/8/12 page sizes', async () => {
+  const payload = relationFixture(17); payload.pageGraph.relations[16].predicate = 'special-predicate';
+  const { app, ids } = appFixture({ payload }); app.chooseNode('Concept_A');
+  const all = () => descendants(ids.get('detail-content'));
+  const list = all().find(node => node.className === 'neighbor-list'), toolbar = all().find(node => node.className === 'paged-tools');
+  assert.ok(toolbar); assert.ok(list.parent.children[0] === toolbar); assert.equal(list.children.length, 8);
+  const size = all().find(node => node.getAttribute('aria-label') === '每页关联邻居数量');
+  assert.deepEqual(size.children.map(option => option.value), ['5', '8', '12']); assert.equal(size.value, '8');
+  const next = all().find(node => node.getAttribute('aria-label') === '下一页关联邻居');
+  await next.emit('click'); assert.equal(list.children.length, 8);
+  await next.emit('click'); assert.equal(list.children.length, 1); assert.ok(global.document.activeElement.isConnected);
+  size.value = '12'; await size.emit('change'); assert.equal(list.children.length, 12);
+  const search = all().find(node => node.getAttribute('aria-label') === '筛选关联邻居');
+  search.value = 'special predicate'; await search.emit('input'); assert.equal(list.children.length, 1); assert.match(relationText(list), /关联页面 16/);
+  search.value = 'Source_3'; await search.emit('input'); assert.equal(list.children.length, 1); assert.match(relationText(list), /关联页面 3/);
+  search.value = 'no-such-page'; await search.emit('input'); assert.match(relationText(list), /没有匹配/);
+  assert.equal(next.disabled, true);
+  search.value = ''; await search.emit('input'); assert.equal(list.children.length, 12);
+  size.value = 'invalid'; await size.emit('change'); assert.equal(size.value, '8'); assert.equal(list.children.length, 8);
+});
+
+test('verification summaries distinguish false, missing, null, malformed and verified without using resolution', () => {
+  const values = [false, undefined, null, 'true', true], payload = relationFixture(values.length);
+  payload.pageGraph.relations.forEach((item, i) => { item.verified = values[i]; item.resolution_status = 'resolved'; });
+  const { app, ids } = appFixture({ payload }); app.chooseNode('Concept_A');
+  const states = descendants(ids.get('detail-content')).filter(node => node.className === 'relation-state').map(node => node.textContent);
+  assert.deepEqual(states, ['未核验', '核验未记录', '核验未记录', '核验值异常', '已核验']);
+});
+
+test('empty relations and relevance-only links keep usable controls without inventing verification', async () => {
+  const empty = appFixture({ payload: relationFixture(0) }); empty.app.chooseNode('Concept_A');
+  assert.match(relationText(empty.ids.get('detail-content')), /没有匹配的关联邻居/);
+  assert.equal(relationNodes(empty.ids).length, 0);
+  const { app, ids } = appFixture(); app.chooseNode('Concept_A');
+  const list = descendants(ids.get('detail-content')).find(node => node.className === 'neighbor-list');
+  assert.match(relationText(list), /检索关联/); assert.match(relationText(list), /核验未记录/);
+  assert.doesNotMatch(relationText(list), /检索权重/);
+  await relationNodes(ids)[0].emit('click'); assert.match(relationText(list), /检索权重/);
 });
