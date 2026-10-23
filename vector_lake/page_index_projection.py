@@ -541,6 +541,24 @@ def _confident_name_mentions(text, key, node):
     return False
 
 
+CANDIDATE_DEPTH = 25
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        log.warning("Ignoring unparsable %s=%r", name, raw)
+        return default
+    if value < 1:
+        log.warning("%s must be >= 1; using %d", name, default)
+        return default
+    return value
+
+
 def _fact_entity_context(query, domain=None, cluster=None):
     """Resolve only an unambiguous in-scope directory identity, never a search ranking."""
     catalog, _ = read_catalog()
@@ -549,8 +567,10 @@ def _fact_entity_context(query, domain=None, cluster=None):
     reader = getattr(catalog, 'iter_name_fields', None)
     if reader is None:
         return None
-    match = None
+    matches = {}
+    limit = _env_positive_int('VECTOR_LAKE_CANDIDATE_DEPTH', CANDIDATE_DEPTH)
     rows = reader()
+    count = 0
     try:
         for key, node in rows:
             runtime.checkpoint()
@@ -558,17 +578,34 @@ def _fact_entity_context(query, domain=None, cluster=None):
                 continue
             if cluster and str(node.get('topic_cluster') or '').lower() != cluster.lower():
                 continue
-            if not _complete_name_mentions(query, key, node):
+            spans = _complete_name_mentions(query, key, node)
+            if not spans:
                 continue
             full = catalog.nodes_by_key([key]).get(key)
             if full is None:
                 continue
-            if match is not None:
+            count += 1
+            if count > limit:
                 return None
-            match = (key, full)
+            identity = str(full.get('id') or key)
+            if identity not in matches:
+                matches[identity] = ((key, full), set())
+            matches[identity][1].update(spans)
     finally:
         rows.close()
-    return match if match is not None and _confident_name_mentions(query, *match) else None
+    # Only fully embedded mentions can be shadowed. Equal spans, partial overlap,
+    # or a second independent occurrence must retain ambiguity (RQ05/RQ07/RQ08/RQ09).
+    survivors = []
+    for identity, (candidate, spans) in matches.items():
+        if not all(any(other != identity and left <= start and end <= right
+                       and (left < start or end < right)
+                       for other, (_, outer_spans) in matches.items() for left, right in outer_spans)
+                   for start, end in spans):
+            survivors.append(candidate)
+    if len(survivors) != 1:
+        return None
+    match = survivors[0]
+    return match if _confident_name_mentions(query, *match) else None
 
 
 def _memory_matches_entity(memory, entity):

@@ -22,6 +22,7 @@ from vector_lake.domain_dictionary import PUBLIC_QUERY_PROFILE, QUERY_EXPANSION_
 from vector_lake.node_vocabulary import strip_prefix
 from vector_lake.page_index_projection import (
     _complete_name_mentions, _confident_name_mentions, _fact_entity_context, _memory_matches_entity,
+    _env_positive_int, CANDIDATE_DEPTH,
 )
 from vector_lake.schema_validator import canonical_domain
 from vector_lake.wiki_utils import get_index_path, get_wiki_dir
@@ -140,21 +141,6 @@ def _expansion_quota(pool_size: int) -> int | None:
     return min(value, pool_size)
 
 
-def _env_positive_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        value = int(str(raw).strip())
-    except ValueError:
-        log.warning("Ignoring unparsable %s=%r", name, raw)
-        return default
-    if value < 1:
-        log.warning("%s must be >= 1; using %d", name, default)
-        return default
-    return value
-
-
 #: How deep each retrieval stage looks, and how large the pool the reranker sees.
 #:
 #: These are properties of the *pipeline*, not of the window the caller asked for, and the values
@@ -173,7 +159,6 @@ def _env_positive_int(name: str, default: int) -> int:
 #:
 #: With the depth fixed, the first *k* of a top-k result are the first *k* of any larger one.  The
 #: two knobs exist so a deeper pipeline can be measured as its own change, one variable at a time.
-CANDIDATE_DEPTH = 25
 CANDIDATE_POOL = 40
 #: How much a Source page's score is scaled down for the final ordering, once the pool has been
 #: chosen.  A *preference*, not a filter: the ranking still contains every eligible page, and the
