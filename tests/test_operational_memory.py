@@ -164,7 +164,7 @@ class TestOperationalMemory(unittest.TestCase):
         with mock.patch.object(
             governance_store,
             "search_memory_packet_views",
-            lambda query: (memories, historical),
+            lambda query, **kwargs: (memories, historical),
         ):
             roomy = build_memory_packet("q", max_chars=60000)
             tight = build_memory_packet("q", max_chars=2000)

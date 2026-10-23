@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -885,17 +886,18 @@ def _format_memory_result(memory: dict, as_xml: bool = False, index: int = 0) ->
     score = memory.get("retrieval_score", memory.get("memory_score", 0))
     text = " ".join(str(memory.get("text", "")).split())[:420]
     source = memory.get("source_page") or memory.get("source_claim_id") or "operational_memory"
+    metadata = _display_memory_metadata(memory)
     if as_xml:
         attrs = (
             f"ID='Memory_{index}' Type='{memory_type}' State='{state}' "
             f"Score='{score}' Source='{source}'"
         )
-        return f"<Memory_Item {attrs}>{text}</Memory_Item>\n"
+        return f"<Memory_Item {attrs}>{text}{escape(metadata)}</Memory_Item>\n"
     return (
         f"- **{memory_type}:{memory.get('memory_key', memory.get('memory_id'))}** "
         f"(score: {score:.2f}, state: {state})\n"
         f"  {text}\n"
-        f"  Source: {source}\n\n"
+        f"  Source: {source}{metadata}\n\n"
     )
 
 
@@ -910,7 +912,8 @@ def format_operational_memory_results(
 ) -> str:
     scope = {"domain": domain, "cluster": cluster} if domain or cluster else {}
     memories = governance_store.search_operational_memory(
-        query, top_k=top_k, include_history=include_history, memory_types=memory_types, **scope,
+        query, top_k=top_k, include_history=include_history, memory_types=memory_types,
+        _display_groups=True, **scope,
     )
     blocks, emitted, used = [], [], 0
     for index, memory in enumerate(memories):
@@ -940,9 +943,10 @@ def build_memory_packet(
     if _views is not None:
         memories, historical = _views
     elif scope:
-        memories, historical = governance_store.search_memory_packet_views(query, domain=domain, cluster=cluster)
+        memories, historical = governance_store.search_memory_packet_views(
+            query, domain=domain, cluster=cluster, _display_groups=True)
     else:
-        memories, historical = governance_store.search_memory_packet_views(query)
+        memories, historical = governance_store.search_memory_packet_views(query, _display_groups=True)
 
     stale_or_conflicted = [
         item for item in historical
@@ -979,6 +983,7 @@ def build_memory_packet(
         )
         if memory.get("source_page"):
             line += f" ({memory['source_page']})"
+        line += _display_memory_metadata(memory)
         sections[section].append(line)
         if memory.get("source_claim_id"):
             evidence_pointers.append(
@@ -1006,7 +1011,10 @@ def build_memory_packet(
 
     from vector_lake import memory_gram_index
     gram_usable = True if scope else memory_gram_index.gram_index_usable()
-    policy_line = "Policy: Use this packet as the machine-facing runtime memory. If it conflicts with wiki prose, prefer active non-conflicted memory items and surface the conflict."
+    policy_line = (
+        "Policy: Active preferences, decisions and task state guide unless conflicted. "
+        "Fact active is not verified: prefer original sources; flag conflict/review/expiry."
+    )
     if not gram_usable:
         policy_line += " [DEGRADED: Operational memory gram index is behind; served via exact projected scan]"
 
@@ -1145,12 +1153,15 @@ def _complete_name_mentions(query: str, key: str, node: dict) -> list[tuple[int,
         name = str(name or '').lower()
         if len(name) < ENTITY_NAME_MIN_CHARS:
             continue
-        pattern = re.escape(name)
-        if re.match(r'[a-z0-9_]', name[0]):
-            pattern = r'(?<![a-z0-9_])' + pattern
-        if re.match(r'[a-z0-9_]', name[-1]):
-            pattern += r'(?![a-z0-9_])'
-        spans.extend((match.start(), match.end()) for match in re.finditer(pattern, text))
+        def word_char(char):
+            return (char.isalnum() or char == '_') and not ('\u4e00' <= char <= '\u9fff')
+        for match in re.finditer(re.escape(name), text):
+            start, end = match.span()
+            if word_char(name[0]) and start and word_char(text[start - 1]):
+                continue
+            if word_char(name[-1]) and end < len(text) and word_char(text[end]):
+                continue
+            spans.append((start, end))
     return spans
 
 
@@ -1177,6 +1188,61 @@ def _name_entry_candidates(query, catalog, domain, cluster, include_history, fil
     finally:
         rows.close()
     return matches
+
+
+def _fact_entity_context(query, domain=None, cluster=None):
+    from vector_lake import page_index_projection
+
+    catalog, _ = page_index_projection.read_catalog()
+    if catalog is None:
+        return None
+    matches = _name_entry_candidates(query, catalog, domain, cluster, True, None)
+    # Ambiguous declarations and multi-entity questions cannot authorize a single-entity gate.
+    if len(matches) != 1:
+        return None
+    key, node = next(iter(matches.items()))
+    return (key, node) if _confident_name_mentions(query, key, node) else None
+
+
+def _confident_name_mentions(text, key, node):
+    text = text.lower()
+    # A full CJK name embedded in a longer topical word is recall evidence, not a single anchor.
+    for start, end in _complete_name_mentions(text, key, node):
+        left = (start == 0 or not text[start - 1].isalnum()
+                or text[:start].endswith(('关于', '介绍', '请问')))
+        right = (end == len(text) or not text[end].isalnum()
+                 or text[end:].startswith(('的', '是', '何时', '什么时候', '如何', '是否',
+                                           '有哪些', '首次', '首发', '发布', '成立')))
+        # Latin names next to Chinese question grammar retain their word boundary.
+        if start < end and text[start].isascii() and text[end - 1].isascii():
+            return True
+        if left and right:
+            return True
+    return False
+
+
+def _memory_matches_entity(memory, entity):
+    if entity is None or str(memory.get('memory_type', 'fact')).lower() != 'fact':
+        return True
+    key, node = entity
+    source = str(memory.get('source_page') or '').replace('\\', '/').rsplit('/', 1)[-1]
+    if source.lower().endswith('.md'):
+        source = source[:-3]
+    if source == key:
+        return True
+    subjects = memory.get('subject_entity_ids') or []
+    if isinstance(subjects, list) and node.get('id') and node['id'] in subjects:
+        return True
+    return _confident_name_mentions(str(memory.get('text') or ''), key, node)
+
+
+def _display_memory_metadata(memory):
+    members = memory.get('_display_members') or []
+    if len(members) < 2:
+        return ''
+    metadata = [{key: value for key, value in item.items() if key not in {'text', '_display_members'}}
+                for item in members]
+    return '\n  Members: ' + json.dumps(metadata, ensure_ascii=False, sort_keys=True)
 
 
 def _entity_name_priority() -> float:
@@ -1846,8 +1912,7 @@ def _search_scored_pages(
     fts_hits = set(fts_ranked)
     vector_hits = set(vector_ranked)
 
-    # Only the keys the hybrid stage actually produced are materialised, so the
-    # 7 178-node dict never has to exist in memory.
+    # Hydrate only hybrid hits and bounded full-name entries, not the complete directory.
     nodes = dict(lexical_nodes)
     nodes.update(name_nodes)
     for key in name_nodes:
@@ -1868,8 +1933,10 @@ def _search_scored_pages(
             origin = "both"
         elif key in fts_hits:
             origin = "fts"
-        else:
+        elif key in vector_hits:
             origin = "vec"
+        else:
+            origin = "name"
         if key in chunk_details:
             origin = (origin + '+chunk') if key in fts_hits or key in vector_hits else 'chunk'
         node = {**node, "_key": key, "_origin": origin}
@@ -2349,7 +2416,8 @@ def assemble_context(
     memory_notes = []
     try:
         runtime.checkpoint()
-        request_views = governance_store.search_memory_packet_views(query, domain=domain, cluster=cluster) if scope else None
+        request_views = governance_store.search_memory_packet_views(
+            query, domain=domain, cluster=cluster, _display_groups=True) if scope else None
         packet_options = {**scope, "_views": request_views} if scope else {}
         memory_packet = build_memory_packet(
             query, max_chars=burst_budget if burst_budget > nominal_budget else nominal_budget,

@@ -1474,6 +1474,28 @@ def _memory_corpus_frequencies(terms: list[str]) -> tuple[dict[str, int] | None,
     return (df, total) if total else (None, None)
 
 
+def _aggregate_memory_display(memories, top_k):
+    """Group compatible duplicate payloads for display only, retaining every original member."""
+    groups, by_signature = [], {}
+    fields = ('text', 'source_page', 'source_ids', 'memory_type',
+              'validity_state', 'base_validity_state', 'validity_reasons', 'status',
+              'superseded_by', 'supersedes_claim_ids', 'revision_of', 'supersession_bases',
+              'conflict_resolution', 'contradicts_claim_ids', 'base_validity_reasons',
+              'valid_from', 'valid_to', 'review_after', 'temporal_anchor', 'ttl_days',
+              'evidence_support', 'evidence_gap')
+    for memory in memories:
+        signature = json.dumps([memory.get(field) for field in fields], sort_keys=True, ensure_ascii=False)
+        # Unknown provenance is not evidence that two records share a source.
+        group = by_signature.get(signature) if memory.get('source_page') else None
+        if group is None:
+            group = dict(memory, _display_members=[])
+            groups.append(group)
+            if memory.get('source_page'):
+                by_signature[signature] = group
+        group['_display_members'].append(memory)
+    return groups[:top_k]
+
+
 def score_memory_items(
     memories,
     terms: list[str],
@@ -1851,7 +1873,7 @@ def _iter_scoped_memory_payloads(conn, domain: str | None, cluster: str | None, 
         f"SELECT {projection}"
         "CASE WHEN length(CAST(m.data_json AS BLOB)) <= ? THEN m.data_json END, "
         "length(CAST(m.data_json AS BLOB)) FROM operational_memory m LEFT JOIN page_index_nodes p "
-        f"ON p.node_key = {source_key} WHERE " + " AND ".join(predicates)
+        f"ON p.node_key = {source_key} WHERE " + " AND ".join(predicates or ['1'])
         + " ORDER BY m.rowid"
     )
     params.insert(0, max_payload_bytes)
@@ -1886,6 +1908,7 @@ def search_operational_memory(
     cluster: str | None = None,
     _gram_context: tuple | None = None,
     _now=None,
+    *, _display_groups: bool = False,
 ) -> list[dict]:
     """Rank operational memory for ``query``.
 
@@ -1899,11 +1922,14 @@ def search_operational_memory(
     allowed_types = _normalize_memory_types(memory_types)
     now = _now or _memory_now()
     terms = _query_terms(query)
-    if domain or cluster:
-        # Scope and full scoped DF precede TopK; only the winners are retained.
+    from vector_lake.tool_search import _fact_entity_context
+    entity = _fact_entity_context(query, domain, cluster)
+    if domain or cluster or entity is not None or _display_groups:
+        # Alignment needs payload identity before LIMIT, with unchanged full-scope DF and budgets.
         from vector_lake.scoped_memory_search import search_views
         return search_views(
             terms, [(top_k, include_history, allowed_types)], domain=domain, cluster=cluster, now=now,
+            _fact_entity=entity, _display_groups=_display_groups,
         )[0]
     backend = _memory_search_backend()
 
@@ -2011,6 +2037,7 @@ def search_memory_packet_views(
     history_top_k: int = 12,
     domain: str | None = None,
     cluster: str | None = None,
+    *, _display_groups: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Return ``(active, history_inclusive)`` slices for the Memory Packet.
 
@@ -2023,11 +2050,14 @@ def search_memory_packet_views(
     """
     now = _memory_now()
     terms = _query_terms(query)
-    if domain or cluster:
+    from vector_lake.tool_search import _fact_entity_context
+    entity = _fact_entity_context(query, domain, cluster)
+    if domain or cluster or entity is not None or _display_groups:
         from vector_lake.scoped_memory_search import search_views
         active, history = search_views(
             terms, [(active_top_k, False, None), (history_top_k, True, None)],
             domain=domain, cluster=cluster, now=now,
+            _fact_entity=entity, _display_groups=_display_groups,
         )
         return active, history
     if _memory_search_backend() == "legacy":

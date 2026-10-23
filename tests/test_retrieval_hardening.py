@@ -78,7 +78,7 @@ def test_memory_packet_refreshes_between_requests(monkeypatch):
 
 @pytest.mark.parametrize('budget', [0, 1, 30, 60, 100, 500])
 def test_memory_packet_never_exceeds_small_budget(monkeypatch, budget):
-    monkeypatch.setattr(governance_store, 'search_memory_packet_views', lambda q: ([_memory('m')], []))
+    monkeypatch.setattr(governance_store, 'search_memory_packet_views', lambda q, **kw: ([_memory('m')], []))
     monkeypatch.setattr('vector_lake.memory_gram_index.gram_index_usable', lambda: True)
     packet = search.build_memory_packet('probe', max_chars=budget)
     assert len(packet['packet']) <= budget
@@ -187,7 +187,7 @@ def test_scoped_context_does_not_render_global_index_or_strategy(monkeypatch, tm
     monkeypatch.setattr(search, 'get_index_path', lambda: path)
     result = search.assemble_context('needle', domain='Medical_IT', cluster='c')
     assert result['purpose'] == '' and result['index_summary'] == ''
-    assert scope_calls == [{'domain': 'Medical_IT', 'cluster': 'c'}]
+    assert scope_calls == [{'domain': 'Medical_IT', 'cluster': 'c', '_display_groups': True}]
     assert forwarded[0]['domain'] == 'Medical_IT'
     assert forwarded[0]['allow_external_embedding'] is False
 

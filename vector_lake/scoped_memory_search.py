@@ -149,8 +149,10 @@ def _field_masks(item: dict, terms) -> tuple[int, ...]:
     return tuple(masks)
 
 
-def _scan_scope(conn, domain, cluster, terms, budget):
+def _scan_scope(conn, domain, cluster, terms, budget, fact_entity=None):
     """One read of the scope: spool rows (masks + sort key) and return their count."""
+    from vector_lake.tool_search import _memory_matches_entity
+
     budget.check()
     budget.passes += 1
     spool: list[tuple] = []
@@ -183,6 +185,7 @@ def _scan_scope(conn, domain, cluster, terms, budget):
                 str(item.get('memory_id', '')),
                 rowid,
                 size,
+                _memory_matches_entity(item, fact_entity),
             ))
             spool_bytes += _SPOOL_ENTRY_BYTES
             if total > MAX_SPOOL_ROWS or spool_bytes > MAX_SPOOL_BYTES:
@@ -422,9 +425,10 @@ def _index_views(terms, windows, domain, cluster, budget):
     return results
 
 
-def search_views(terms, windows, *, domain, cluster, now=None):
+def search_views(terms, windows, *, domain, cluster, now=None,
+                 _fact_entity=None, _display_groups=False):
     """Return independent (top_k, include_history, allowed_types) result windows."""
-    if not domain and not cluster:
+    if not domain and not cluster and _fact_entity is None and not _display_groups:
         raise ValueError('Scoped memory search requires a scope')
     if any(top_k < 0 for top_k, _, _ in windows):
         raise ValueError('Memory window sizes must not be negative')
@@ -432,12 +436,16 @@ def search_views(terms, windows, *, domain, cluster, now=None):
         raise runtime.RetrievalBudgetExceeded('Scoped memory query term budget exhausted')
     if not any(top_k for top_k, _, _ in windows):
         return [[] for _ in windows]
+    result_limits = [top_k for top_k, _, _ in windows]
+    if _display_groups:
+        windows = [(max(k * store.MEMORY_SEARCH_RESULT_WINDOW, k + 16) if k else 0, history, types)
+                   for k, history, types in windows]
     budget = _Budget()
     budget.now = now or store._memory_now()
     heaps = [[] for _ in windows]
     conn = store.get_connection()
     try:
-        if domain or cluster:
+        if (domain or cluster) and _fact_entity is None and not _display_groups:
             # The fast path answers both axes from index columns; the scan stays the reference
             # implementation and the fallback whenever the accelerators or the gram base are missing.
             try:
@@ -452,7 +460,7 @@ def search_views(terms, windows, *, domain, cluster, now=None):
         runtime.backend('memory_stream')
         with runtime.timed_stage('memory_scope_total'), _read_snapshot(conn):
             with runtime.timed_stage('memory_scope_df'):
-                spool, total = _scan_scope(conn, domain, cluster, terms, budget)
+                spool, total = _scan_scope(conn, domain, cluster, terms, budget, _fact_entity)
                 df = _scope_document_frequencies(spool, terms)
             if total:
                 with runtime.timed_stage('memory_scope_weights'):
@@ -463,7 +471,9 @@ def search_views(terms, windows, *, domain, cluster, now=None):
                                    for term in terms}
                 with runtime.timed_stage('memory_scope_rank'):
                     for ordinal, (masks, memory_type, validity_state, stored_score,
-                                  dt_rank, memory_id, rowid, size) in enumerate(spool):
+                                  dt_rank, memory_id, rowid, size, aligned) in enumerate(spool):
+                        if not aligned:
+                            continue
                         hidden = validity_state in store.HIDDEN_MEMORY_STATES
                         eligible = [
                             (include_history or not hidden)
@@ -493,7 +503,7 @@ def search_views(terms, windows, *, domain, cluster, now=None):
             results = []
             wanted = [entry.rowid for heap in heaps for entry in heap]
             payloads = _fetch_payloads(wanted)
-            for heap in heaps:
+            for heap, result_limit in zip(heaps, result_limits):
                 view = []
                 for entry in sorted(heap, key=lambda item: item.key):
                     budget.check()
@@ -505,7 +515,8 @@ def search_views(terms, windows, *, domain, cluster, now=None):
                     item = copy.deepcopy(store._current_memory(payload, budget.now))
                     item['retrieval_score'] = -entry.key[0]
                     view.append(item)
-                results.append(view)
+                results.append(store._aggregate_memory_display(view, result_limit)
+                               if _display_groups else view)
             budget.check()
             return results
     finally:
