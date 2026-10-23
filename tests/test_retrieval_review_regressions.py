@@ -115,6 +115,7 @@ def test_rrv_01_does_not_swallow_host_cancellation(monkeypatch):
 
 
 def test_rrv_02_shared_embedding_wait_uses_remaining_request_time(monkeypatch):
+    monkeypatch.setattr(search, '_QUERY_EMBEDDING_CIRCUIT_BREAKER_UNTIL', 0.)
     clock, timeouts = [100.], []
     monkeypatch.setattr(runtime.time, 'monotonic', lambda: clock[0])
     monkeypatch.setenv('GEMINI_API_KEY', 'synthetic-not-a-credential')
