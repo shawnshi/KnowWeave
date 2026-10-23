@@ -581,7 +581,7 @@ def _edition_publication_request(query):
 
 
 def _declared_edition_spans(request, key, node):
-    """Keep the original query span, backed by an existing complete numbered declaration."""
+    """Use the supplied request span, backed by an existing complete numbered declaration."""
     if str(node.get('type') or '').lower() not in ('concept', 'product', 'standard'):
         return []
     aliases = node.get('aliases') or []
@@ -602,6 +602,12 @@ def _fact_entity_context(query, domain=None, cluster=None):
     # Unknown versions and compound questions cannot authorize a generic stem anchor.
     if edition_qualified and edition is None:
         return None
+    if edition is not None:
+        start, end = edition[2]
+        # RQA-REV-001: Unicode lower can expand characters; literal matches use
+        # lower-query offsets, while the parser's public span stays in original text.
+        edition = (edition[0], edition[1],
+                   (len(query[:start].lower()), len(query[:end].lower())))
     catalog, _ = read_catalog()
     if catalog is None:
         return None

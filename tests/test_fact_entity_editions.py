@@ -82,6 +82,39 @@ def test_unversioned_literal_path_and_page_candidates_are_not_rewritten(monkeypa
     assert resolve(monkeypatch, 'Spec 第十版发布日期', {'Source_Target': node('Spec 10', kind='source')}) is None
 
 
+def test_unicode_literal_edition_remains_exact_anchor(monkeypatch):
+    result = resolve(monkeypatch, 'İris第十版发布日期', {
+        'Standard_Literal': node('İris第十版', identity='literal')})
+    assert result is not None and result[0] == 'Standard_Literal'
+
+
+def test_unicode_literal_and_numeric_editions_preserve_ambiguity(monkeypatch):
+    assert resolve(monkeypatch, 'İris第十版发布日期', {
+        'Standard_Literal': node('İris第十版', identity='literal'),
+        'Standard_Numeric': node('İris 10', identity='numeric'),
+    }) is None
+
+
+@pytest.mark.parametrize('stem', ['İris', 'Iris'])
+@pytest.mark.parametrize('leading', ['', '  '])
+@pytest.mark.parametrize('declaration', ['title', 'alias', 'key'])
+def test_literal_edition_coordinates_preserve_declaration_and_whitespace_controls(monkeypatch, stem, leading, declaration):
+    literal = stem + '第十版'
+    query = leading + literal + '的发布日期？'
+    key = 'Standard_Literal' if declaration != 'key' else 'Standard_' + literal
+    item = node(literal if declaration == 'title' else 'Other', identity='literal',
+                aliases=[literal] if declaration == 'alias' else [])
+    request = projection._edition_publication_request(query)
+    assert request is not None and query[slice(*request[2])] == literal
+    result = resolve(monkeypatch, query, {key: item})
+    assert result is not None and result[0] == key
+    assert resolve(monkeypatch, query, {
+        key: item, 'Standard_Numeric': node(stem + ' 10', identity='numeric'),
+    }) is None
+    numeric = resolve(monkeypatch, query, {'Standard_Numeric': node(stem + ' 10', identity='numeric')})
+    assert numeric is not None and numeric[0] == 'Standard_Numeric'
+
+
 def test_original_text_span_is_preserved_and_candidate_budget_is_unchanged(monkeypatch):
     request = projection._edition_publication_request('  İris第十版的发布日期？')
     assert request is not None
