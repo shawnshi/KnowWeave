@@ -1922,7 +1922,7 @@ def search_operational_memory(
     allowed_types = _normalize_memory_types(memory_types)
     now = _now or _memory_now()
     terms = _query_terms(query)
-    from vector_lake.tool_search import _fact_entity_context
+    from vector_lake.page_index_projection import _fact_entity_context
     entity = _fact_entity_context(query, domain, cluster)
     if domain or cluster or entity is not None or _display_groups:
         # Alignment needs payload identity before LIMIT, with unchanged full-scope DF and budgets.
@@ -2050,7 +2050,7 @@ def search_memory_packet_views(
     """
     now = _memory_now()
     terms = _query_terms(query)
-    from vector_lake.tool_search import _fact_entity_context
+    from vector_lake.page_index_projection import _fact_entity_context
     entity = _fact_entity_context(query, domain, cluster)
     if domain or cluster or entity is not None or _display_groups:
         from vector_lake.scoped_memory_search import search_views

@@ -39,6 +39,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -50,6 +51,8 @@ from vector_lake.db_store import get_connection, get_db_path, init_db, read_snap
 from vector_lake.link_resolution import build_link_map, declared_names_from_nodes, resolve_link_target
 from vector_lake.wiki_utils import get_index_path
 from vector_lake.schema_validator import canonical_domain
+from vector_lake.node_vocabulary import strip_prefix
+from vector_lake import retrieval_runtime as runtime
 from vector_lake.wiki_utils import get_meta_dir
 
 log = logging.getLogger("vector-lake-page-index")
@@ -497,6 +500,90 @@ def _load_index_json() -> dict | None:
         log.error("Failed to read index.json: %s", exc)
         return None
     return data if isinstance(data, dict) else None
+
+
+def _complete_name_mentions(query: str, key: str, node: dict) -> list[tuple[int, int]]:
+    """Full declared names only; punctuation deletion must not turn fragments into identities."""
+    aliases = node.get('aliases') or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    text = query.lower()
+    spans = []
+    for name in [node.get('title'), strip_prefix(key), *aliases]:
+        name = str(name or '').lower()
+        if len(name) < 2:
+            continue
+        def word_char(char):
+            return (char.isalnum() or char == '_') and not ('\u4e00' <= char <= '\u9fff')
+        for match in re.finditer(re.escape(name), text):
+            start, end = match.span()
+            if word_char(name[0]) and start and word_char(text[start - 1]):
+                continue
+            if word_char(name[-1]) and end < len(text) and word_char(text[end]):
+                continue
+            spans.append((start, end))
+    return spans
+
+
+def _confident_name_mentions(text, key, node):
+    text = text.lower()
+    # A full CJK name embedded in a longer topical word is recall evidence, not a single anchor.
+    for start, end in _complete_name_mentions(text, key, node):
+        left = (start == 0 or not text[start - 1].isalnum()
+                or text[:start].endswith(('关于', '介绍', '请问')))
+        right = (end == len(text) or not text[end].isalnum()
+                 or text[end:].startswith(('的', '是', '何时', '什么时候', '如何', '是否',
+                                           '有哪些', '首次', '首发', '发布', '成立')))
+        if start < end and text[start].isascii() and text[end - 1].isascii():
+            return True
+        if left and right:
+            return True
+    return False
+
+
+def _fact_entity_context(query, domain=None, cluster=None):
+    """Resolve only an unambiguous in-scope directory identity, never a search ranking."""
+    catalog, _ = read_catalog()
+    if catalog is None:
+        return None
+    reader = getattr(catalog, 'iter_name_fields', None)
+    if reader is None:
+        return None
+    match = None
+    rows = reader()
+    try:
+        for key, node in rows:
+            runtime.checkpoint()
+            if domain and canonical_domain(node.get('domain')).lower() != canonical_domain(domain).lower():
+                continue
+            if cluster and str(node.get('topic_cluster') or '').lower() != cluster.lower():
+                continue
+            if not _complete_name_mentions(query, key, node):
+                continue
+            full = catalog.nodes_by_key([key]).get(key)
+            if full is None:
+                continue
+            if match is not None:
+                return None
+            match = (key, full)
+    finally:
+        rows.close()
+    return match if match is not None and _confident_name_mentions(query, *match) else None
+
+
+def _memory_matches_entity(memory, entity):
+    if entity is None or str(memory.get('memory_type', 'fact')).lower() != 'fact':
+        return True
+    key, node = entity
+    source = str(memory.get('source_page') or '').replace('\\', '/').rsplit('/', 1)[-1]
+    if source.lower().endswith('.md'):
+        source = source[:-3]
+    if source == key:
+        return True
+    subjects = memory.get('subject_entity_ids') or []
+    if isinstance(subjects, list) and node.get('id') and node['id'] in subjects:
+        return True
+    return _confident_name_mentions(str(memory.get('text') or ''), key, node)
 
 
 class _SqliteCatalog:

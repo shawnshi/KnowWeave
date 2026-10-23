@@ -151,7 +151,7 @@ def _field_masks(item: dict, terms) -> tuple[int, ...]:
 
 def _scan_scope(conn, domain, cluster, terms, budget, fact_entity=None):
     """One read of the scope: spool rows (masks + sort key) and return their count."""
-    from vector_lake.tool_search import _memory_matches_entity
+    from vector_lake.page_index_projection import _memory_matches_entity
 
     budget.check()
     budget.passes += 1

@@ -15,11 +15,11 @@ from tests.test_retrieval_review_regressions import vector_database
 def deadline_catalog(monkeypatch):
     c = sqlite3.connect(':memory:')
     c.row_factory = sqlite3.Row
-    c.execute('CREATE TABLE page_index_nodes(node_key TEXT PRIMARY KEY,node_json TEXT,domain TEXT,topic_cluster TEXT,status TEXT)')
+    c.execute('CREATE TABLE page_index_nodes(node_key TEXT PRIMARY KEY,node_json TEXT,domain TEXT,topic_cluster TEXT,status TEXT,node_id TEXT,title TEXT,type TEXT)')
     keys = [f'Source_Lexical{i:03d}' for i in range(200)]
     for key in keys:
         node = {'title': key, 'type': 'Source', 'domain': 'Medical_IT', 'status': 'Active', 'summary': 'retained lexical summary'}
-        c.execute('INSERT INTO page_index_nodes VALUES (?,?,?,?,?)', (key, json.dumps(node), 'Medical_IT', '', 'Active'))
+        c.execute('INSERT INTO page_index_nodes VALUES (?,?,?,?,?,?,?,?)', (key, json.dumps(node), 'Medical_IT', '', 'Active', key, key, 'Source'))
     c.commit()
     clock = [100.]
     monkeypatch.setattr(runtime.time, 'monotonic', lambda: clock[0])
