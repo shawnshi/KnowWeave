@@ -507,6 +507,19 @@ class _SqliteCatalog:
     def nodes_by_key(self, keys) -> dict[str, dict]:
         return nodes_by_key(keys)
 
+    def iter_name_fields(self):
+        """Stream the current directory's identity metadata without retaining a second index."""
+        cursor = get_connection().execute(
+            "SELECT node_key, node_id, title, type, status, domain, topic_cluster, "
+            "json_quote(json_extract(node_json, '$.aliases')) FROM page_index_nodes ORDER BY node_key"
+        )
+        try:
+            for key, node_id, title, kind, status, domain, cluster, aliases in cursor:
+                yield key, dict(id=node_id, title=title, type=kind, status=status, domain=domain,
+                                topic_cluster=cluster, aliases=json.loads(aliases) if aliases else [])
+        finally:
+            cursor.close()
+
     def filter_fields(self, keys) -> dict[str, dict]:
         return filter_fields(keys)
 
@@ -581,6 +594,12 @@ class _FileCatalog:
     def nodes_by_key(self, keys) -> dict[str, dict]:
         ordered = [str(key) for key in keys]
         return {key: self._nodes[key] for key in ordered if key in self._nodes}
+
+    def iter_name_fields(self):
+        for key in sorted(self._nodes):
+            node = self._nodes[key]
+            yield key, {field: node.get(field) for field in
+                        ('id', 'title', 'type', 'status', 'domain', 'topic_cluster', 'aliases')}
 
     def filter_fields(self, keys) -> dict[str, dict]:
         ordered = [str(key) for key in keys]

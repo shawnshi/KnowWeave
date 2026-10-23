@@ -1134,6 +1134,51 @@ def _entity_name_positions(query: str, candidates: list[tuple[float, dict]]) -> 
     return positions
 
 
+def _complete_name_mentions(query: str, key: str, node: dict) -> list[tuple[int, int]]:
+    """Full declared names only; punctuation deletion must not turn fragments into identities."""
+    aliases = node.get('aliases') or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    text = query.lower()
+    spans = []
+    for name in [node.get('title'), strip_prefix(key), *aliases]:
+        name = str(name or '').lower()
+        if len(name) < ENTITY_NAME_MIN_CHARS:
+            continue
+        pattern = re.escape(name)
+        if re.match(r'[a-z0-9_]', name[0]):
+            pattern = r'(?<![a-z0-9_])' + pattern
+        if re.match(r'[a-z0-9_]', name[-1]):
+            pattern += r'(?![a-z0-9_])'
+        spans.extend((match.start(), match.end()) for match in re.finditer(pattern, text))
+    return spans
+
+
+def _name_entry_candidates(query, catalog, domain, cluster, include_history, filter_expr):
+    """Read the filtered directory, retaining at most the existing lexical candidate depth."""
+    reader = getattr(catalog, 'iter_name_fields', None)
+    if reader is None:
+        return {}
+    matches = {}
+    rows = reader()
+    try:
+        for key, node in rows:
+            runtime.checkpoint()
+            if not _passes_filters(node, domain, cluster, include_history, None):
+                continue
+            if not _complete_name_mentions(query, key, node):
+                continue
+            full = catalog.nodes_by_key([key]).get(key)
+            if full is None or not _passes_filters(full, domain, cluster, include_history, filter_expr):
+                continue
+            matches[key] = full
+            if len(matches) >= _candidate_depth():
+                break
+    finally:
+        rows.close()
+    return matches
+
+
 def _entity_name_priority() -> float:
     try:
         value = float(os.environ.get("VECTOR_LAKE_ENTITY_NAME_PRIORITY", str(ENTITY_NAME_PRIORITY_DEFAULT)))
@@ -1611,6 +1656,7 @@ def _search_scored_pages(
 
     if plan.event_query:
         catalog = PlannedCatalog(catalog, plan)
+    name_nodes = _name_entry_candidates(query, catalog, domain, cluster, include_history, filter_expr)
     intent = _keyword_intent(query)
     scored = []
     tokens = _expand_query_locally(query)
@@ -1803,6 +1849,10 @@ def _search_scored_pages(
     # Only the keys the hybrid stage actually produced are materialised, so the
     # 7 178-node dict never has to exist in memory.
     nodes = dict(lexical_nodes)
+    nodes.update(name_nodes)
+    for key in name_nodes:
+        # Entry is not a scoring signal. Existing name features and the reranker decide rank.
+        hybrid_scores.setdefault(key, 0.0)
     missing = [key for key in hybrid_scores if key not in nodes]
     if missing and not runtime.expired():
         try:
@@ -1939,7 +1989,7 @@ def _search_scored_pages(
         loop it replaces applied it.
         """
         taken = []
-        for score, node in entries:
+        for score, node in sorted(entries, key=lambda row: row[1]['_key'] not in name_nodes):
             if node.get("type", "").lower() == "source":
                 if source_budget[0] >= max_sources_pool:
                     continue
@@ -1963,6 +2013,7 @@ def _search_scored_pages(
         candidate_pool.sort(key=lambda item: item[0], reverse=True)
     else:
         candidate_pool = _fill(scored, pool_size)
+    candidate_pool.sort(key=lambda item: item[0], reverse=True)
     _mark("pool")
 
     # Phase 2: Local deterministic ranking. Text-model reranking is delegated
