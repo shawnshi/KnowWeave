@@ -559,8 +559,49 @@ def _env_positive_int(name: str, default: int) -> int:
     return value
 
 
+def _edition_publication_request(query):
+    """Parse only a whole, explicitly numbered single-entity publication question."""
+    match = re.fullmatch(
+        r'\s*(?P<entity>(?P<stem>.+?)\s*第(?P<number>[^版\s]+)版)\s*(?:的\s*)?'
+        r'(?:发布日期|发布时间|首次发布日期|何时发布|什么时候发布)[?？。.!！]?\s*', query,
+    )
+    if match is None:
+        return None
+    number = match['number']
+    if not re.fullmatch(r'[1-9][0-9]*', number):
+        digits = '零一二三四五六七八九'
+        if not re.fullmatch(r'[一二三四五六七八九]|十[一二三四五六七八九]?|[二三四五六七八九]十[一二三四五六七八九]?', number):
+            return None
+        if '十' in number:
+            tens, units = number.split('十')
+            number = str((digits.index(tens) if tens else 1) * 10 + (digits.index(units) if units else 0))
+        else:
+            number = str(digits.index(number))
+    return match['stem'].lower(), number, match.span('entity')
+
+
+def _declared_edition_spans(request, key, node):
+    """Keep the original query span, backed by an existing complete numbered declaration."""
+    if str(node.get('type') or '').lower() not in ('concept', 'product', 'standard'):
+        return []
+    aliases = node.get('aliases') or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    stem, number, span = request
+    for name in [node.get('title'), strip_prefix(key), *aliases]:
+        declared = re.fullmatch(r'(.+?)[\s_-]+([1-9][0-9]*)', str(name or '').lower())
+        if declared is not None and declared[1] == stem and declared[2] == number:
+            return [span]
+    return []
+
+
 def _fact_entity_context(query, domain=None, cluster=None):
     """Resolve only an unambiguous in-scope directory identity, never a search ranking."""
+    edition_qualified = re.search(r'第[^版]*版', query) is not None
+    edition = _edition_publication_request(query) if edition_qualified else None
+    # Unknown versions and compound questions cannot authorize a generic stem anchor.
+    if edition_qualified and edition is None:
+        return None
     catalog, _ = read_catalog()
     if catalog is None:
         return None
@@ -579,6 +620,9 @@ def _fact_entity_context(query, domain=None, cluster=None):
             if cluster and str(node.get('topic_cluster') or '').lower() != cluster.lower():
                 continue
             spans = _complete_name_mentions(query, key, node)
+            if edition is not None:
+                spans = [span for span in spans if span == edition[2]]
+                spans += _declared_edition_spans(edition, key, node)
             if not spans:
                 continue
             full = catalog.nodes_by_key([key]).get(key)
@@ -605,7 +649,7 @@ def _fact_entity_context(query, domain=None, cluster=None):
     if len(survivors) != 1:
         return None
     match = survivors[0]
-    return match if _confident_name_mentions(query, *match) else None
+    return match if edition is not None or _confident_name_mentions(query, *match) else None
 
 
 def _memory_matches_entity(memory, entity):
