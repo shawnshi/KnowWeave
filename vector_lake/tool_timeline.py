@@ -2,7 +2,8 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
-from vector_lake.db_store import get_connection, init_db
+from contextlib import nullcontext
+from vector_lake.db_store import get_connection, init_db, read_snapshot
 
 # An event-ledger entry carries its date, and optionally its event tag, as a text prefix:
 # ``[2026-05-02] [Observation] ...`` (README, section 2).  On the live corpus 7246 of 9974
@@ -587,7 +588,7 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
     """Search mentions in the timeline projection, falling back to claims if it drifts.
 
     entity_name matches subject IDs/titles or description mentions, not a strict subject
-    chronology. The canonical fallback retains its claim-text/subject-ID mention filter.
+    chronology. Canonical fallback uses the same subject/title/description mention filter.
     Source claims and dates are reported, not independently verified by this tool.
 
     ``sentiment`` is deliberately not a parameter.  The projection still stores the column
@@ -596,6 +597,12 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
     everything or nothing while reading as if it discriminated.  The column stays for a
     future producer; the parameter comes back with it.
     """
+    conn = get_connection()
+    with nullcontext(conn) if conn.in_transaction else read_snapshot():
+        return _search_timeline_events(entity_name, action, limit)
+
+
+def _search_timeline_events(entity_name, action, limit):
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -639,7 +646,7 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
     # The projection is stale: answer from canonical claims and say so, so a
     # degraded result is never mistaken for an authoritative one.
     drift_note = ""
-    if parity["projection"]:
+    if parity["missing"] or parity["extra"]:
         drift_note = (
             f"[DEGRADED] timeline_events projection is out of parity with canonical claims "
             f"(missing={parity['missing']}, extra={parity['extra']}); answering from canonical claims. "
@@ -649,23 +656,31 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
     query = "SELECT claim_id, claim_text, data_json, updated_at FROM claims WHERE f_claim_type = 'timeline-event'"
     params = []
 
+    def subject_field(raw, title):
+        subjects = _claim_subject_ids(json.loads(raw))
+        if not title:
+            return subjects[0] if subjects else ''
+        titles = _entity_title_map(set(subjects))
+        return ', '.join(str(titles.get(str(item)) or item) for item in subjects)
+
     if entity_name:
-        # ``claims`` has no ``entity_id`` column; the subjects live inside
-        # ``data_json``.  The previous predicate referenced ``entity_id`` and
-        # raised "no such column" on every filtered query, so the canonical
-        # fallback could never return a result.
-        query += " AND (claim_text LIKE ? OR json_extract(data_json, '$.subject_entity_ids') LIKE ?)"
-        params.extend([f"%{entity_name}%", f"%{entity_name}%"])
+        # T12 drift regression: use canonical identities in this read snapshot, not
+        # the incomplete projection. LIKE remains SQLite's own wildcard/case rule.
+        conn.create_function('timeline_subject_id', 1, lambda raw: subject_field(raw, False))
+        conn.create_function('timeline_subject_title', 1, lambda raw: subject_field(raw, True))
+        query += " AND (timeline_subject_id(data_json) LIKE ? OR timeline_subject_title(data_json) LIKE ? OR claim_text LIKE ?)"
+        params.extend([f"%{entity_name}%"] * 3)
     if action:
-        # The same three sources the projection's ``action`` resolves, in the same order.
-        # SQLite cannot run the tag pattern, so the text case asks whether the tag appears
-        # inside the entry's prefix -- which is where a ledger entry keeps it.
-        query += (
-            " AND (COALESCE(json_extract(data_json, '$.action'), '') LIKE ?"
-            " OR COALESCE(json_extract(data_json, '$.event_tag'), '') LIKE ?"
-            " OR substr(ltrim(claim_text), 1, ?) LIKE '%[' || ? || ']%')"
-        )
-        params.extend([f"%{action}%", f"%{action}%", _ACTION_PREFIX_WINDOW, action])
+        conn.create_function('timeline_action', 3, lambda claim_id, claim_text, data_json:
+                             _event_from_claim_row({'claim_id': claim_id, 'claim_text': claim_text,
+                                                    'data_json': data_json})['action'], deterministic=True)
+        action_clean = action.strip()
+        if any(ch in action_clean for ch in '%*?'):
+            query += ' AND timeline_action(claim_id, claim_text, data_json) LIKE ?'
+            params.append(f"%{action_clean.replace('*', '%')}%")
+        else:
+            query += ' AND timeline_action(claim_id, claim_text, data_json) = ? COLLATE NOCASE'
+            params.append(action_clean)
 
     # Same ordering rule as the indexed path, expressed over canonical claims: a degraded
     # answer is the same answer, slower.  This used to be ``ORDER BY updated_at DESC``, so
@@ -695,7 +710,7 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
         return f"Error executing timeline query: {e}"
         
     if not rows:
-        return "No timeline events found matching the criteria."
+        return drift_note + "No timeline events found matching the criteria."
 
     subject_ids: set[str] = set()
     decoded_events = []
@@ -703,24 +718,16 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
         data = json.loads(r["data_json"])
         subjects = _claim_subject_ids(data)
         subject_ids.update(subjects)
-        decoded_events.append((data, subjects, r))
+        decoded_events.append(r)
     entity_titles = _entity_title_map(subject_ids)
 
     results = []
-    for data, subjects, r in decoded_events:
-        date = claim_event_date(r, data) or UNKNOWN_DATE_LABEL
-        entities = ", ".join(entity_titles.get(item, item) for item in subjects)
-        source = ", ".join(data.get("source_ids", []))
-        action = (
-            data.get("action")
-            or data.get("event_tag")
-            or _text_event_tag(r)
-            or data.get("claim_type")
-            or "timeline-event"
-        )
+    for r in decoded_events:
+        event = _event_from_claim_row(r, entity_titles)
         results.append(
-            f"[{date}] <{entities}>\n  -> {_display_event_description(str(r['claim_text']))}\n"
-            f"  Action: {action} | Source: {source}"
+            f"[{event['event_date'] or UNKNOWN_DATE_LABEL}] <{event['entity_title'] or event['entity_id']}>\n"
+            f"  -> {_display_event_description(str(event['description']))}\n"
+            f"  Action: {event['action']} | Source: {event['source_file']}"
         )
 
     return drift_note + "\n\n".join(results)

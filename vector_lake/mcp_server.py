@@ -95,7 +95,7 @@ def search_timeline(entity_name: str = "", action: str = "", limit: int = 10) ->
 
     Args:
         entity_name: Mention search over subject IDs/titles and descriptions (e.g., '卫宁健康'),
-            not a strict subject filter. Canonical fallback searches claim text and subject IDs.
+            not a strict subject filter. Canonical fallback uses the same mention predicate.
             Leave empty to search all.
         action: Filter by the ledger's event tag (e.g., 'Release', 'Observation'), read from
             the claim's structured field or from its ``[date] [Tag]`` prefix. Leave empty for all.
