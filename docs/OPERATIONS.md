@@ -4,6 +4,12 @@
 
 [返回项目首页](../README.md)
 
+## 检索展示的含义
+
+- `search_timeline(entity_name=...)` 是材料提及检索，不保证严格组织年表。健康投影沿用主体 ID、主体标题或 description 的包含匹配；降级读取 canonical claims 时沿用 claim 文本或主体 ID 的包含匹配，不额外解析标题。提及另一个实体的记录仍可召回；留空仍检索全部。返回日期是来源声明，不代表已核验；无日期显示 `Unknown Date`，不以摄取时间代替。
+- Timeline 保留 `[日期] <主体>`、`-> description`、`Action: ... | Source: ...` 行合同和现有来源值，不增加私密源路径。仅在展示 description 时隐藏编译器生成的 `<!-- vector-lake-relation:十六位小写十六进制摘要 -->` 技术注释；未知注释及内联、反引号/波浪号围栏代码中的字面示例保留。存储文本、事件 ID、日期、排序和过滤不变，不新增结果前缀。
+- Query 的现有 `RETRIEVAL NOTES` 标题改用 `(INFO)` / `(DEGRADED)`（原为 `(information)` / `(degradations)`），复用 Search 的严重性分类。排名策略、默认不外送 embedding 等提示不自动表示故障；未知提示仍按降级处理。记忆 warning 和预算遗漏提示照常保留，不据此宣称零告警。preview 不写 payload；prepare（包括 dry-run）仍写临时 payload，依赖/写入错误仍按原契约暴露。
+
 首次上手只使用合成演示库；[CLI 完整目录](../README.md#commands) 中的删除、修复、重建和恢复不是初始化步骤。进程、模型可用性、业务发布与投影健康必须分别核验。
 
 ## 运行身份与隔离业务验收

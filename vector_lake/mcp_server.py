@@ -86,13 +86,17 @@ def registered_tool_names(server=None) -> list[str]:
 
 @mcp.tool()
 def search_timeline(entity_name: str = "", action: str = "", limit: int = 10) -> str:
-    """Search the strategic timeline events database.
+    """Search material mentions in timeline events, not a strict organizational chronology.
 
-    Entries are ordered by event date, newest first.  A claim that states no date sorts last
+    A match may mention an entity without describing an event of that entity. Source claims
+    and dates are not independently verified here. Entries are ordered by event date, newest first.
+    A claim that states no date sorts last
     and reads ``Unknown Date``; it is never given its ingestion timestamp as an event date.
 
     Args:
-        entity_name: Filter by entity title (e.g., '卫宁健康'). Leave empty to search all.
+        entity_name: Mention search over subject IDs/titles and descriptions (e.g., '卫宁健康'),
+            not a strict subject filter. Canonical fallback searches claim text and subject IDs.
+            Leave empty to search all.
         action: Filter by the ledger's event tag (e.g., 'Release', 'Observation'), read from
             the claim's structured field or from its ``[date] [Tag]`` prefix. Leave empty for all.
         limit: Number of events to return (default 10).

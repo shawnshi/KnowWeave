@@ -49,8 +49,8 @@ def test_query_packet_preserves_note_severity():
 
     result = tool_query._render_context_payload("probe", context)
 
-    assert f"--- RETRIEVAL NOTES (information) ---\n- {info}" in result
-    assert f"--- RETRIEVAL NOTES (degradations) ---\n- {warning}" in result
+    assert f"--- RETRIEVAL NOTES (INFO) ---\n- {info}" in result
+    assert f"--- RETRIEVAL NOTES (DEGRADED) ---\n- {warning}" in result
     assert len(result.encode("utf-8")) <= context["budget_max"]
 
 

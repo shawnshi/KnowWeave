@@ -33,6 +33,25 @@ _DAY_PRECISION = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # two bracket groups.  60 characters is comfortably past the longest live one.
 _ACTION_PREFIX_WINDOW = 60
 
+# tool_ingest._apply_integration_disposition emits exactly this MD5-prefix marker.
+# Other comments may contain source claims, and code examples are not compiler metadata.
+_GENERATED_RELATION_MARKER = re.compile(r"<!-- vector-lake-relation:[0-9a-f]{16} -->")
+_DISPLAY_MARKUP = re.compile(
+    r"^ {0,3}(?P<fence>(?P<fencechar>`|~)(?P=fencechar){2,})[^\n]*\n"
+    r".*?(?:^ {0,3}(?P=fence)(?P=fencechar)*[ \t]*\r?(?:\n|$)|\Z)|"
+    r"(?<![\\`])(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`)|"
+    r"(?<!\\)<!--.*?(?:-->|\Z)",
+    re.M | re.S,
+)
+
+
+def _display_event_description(text: str) -> str:
+    """Hide generated relation comments without rewriting stored claims or literal examples."""
+    return _DISPLAY_MARKUP.sub(
+        lambda match: "" if _GENERATED_RELATION_MARKER.fullmatch(match.group()) else match.group(),
+        text,
+    )
+
 
 def _stable_event_date(row, data: dict):
     """The event date from a source that an unrelated rewrite cannot move.
@@ -565,7 +584,11 @@ def _sql_stable_date_expr() -> str:
 
 
 def search_timeline_events(entity_name: str | None = None, action: str | None = None, limit: int = 10) -> str:
-    """Query the timeline_events projection; fall back to timeline-event claims if it drifts.
+    """Search mentions in the timeline projection, falling back to claims if it drifts.
+
+    entity_name matches subject IDs/titles or description mentions, not a strict subject
+    chronology. The canonical fallback retains its claim-text/subject-ID mention filter.
+    Source claims and dates are reported, not independently verified by this tool.
 
     ``sentiment`` is deliberately not a parameter.  The projection still stores the column
     written from ``claim.sentiment``, but nothing in the pipeline produces that field --
@@ -608,7 +631,7 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
             return "No timeline events found matching the criteria."
         return "\n\n".join(
             f"[{r['event_date'] or UNKNOWN_DATE_LABEL}] <{r['entity_title'] or r['entity_id']}>\n"
-            f"  -> {r['description']}\n"
+            f"  -> {_display_event_description(str(r['description']))}\n"
             f"  Action: {r['action']} | Source: {r['source_file']}"
             for r in rows
         )
@@ -696,7 +719,7 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
             or "timeline-event"
         )
         results.append(
-            f"[{date}] <{entities}>\n  -> {r['claim_text']}\n"
+            f"[{date}] <{entities}>\n  -> {_display_event_description(str(r['claim_text']))}\n"
             f"  Action: {action} | Source: {source}"
         )
 

@@ -119,7 +119,7 @@ def _render_context_payload(query_str: str, context: dict) -> str:
         if index:
             parts.append(f"\n\n--- NODE INDEX SUMMARY ---\n{index}")
         information, degradations = split_retrieval_notes(notes)
-        for label, items in (("degradations", degradations), ("information", information)):
+        for label, items in (("DEGRADED", degradations), ("INFO", information)):
             if items:
                 parts.append(
                     f"\n\n--- RETRIEVAL NOTES ({label}) ---\n" + "\n".join(f"- {note}" for note in items)
