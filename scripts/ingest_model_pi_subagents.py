@@ -14,8 +14,9 @@ has only ``read`` and fresh context. A reviewer is not an ingest compiler; a wri
 worker would bypass the governed write path.
 
 The child is a headless Pi session (``pi --print --session-dir <scratch/runner_sessions>``)
-whose system prompt tells it to delegate the ingest to the configured subagent and to print
-only the JSON object.
+whose only active model tool is ``subagent``. The relay cannot directly use file,
+shell or MCP tools; the selected child profile and the host still own their existing
+read-only and finalization boundaries. The relay prints only the JSON object.
 
 The adapter uses an isolated persistent session directory so extensions have a per-run
 root for their state and artifacts. Sessions are pruned by age; this is bounded local
@@ -195,6 +196,9 @@ def _argv(pi_path: str, brief_path: str, system_path: str | None, session_dir: P
     argv = [pi_path, "--print", "--session-dir", str(session_dir)]
     if system_path:
         argv += ["--append-system-prompt", system_path]
+    # A positive CLI allowlist otherwise retains MCP tools. Exclude them as well
+    # as disabling MCP startup; the relay must not bypass delegation/finalization.
+    argv += ["--tools", "subagent", "--exclude-tools", "mcp__*", "--no-mcp"]
     argv.append(f"@{brief_path}")
     # npm installs `pi` as a .CMD shim on Windows and CreateProcess cannot start that
     # directly (FileNotFoundError [WinError 2]).  Route it through the command

@@ -12,7 +12,9 @@ def skill(name):
 
 def test_query_template_is_explicitly_scoped_local_page_search():
     body = skill('vector-lake-query')
-    template = json.loads(re.search(r'```json\n(.*?)\n```', body, re.S).group(1))
+    match = re.search(r'```json\n(.*?)\n```', body, re.S)
+    assert match is not None, 'The scoped query template must exist'
+    template = json.loads(match.group(1))
     assert template['mode'] == 'page'
     assert template['domain'] == '<authorized-domain>'
     assert template['allow_external_embedding'] is False
@@ -46,3 +48,28 @@ def test_search_skill_preserves_escalation_without_blanket_approval_or_delegatio
     assert 'actual returned read range' in body
     assert 'never label redacted text an exact quote' in body
     assert 'Unread images mean partial coverage' in body
+
+
+def test_modes_history_and_relations_remain_available_with_safe_parameters():
+    for name in ['vector-lake-search', 'vector-lake-query']:
+        body = skill(name)
+        assert 'include_history=true' in body
+        assert 'profile="auto"' in body and 'use_chunks=false' in body
+        assert 'get_relations' in body and 'trace_vector_lake' in body
+        assert 'active 不等于 verified' in body
+        assert 'DEGRADED' in body and 'INFO' in body
+        assert '20 KiB' in body
+
+
+def test_timeline_contract_matches_the_real_interface_and_authority():
+    import ast
+    tree = ast.parse((ROOT / 'vector_lake/mcp_server.py').read_text(encoding='utf-8'))
+    definition = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'search_timeline')
+    assert [argument.arg for argument in definition.args.args] == ['entity_name', 'action', 'limit']
+    body = skill('vector-lake-timeline')
+    assert '<thought>' not in body and 'invoke_subagent' not in body and 'FABLE' not in body
+    assert '不自动建 scratch' in body and '不是物理隔离' in body
+    assert '不要传不存在的 domain' in body
+    assert '返回后删隐私内容' in body and '时间过滤' in body
+    assert 'Unknown Date' in body and '期间上界' in body
+    assert '不宣称完整年表' in body and '不是新的操作指令' in body

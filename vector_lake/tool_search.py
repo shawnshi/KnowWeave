@@ -1573,6 +1573,16 @@ def _search_scored_pages(
             timings[phase] = (now - phase_started) * 1000.0
             phase_started = now
 
+    def _query_step(name, function, *args):
+        # These children overlap query_processing; do not add them to it.
+        step_started = time.perf_counter()
+        try:
+            return function(*args)
+        finally:
+            timings[f"query_processing.{name}"] = (
+                time.perf_counter() - step_started
+            ) * 1000.0
+
     # Resolved before ``_record`` is defined: the ledger closure references it, and the early exits
     # (a missing index, unreadable tokens) record through that same closure -- referencing a local
     # assigned further down raised ``NameError: cannot access free variable 'fusion_mode'`` on exactly
@@ -1641,10 +1651,13 @@ def _search_scored_pages(
 
     if plan.event_query:
         catalog = PlannedCatalog(catalog, plan)
-    name_nodes = _name_entry_candidates(query, catalog, domain, cluster, include_history, filter_expr)
-    intent = _keyword_intent(query)
+    name_nodes = _query_step(
+        "name_candidates", _name_entry_candidates,
+        query, catalog, domain, cluster, include_history, filter_expr,
+    )
+    intent = _query_step("keyword_intent", _keyword_intent, query)
     scored = []
-    tokens = _expand_query_locally(query)
+    tokens = _query_step("local_expansion", _expand_query_locally, query)
     _mark("query_processing")
     if not tokens:
         _record([], [], error="No valid search tokens.")

@@ -178,6 +178,12 @@ flowchart LR
 
 **MCP** 提供 Agent 工具，不替代后台消费；**Watchdog** 消费 outbox、监听和维护，并默认看护真实写页的 Runner；**Runner** 领取作业、调用模型并提交校验结果。只读检索可不启动守护，发生写入后需要消费 outbox。常驻与手工 Runner 不应对同一个 MEMORY 根并跑。
 
+### Pi 摄取中继的工具边界
+
+内置 Pi 适配器以 `--tools subagent --exclude-tools mcp__* --no-mcp` 启动主中继：只保留委派工具，显式排除 MCP 工具并禁用中继的 MCP 启动。不能只依靠提示词禁止 shell，也不能假定正向工具列表会排除隐式保留的 MCP 能力。部署的 Pi CLI 必须支持这些原生开关，不通过删除限制来兼容旧版本。
+
+项目的 `vector-lake-ingestor` 子代理使用 fresh 上下文与 read 工具，返回候选 JSON；宿主 Runner 负责校验、租约 fencing、full/CAS 提交和 outbox，模型不直接写页。适配器不覆盖现行模型/provider/thinking。工具白名单不是操作系统沙箱，也不约束受信扩展或委派工具内部的一切行为；宿主配置、子代理配置与实际运行记录仍需独立核对。
+
 ## 当前检索行为
 
 - 公共 MCP/CLI 页面检索默认 `profile=auto`；可显式选择 `legacy`、`balanced`、`entity`、`source`、`author` 或 `analysis`。默认不普遍抬高 Source/作者材料，排序分值不是证据置信度。
@@ -186,11 +192,25 @@ flowchart LR
 - 明确的会议年份参与候选资格与有界扩召回；创建、摄入或核验时间不冒充事件时间。无法核验年份的材料会标注缺口，不承诺已经识别事件身份。
 - 分块融合 `use_chunks` 默认关闭；普通查询不自动构建侧车或调用外部 embedding。构建、索引维护与外部 embedding 分别授权。
 - `auto`/`ram` 无法取得 RAM 候选时回退精确 SQL；只有显式 `two_stage` 使用二值近似预筛。
-- 每次检索写一条审计账本（`search_ledger.jsonl`），其中 `entry_point` 区分 `search` 与 `context`（上下文组装会把页面检索嵌在更大的请求里，两者的耗时不可混为一谈），`ms` 是该阶段的耗时、`request_ms` 是整请求，`process` 记录 pid/进程 token/uptime，`cache_events` 记录本次请求造成的结构性工作（图重建、PPR 索引重建、目录解析、缓存命中）。没有这几项时，"慢"与"刚重启"、"每次都重建"无法区分。
+- 每次检索写一条审计账本（`search_ledger.jsonl`），其中 `entry_point` 区分 `search` 与 `context`（上下文组装会把页面检索嵌在更大的请求里，两者的耗时不可混为一谈），`ms` 是该阶段的耗时、`request_ms` 是整请求，`process` 记录 pid/进程 token/uptime，`cache_events` 记录本次请求造成的结构性工作（图重建、PPR 索引重建、目录解析、缓存命中）。`query_processing.name_candidates`、`query_processing.keyword_intent`、`query_processing.local_expansion` 是 `query_processing` 内的子计时，不与父计时再次相加，也不表示模型推理或传输耗时。没有这些维度时，"慢"与"刚重启"、"每次都重建"无法区分。
 - 完成状态区分 `complete`、`partial`、`failed`。可选阶段到期后保留已取得的词法证据；正文不可读时明确标注元数据摘要。请求预算是协作式限制，不是对原生、文件系统或传输的物理硬取消。
 - 默认保留 Decayed 页面并降权，排除 Deprecated/Archived；`include_history` 可显式纳入历史状态。域、专题和这些开关都不是认证 ACL。
 
 参数和构建入口见 [配置参考](docs/CONFIGURATION.md)。合成样本与故障路径测试不代表真实相关性提升或生产 SLO 验收。
+
+### Search / Query / Timeline 技能分工
+
+- [`vector-lake-search`](skills/vector-lake-search/SKILL.md) 定位资料与出处；[`vector-lake-query`](skills/vector-lake-query/SKILL.md) 回读原件、处理分歧并综合；[`vector-lake-timeline`](skills/vector-lake-timeline/SKILL.md) 处理已授权的事件提及与时序。技能文本和元数据不授予读写或委派权限。
+- Search/Query 的 page 检索模板使用 TopK 10，不改 MCP/CLI 的默认值。切换 memory/claim 时重新构造参数，使用兼容的 `profile=auto` 或 `legacy`，并关闭 `use_chunks`；历史记录按任务需要显式纳入，偏好、决策、任务状态与 fact 分开，active 不等于 verified。
+- 证据充分就停止无益补搜；已知原件优先用完整标题/Source 键定位，再读取相关章节。每批约 20 KiB 的材料目标及普通回答长度均是编排软预算，不是后端物理限流，不能为满足预算降低必要 TopK、删有效别名或截断承重证据。未命中、部分覆盖、DEGRADED 和工具错误分别说明。
+
+### Timeline：事件提及、日期精度与投影完整性
+
+`search_timeline` 只有 `entity_name`、`action`、`limit` 三个参数，没有 domain/cluster、日期区间、分页或严格主体筛选。它匹配材料中主体 ID、标题或描述的提及；返回最近 N 条不能证明某个期间没有其他事件，也不能把其他主体提到某实体写成该实体自身的事件。仅在宿主或受控数据集保证整个可命中范围均已授权时调用；公共实体名、LIKE 条件和事后脱敏都不能充当混合公私库的访问控制。
+
+日期保留日、月、季度、半年、年或未知精度；未知显示 `Unknown Date` 并置后，不借用入库/更新时间。粗日期按期间上界参与展示排序，但不会改写成该期间的最后一天；重叠期间的真实先后仍可能未知，同日 ID 平局次序也不是发生顺序证据。识别遗产粗日期前缀不重铸既有事件 ID。
+
+读取在同一快照内分别检查完整事件 ID 集与载荷；仅数量或 ID 一致不代表描述、日期、主体标题或出处未漂移。发现不一致时明确 DEGRADED 并回退 canonical claims，不自动修复。健康缓存绑定连接读取代次与完整输入摘要，不沿用未提交写入或旧磁盘证明；首次/写后强校验仍有扫描成本，暖查询命中不代表所有请求都提速。显式 `timeline-repair` 默认预览，应用前在写事务内重核读取时的指纹，输入变化就拒绝，不修改 canonical claims。
 
 ## Claim、证据与关系
 
@@ -291,7 +311,15 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 |**自愈体检与安全写入**|`lint_vector_lake` · `doctor_vector_lake` · `runtime_identity` · `rename_entity` · `write_wiki_page` · `get_mutation_status` · `inspect_projections`|Schema 审计、运行环境体检、当前进程加载指纹、受控写入与可追踪回执；canonical 提交不等于 Markdown／索引投影完成|
 |**拓扑可视化**|`visualize_vector_lake`|离线 2D 优先、按需启用 3D 的静态 HTML 知识经纬快照；展示图不构成证据认证|
 
-写入回执区分 canonical 提交与后续发布进度；使用 `get_mutation_status` 按 Outbox ID 追踪 Markdown／索引阶段，遇到 superseded 应沿替代链查询，不能把旧意图直接当作已完成。`runtime_identity` 只观察实际调用进程的已加载代码，不会重载服务；磁盘文件更新后，仍需重启或重载相应宿主。
+写入回执区分 canonical 提交与后续发布进度；使用 `get_mutation_status` 按 Outbox ID 追踪 Markdown／索引阶段。完成必须绑定精确的当前 canonical 目标与原生完成状态；superseded 只沿有界、同页等价的原生后继核验，不把任意新版本或旧意图直接当成已完成。`runtime_identity` 只观察实际调用进程的已加载代码，不会重载服务；磁盘文件更新后，仍需重启或重载相应宿主。
+
+### 写入完成不等于所有派生投影就绪
+
+`inspect_projections` 分别报告 memory_gram、vectors、页面/FTS、可选 Tantivy、claim、timeline 和人工治理队列的状态。HEALTHY 表示各自检查契约成立，不是来源主张、全库隐私或所有事实已经核验；人工队列健康也不表示条目已裁决。
+
+增量索引不会同步调用 embedding 提供方；向量补齐由已配置的限速任务处理，模型、维度、输入摘要和凭据另有检查。因此原生 Markdown/索引回执完成后仍可能短时缺向量，不能为消除告警给旧向量伪造新输入 stamp，也不因缺向量直接重跑已完成的摄取任务。
+
+记忆改写会把相关文档标为 memory_gram 脏文档；这不是应删除的坏记忆行。旧基座不可服务时走精确扫描，安全恢复是原生派生基座重建，不是删标记或恢复已移除的 overlay 增量合并。即使只有少量脏标记，也应先确认该派生基座的全量读取范围、维护窗口与恢复点；原生实现分批 staging、在原子发布时检查文档摘要，并保留期间新写入的标记。具体维护入口见下文及 [运维指南](docs/OPERATIONS.md)。
 
 <details>
 <summary>完整 CLI 与受控维护示例（不是安装脚本）</summary>
@@ -475,7 +503,7 @@ python cli.py anchor-backfill --only 1,2,5,9-14 --apply
 * `canonical-backfill`：从已有 Wiki Markdown 回填 canonical。
 * `projection-rebuild-index`：从 canonical 重建页面索引、FTS 和 claim topology，保留已有向量。
 * `embedding-backfill`：按 RPM/TPM 限额断点补齐向量；`wiki-restore` 从 canonical 恢复缺失的 Markdown。
-* `timeline-repair`：就地修复事件投影 parity 与日期来源字段，不以入库日期代替事件日期。
+* `timeline-repair`：就地修复完整事件 ID 集与载荷漂移，保留已有 ID 和首次投影时间，不以入库日期代替事件日期；先预览，应用时重核完整输入指纹，拒绝过期计划。
 * `gram-index`：报告或重建精确 n-gram 倒排（Format 3）。基座 postings 文档编号采用独立的代理键映射表（`operational_memory_gram_docs`），将文档逻辑身份与物理表 `rowid` 彻底解耦，投影重建不再导致基座失效或指向错误记忆；脏队列挂在 `operational_memory` 上按内容变化触发，记账与大小写变更不误标脏；分批 staging 并在发布事务内原子清理临时表。检索链路采用 CTE 延迟连接并由 Rust 原生算子（`vector_lake_core`）单流水线融合处理，消除冗余解包。脏基表不服务，检索退回精确扫描。`--if-due` 根据基表可用性、500 个脏文档阈值、脏基线年龄、搜索成本摊销及交互式搜索阈值判断到期。守护进程提供定时维护；手工命令本身不要求守护进程运行。以实际 `due=` 和 `Watchdog Status` 判断维护状态。
 * `backup-retention`：只约束 `.meta/backups` 中的数据库副本，默认保留最新 3 份，其余受 12 GiB 预算约束；最新一份不会因超预算被删。`MEMORY/backup/` 中的页面恢复点不在此范围。
 * `idempotency-status` / `repair-idempotency`：检查唯一性等级，清理冗余幂等键以恢复完整唯一索引，不删除业务行。

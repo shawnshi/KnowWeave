@@ -246,7 +246,7 @@ def test_query_skill_requires_explicit_authorized_domain():
 def test_search_skill_requires_explicit_authorized_domain():
     arguments = _documented_skill_arguments("vector-lake-search")
     assert arguments["query"] == "<task-query>"
-    assert arguments["top_k"] == 5
+    assert arguments["top_k"] == 10
     text = (ROOT / "skills" / "vector-lake-search" / "SKILL.md").read_text(encoding="utf-8")
     assert "(e.g. 'HIT', 'Clinical')" not in text
 

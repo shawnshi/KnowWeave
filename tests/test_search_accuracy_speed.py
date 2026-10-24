@@ -329,7 +329,10 @@ def test_optional_timings_preserve_results_and_cover_early_errors(isolated_memor
     assert measured == plain and "stale" not in timings
     assert {"catalog", "query_processing", "fts", "embedding", "vector_search", "materialize", "ppr", "pool", "rerank", "final_order", "ledger", "total"} <= timings.keys()
     assert all(isinstance(value, float) and value >= 0 for value in timings.values())
-    assert sum(value for key, value in timings.items() if key != "total") <= timings["total"] + 0.001
+    assert sum(value for key, value in timings.items() if key != "total" and "." not in key) <= timings["total"] + 0.001
+    children = {key: value for key, value in timings.items() if key.startswith("query_processing.")}
+    assert set(children) == {"query_processing.name_candidates", "query_processing.keyword_intent", "query_processing.local_expansion"}
+    assert sum(children.values()) <= timings["query_processing"] + 0.001
     failed_timings = {}
     _rows, _notes, error = ts._search_scored_pages("seed", 5, timings=failed_timings)
     assert error and failed_timings["total"] >= 0

@@ -9,8 +9,12 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 
 
-def test_percentiles_are_ordered_and_bounded():
-    from scripts.benchmark_retrieval import stats
+def test_percentiles_are_ordered_and_bounded(monkeypatch):
+    # Importing the executable harness sets its default ledger policy. Keep that
+    # process-wide default local to this test, including when the variable was absent.
+    with monkeypatch.context() as patch:
+        patch.setenv("VECTOR_LAKE_SEARCH_LEDGER", "0")
+        from scripts.benchmark_retrieval import stats
 
     values = [10.0, 20.0, 30.0, 40.0, 100.0]
     result = stats(values)

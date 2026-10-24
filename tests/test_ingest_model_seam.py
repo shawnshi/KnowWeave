@@ -214,6 +214,38 @@ def test_child_is_one_shot_but_still_has_a_session_root(seam):
     assert argv[-1] == "@brief.md", "the brief stays the last positional argument"
 
 
+@pytest.mark.parametrize("platform,launcher", [
+    ("posix", "/controlled/pi"),
+    ("nt", "C:/controlled/pi.cmd"),
+    ("nt", "C:/controlled/PI.BAT"),
+])
+@pytest.mark.parametrize("system_path", [None, "system with space.md"])
+def test_primary_relay_can_only_delegate_without_mcp(seam, monkeypatch, platform, launcher, system_path):
+    monkeypatch.setattr(os, "name", platform)
+    argv = seam._argv(launcher, "brief with space.md", system_path, seam.SESSION_DIR)
+    assert argv.count("--tools") == 1
+    assert argv[argv.index("--tools") + 1] == "subagent"
+    assert argv.count("--exclude-tools") == 1
+    assert argv[argv.index("--exclude-tools") + 1] == "mcp__*"
+    assert argv.count("--no-mcp") == 1
+    assert argv[-1] == "@brief with space.md"
+    assert not {"--model", "--provider", "--thinking", "--no-session", "--no-extensions"}.intersection(argv)
+    if system_path:
+        assert argv[argv.index("--append-system-prompt") + 1] == system_path
+
+
+def test_successful_relay_launch_preserves_tool_restrictions(seam, monkeypatch, capsys):
+    candidate = {"files_written": [{"filename": "Source_Fixture.md", "content": "Synthetic candidate"}],
+                 "integration": {"disposition": "standalone", "reason": "Synthetic source."}}
+    run = _run(seam, monkeypatch, result=subprocess.CompletedProcess(["pi"], 0, json.dumps(candidate), ""))
+    assert seam.main() == 0
+    argv = getattr(run, "argv")
+    assert argv[argv.index("--tools") + 1] == "subagent"
+    assert argv[argv.index("--exclude-tools") + 1] == "mcp__*"
+    assert "--no-mcp" in argv
+    assert json.loads(capsys.readouterr().out) == candidate
+
+
 def test_windows_shim_is_routed_through_the_command_interpreter(seam, monkeypatch):
     monkeypatch.setattr(os, "name", "nt")
 

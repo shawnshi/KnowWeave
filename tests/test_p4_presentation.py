@@ -61,6 +61,8 @@ def test_timeline_removes_only_generated_nonliteral_markers(isolated_memory, fal
         assert result.startswith("[DEGRADED]")
         result = result.split("\n\n", 1)[1]
     assert result == (
+        "[INFO] Coarse dates are ordered by the stated period end for display only; "
+        "overlapping periods do not establish exact event order.\n\n"
         f"[2026-03] <Vendor_Subject>\n  -> {display}\n"
         "  Action: Observation | Source: Source_Synthetic"
     )
