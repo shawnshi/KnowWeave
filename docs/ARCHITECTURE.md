@@ -300,7 +300,7 @@ CJK 分词仅使用 `rjieba`（统一入口 `vector_lake/tokenizer.py`）。无�
 
 #### 原生性能加速 (Rust Native Acceleration)
 
-可选原生核心 `vector_lake_core` 当前源版本为 **0.2.5**，位于 `crates/vector_lake_core`，采用 `cp38-abi3`。各调用路径是否有回退由自身契约决定，安装成功不等于正在运行的宿主已经加载新版本。
+可选原生核心 `vector_lake_core` 当前源版本为 **0.2.8**，位于 `crates/vector_lake_core`，采用 `cp38-abi3`（由 `vector_lake/native_core.py` 在导入前核验版本兼容性）。各调用路径是否有回退由自身契约决定，安装成功不等于正在运行的宿主已经加载新版本。
 
 |模块|调用路径|当前职责|
 |-|-|-|

@@ -49,12 +49,6 @@ triggers: 'Triggered when preparing to create a new entity or concept in the Vec
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - 校验候选实体的参数是否完备 (Title, Type, Summary)。
-      - 校验查询返回的匹配列表及相似度分数。
-      - 决定是创建新实体还是合并到现有实体，或是触发人类审核。
-    </thought>
     Present a concise summary of the duplication check results. If duplicates are found, list the existing entity names and paths. If safe to proceed, confirm the entity is unique.
   </output_format>
 

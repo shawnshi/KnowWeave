@@ -24,43 +24,35 @@ description: 'Trigger a 2-step CoT sync of all raw sources into the Vector Lake 
 
 <execution_workflow>
   <workflow>
-    1. Pre-flight Initialization: Present the sync intent to the user.
-    2. [FABLE 5 CHECKPOINT] Halt execution and require human approval before calling the sync tool.
+    1. Pre-flight Initialization: Present the sync intent and inspect pending tasks via `python cli.py ingest-tasks --list`.
+    2. [FABLE 5 CHECKPOINT] Halt execution and require human approval before queueing new raw sources or running the ingest runner.
     3. Sandbox Setup: Prepare the `scratch/` directory for any intermediate sync state or logging.
-    4. Subagent Spawning: Spawn a `self` subagent (Role: `vector-lake-ingestor`) to asynchronously run the `sync_vector_lake` tool.
-    5. Main Agent Release: The main agent must release control immediately and not wait synchronously for the subagent.
+    4. CLI / Runner Dispatch: Queue unprocessed raw sources via `python cli.py sync` and let the host Runner (`python scripts/ingest_runner.py`) claim packets, validate read-only model outputs (`files_written` + explicit `integration` disposition), and finalize writes.
+    5. Projection Verification: Verify index and projection parity via `inspect_projections` or `get_mutation_status`.
   </workflow>
 
   <tool_dispatch>
-    - `invoke_subagent`: MUST be used to spawn the subagent for concurrent tasks.
-    - `Reson-KnowWeave-mcp`: `prepare_ingest_batch` (or the `sync_vector_lake` wrapper) queues unprocessed sources. The host Runner claims packets via `claim_ingest_tasks`; its read-only model subagent returns `files_written` plus an explicit `integration` disposition. Only the host controller invokes `finalize_ingest` after validation; the model subagent never writes Wiki pages or finalizes directly.
+    - `bash`: `python cli.py sync`, `python cli.py ingest-tasks [--list|--expire-stale]`, and `python scripts/ingest_runner.py` own batch queueing, bounded Runner claims, and fenced finalization.
+    - `Reson-KnowWeave-mcp`: `inspect_projections` and `get_mutation_status` to check projection and outbox status without direct Wiki writes.
   </tool_dispatch>
 
   <checkpoint_rules>
-    - [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before invoking the subagent to perform the sync, the agent must explicitly ask the user for permission to proceed and wait for their response.
+    - [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before running `python cli.py sync` or `python scripts/ingest_runner.py`, the agent must explicitly ask the user for permission to proceed and wait for their response.
   </checkpoint_rules>
 </execution_workflow>
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      1. Check if human approval has been granted.
-      2. If not, trigger Fable 5 checkpoint.
-      3. If granted, prepare the subagent invocation prompt and `scratch/` workspace.
-      4. Verify `invoke_subagent` and `sync_vector_lake` tool usage.
-    </thought>
-    - Status update confirming the background subagent has been dispatched.
-    - Prompt used for the orchestration subagent: "Please use the `sync_vector_lake` MCP tool from `Reson-KnowWeave-mcp` to queue pending sources; the host Runner owns model output validation and finalization."
+    - Status update confirming `python cli.py sync` and host Runner execution state (`python cli.py ingest-tasks --list`).
   </output_format>
 
   <metrics>
     - Human approval successfully recorded.
-    - Subagent successfully dispatched without blocking the main agent.
+    - Batch queued and Runner handoff verified without unvalidated writes.
   </metrics>
 
   <validation_gate>
-    - Verify that no direct synchronous calls to `sync_vector_lake` were made by the main agent.
+    - Verify no unvalidated direct writes bypassed `scripts/ingest_runner.py` and the canonical outbox.
     - Validate that physical artifacts or logs can be routed to the `scratch/` directory for sandbox validation.
   </validation_gate>
 </delivery_standards>

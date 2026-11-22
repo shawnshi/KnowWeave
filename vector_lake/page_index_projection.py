@@ -66,6 +66,7 @@ ScopedAdjacency = Mapping[str, tuple[tuple[str, float], ...]]
 # ``link_target_resolver`` memo.  Keyed on the two index-only numbers below, so a per-page
 # caller pays one build per index change, not one per page.
 _LINK_RESOLVER_CACHE: dict = {"fingerprint": None, "resolver": None}
+_LINK_RESOLVER_LOCK = threading.Lock()
 
 
 def link_target_resolver():
@@ -106,29 +107,32 @@ def link_target_resolver():
     # (tests, a backup being inspected) can both hold one node, and a memo keyed on the numbers
     # alone would answer one with the other's index.  Same reason ``tool_timeline``'s parity
     # fingerprint carries the path.
-    fingerprint = (str(get_db_path()), count, highest)
-    if _LINK_RESOLVER_CACHE["fingerprint"] == fingerprint:
-        return _LINK_RESOLVER_CACHE["resolver"]
+    data_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
+    adj_gen = adjacency_generation()
+    fingerprint = (str(get_db_path()), count, highest, data_version, adj_gen)
+    with _LINK_RESOLVER_LOCK:
+        if _LINK_RESOLVER_CACHE["fingerprint"] == fingerprint:
+            return _LINK_RESOLVER_CACHE["resolver"]
 
-    nodes: dict[str, dict] = {}
-    for node in conn.execute("SELECT node_key, node_json FROM page_index_nodes"):
-        try:
-            payload = json.loads(node["node_json"])
-        except (TypeError, ValueError):
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        nodes[str(node["node_key"])] = {
-            "title": payload.get("title"),
-            "aliases": payload.get("aliases") or [],
-        }
-    link_map, _core_pages, unique_cores, _contested = build_link_map(
-        nodes.keys(), declared_names_from_nodes(nodes)
-    )
-    resolver = lambda target: resolve_link_target(str(target), link_map, unique_cores)  # noqa: E731
-    _LINK_RESOLVER_CACHE["fingerprint"] = fingerprint
-    _LINK_RESOLVER_CACHE["resolver"] = resolver
-    return resolver
+        nodes: dict[str, dict] = {}
+        for node in conn.execute("SELECT node_key, node_json FROM page_index_nodes"):
+            try:
+                payload = json.loads(node["node_json"])
+            except (TypeError, ValueError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            nodes[str(node["node_key"])] = {
+                "title": payload.get("title"),
+                "aliases": payload.get("aliases") or [],
+            }
+        link_map, _core_pages, unique_cores, _contested = build_link_map(
+            nodes.keys(), declared_names_from_nodes(nodes)
+        )
+        resolver = lambda target: resolve_link_target(str(target), link_map, unique_cores)  # noqa: E731
+        _LINK_RESOLVER_CACHE["fingerprint"] = fingerprint
+        _LINK_RESOLVER_CACHE["resolver"] = resolver
+        return resolver
 
 def index_file_stamp() -> tuple[float, int] | None:
     path = get_index_path()
@@ -940,15 +944,12 @@ def read_catalog():
         if cached is not None and same_root and age < _fallback_reparse_seconds():
             return cached, _fallback_note(served_from_cache_for=age)
 
-    from vector_lake import retrieval_runtime as _runtime
-    _runtime.counter('catalog_parse')
-    index_data = _load_index_json()
-    if index_data is None:
-        return None, "no index.json to read"
-    catalog = _FileCatalog(index_data)
-    with _CATALOG_LOCK:
-        # Stored as a key/catalog pair so a racing rebuild can never pair a
-        # catalog with the wrong stamp; the loser simply rebuilds next time.
+        from vector_lake import retrieval_runtime as _runtime
+        _runtime.counter('catalog_parse')
+        index_data = _load_index_json()
+        if index_data is None:
+            return None, "no index.json to read"
+        catalog = _FileCatalog(index_data)
         _CATALOG_CACHE["key"] = key
         _CATALOG_CACHE["catalog"] = catalog
         _CATALOG_CACHE["at"] = time.monotonic()

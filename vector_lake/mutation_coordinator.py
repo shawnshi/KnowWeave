@@ -254,8 +254,14 @@ def execute_mutation_batch(
         raise RuntimeError("Managed page mutation must start outside a SQLite transaction")
     from vector_lake.runtime_health import enforce_runtime_write_health
 
-    enforce_runtime_write_health(validation_mode=validation_mode)
-    prepared = _prepare_mutations(mutations, validation_mode=validation_mode)
+    mutations_list = list(mutations)
+    target_filenames = [
+        str(item["filename"])
+        for item in mutations_list
+        if isinstance(item, dict) and item.get("filename")
+    ]
+    enforce_runtime_write_health(validation_mode=validation_mode, target_filenames=target_filenames)
+    prepared = _prepare_mutations(mutations_list, validation_mode=validation_mode)
     db_store.init_db()
     outbox_ids = []
     from vector_lake import governance_store

@@ -77,12 +77,10 @@ import time
 from vector_lake import db_store
 from vector_lake.db_store import get_connection, init_db, transaction
 
-try:
-    import vector_lake_core
-    HAVE_CORE = True
-except ImportError:
-    vector_lake_core = None
-    HAVE_CORE = False
+from vector_lake.native_core import load_native_core
+
+vector_lake_core, _CORE_LOAD_ERROR = load_native_core()
+HAVE_CORE = vector_lake_core is not None
 
 log = logging.getLogger("vector-lake-memory-gram-index")
 
@@ -941,7 +939,7 @@ def term_document_frequencies(terms: list[str], skip_docs: set[int] | None = Non
             if blob is not None:
                 _accumulate(blob, _FIELD_WEIGHTS, folded, skip_docs)
         else:
-            _accumulate_composite([term], _FIELD_WEIGHTS, folded)
+            _accumulate_composite([term], _FIELD_WEIGHTS, folded, skip_docs=skip_docs)
         if docs is not None:
             frequencies[term] = sum(1 for doc in folded if doc in docs)
         else:
@@ -1005,7 +1003,7 @@ def accumulate_relevance(
         else:
             # One term at a time, because *this* term's document frequency is what scales its
             # matches; folding several together would apply one factor to all of them.
-            _accumulate_composite([term], weights, folded)
+            _accumulate_composite([term], weights, folded, skip_docs=skip_docs)
         _fold(term, folded)
     if docs is not None:
         return {doc: value for doc, value in accumulator.items() if doc in docs}
@@ -1088,7 +1086,7 @@ def fused_term_frequencies_and_relevance(
     # Composite terms (length > 2) verified via bigrams
     for term in long_terms:
         d = {}
-        _accumulate_composite([term], weights, d)
+        _accumulate_composite([term], weights, d, skip_docs=skip_docs)
         if term not in frequencies:
             df = sum(1 for doc in d if doc in docs) if docs is not None else len(d)
             frequencies[term] = df
@@ -1129,13 +1127,20 @@ def _composite_candidates(term: str, conn) -> set[int]:
     return candidates or set()
 
 
-def _accumulate_composite(terms: list[str], weights: list[int], accumulator: dict) -> None:
+def _accumulate_composite(
+    terms: list[str],
+    weights: list[int],
+    accumulator: dict,
+    skip_docs: set[int] | None = None,
+) -> None:
     """Resolve terms of length >= 3 by bigram intersection plus exact verification."""
     conn = get_connection()
     candidates = {term: _composite_candidates(term, conn) for term in terms}
     needed: set[int] = set()
     for docs in candidates.values():
         needed.update(docs)
+    if skip_docs:
+        needed.difference_update(skip_docs)
     if not needed:
         return
     blobs: dict[int, tuple[str, str, str]] = {}
@@ -1153,6 +1158,8 @@ def _accumulate_composite(terms: list[str], weights: list[int], accumulator: dic
             blobs[int(row["doc"])] = (row["key_blob"], row["text_blob"], row["page_blob"])
     for term in terms:
         for doc in candidates[term]:
+            if skip_docs and doc in skip_docs:
+                continue
             fields = blobs.get(doc)
             if fields is None:
                 continue

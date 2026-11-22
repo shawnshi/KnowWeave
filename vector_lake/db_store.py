@@ -35,7 +35,6 @@ def _job_idempotency_key(task_type: str, payload: dict | None) -> str | None:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 def get_db_path() -> Path:
-    import os
     override = os.environ.get("VECTOR_LAKE_DB_PATH")
     if override:
         return Path(override)
@@ -74,6 +73,20 @@ def _sqlite_cache_kib() -> int:
         return -2000
 
 
+def _sqlite_page_size() -> int:
+    """``VECTOR_LAKE_SQLITE_PAGE_SIZE``, default 16384 (16 KiB), power of 2 between 512 and 65536."""
+    raw = os.environ.get("VECTOR_LAKE_SQLITE_PAGE_SIZE")
+    if raw is None or not str(raw).strip():
+        return 16384
+    try:
+        val = int(str(raw).strip())
+        if 512 <= val <= 65536 and (val & (val - 1)) == 0:
+            return val
+        return 16384
+    except ValueError:
+        return 16384
+
+
 def _apply_connection_pragmas(conn: sqlite3.Connection) -> None:
     """Apply the PRAGMAs that SQLite scopes to a single connection.
 
@@ -87,6 +100,7 @@ def _apply_connection_pragmas(conn: sqlite3.Connection) -> None:
         "PRAGMA journal_mode=WAL",
         "PRAGMA synchronous=NORMAL",
         "PRAGMA foreign_keys=ON",
+        "PRAGMA temp_store=MEMORY",
         f"PRAGMA mmap_size={_sqlite_mmap_bytes()}",
         f"PRAGMA cache_size={_sqlite_cache_kib()}",
     ):
@@ -102,6 +116,7 @@ def get_connection() -> sqlite3.Connection:
         db_path = get_db_path()
         from vector_lake.retrieval_runtime import current, remaining_seconds
         timeout = min(30.0, remaining_seconds()) if current() is not None else 30.0
+        is_new = not db_path.exists() or db_path.stat().st_size == 0
         conn = sqlite3.connect(str(db_path), timeout=timeout, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         
@@ -109,6 +124,12 @@ def get_connection() -> sqlite3.Connection:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+
+        if is_new:
+            try:
+                conn.execute(f"PRAGMA page_size={_sqlite_page_size()}")
+            except sqlite3.OperationalError as exc:
+                logging.getLogger("vector-lake-db").warning("Could not apply PRAGMA page_size: %s", exc)
 
         _apply_connection_pragmas(conn)
         
@@ -121,6 +142,7 @@ def close_connection():
         _LOCAL.conn.close()
         _LOCAL.conn = None
     _LOCAL.in_transaction = False
+    _LOCAL.om_index_fingerprint = None
 
 # --- write-lock budget -------------------------------------------------------
 #
@@ -224,7 +246,23 @@ def _record_lock_contention(attempts: int, budget_seconds: float, waited_seconds
         history = list(payload.get("history") or [])
         history.append(entry)
         payload["history"] = history[-20:]
-        marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        serialized = json.dumps(payload, ensure_ascii=False, indent=1)
+        temp_path = marker_path.with_name(f".{marker_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(serialized, encoding="utf-8")
+            for attempt in range(5):
+                try:
+                    os.replace(temp_path, marker_path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     except Exception as exc:  # noqa: BLE001 - telemetry must never break a write
         log.warning("Could not record write-lock contention: %s", exc)
 
@@ -655,6 +693,11 @@ def _create_claim_index_tables(conn: sqlite3.Connection) -> None:
     ensure_claim_index(conn, force=stale_claim_projection)
 
 
+def _is_query_only(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("PRAGMA query_only").fetchone()
+    return bool(row and row[0])
+
+
 def ensure_claim_index(conn: sqlite3.Connection | None = None, force: bool = False) -> dict:
     """Reconcile ``claim_index`` with ``claims``; ``force`` re-derives every row."""
     conn = conn or get_connection()
@@ -664,31 +707,47 @@ def ensure_claim_index(conn: sqlite3.Connection | None = None, force: bool = Fal
         "deleted": 0,
         "rebuilt": 0,
     }
-    if not force and result["canonical"] == result["projected"]:
+    if (not force and result["canonical"] == result["projected"]) or _is_query_only(conn):
         return result
     columns = ", ".join(_CLAIM_INDEX_COLUMNS)
-    if force:
-        result["deleted"] = conn.execute("DELETE FROM claim_index").rowcount
-        gap_clause = ""
-    else:
-        result["deleted"] = conn.execute(
-            "DELETE FROM claim_index WHERE claim_id NOT IN (SELECT claim_id FROM claims)"
-        ).rowcount
-        gap_clause = "WHERE src.claim_id NOT IN (SELECT claim_id FROM claim_index)"
-    # ``INSERT OR REPLACE ... SELECT`` rather than an upsert: SQLite requires a WHERE clause to
-    # disambiguate an ON CONFLICT attached to a SELECT, so the "fill the gaps" path would have to
-    # synthesise one.  This mirrors ``ensure_operational_memory_index``.
-    cursor = conn.execute(
-        f"""
-        INSERT OR REPLACE INTO claim_index ({columns})
-        SELECT src.claim_id,
+
+    def _apply() -> None:
+        if force:
+            result["deleted"] = conn.execute("DELETE FROM claim_index").rowcount
+            gap_clause = ""
+        else:
+            result["deleted"] = conn.execute(
+                "DELETE FROM claim_index WHERE claim_id NOT IN (SELECT claim_id FROM claims)"
+            ).rowcount
+            gap_clause = "WHERE src.claim_id NOT IN (SELECT claim_id FROM claim_index)"
+        # ``INSERT OR REPLACE ... SELECT`` rather than an upsert: SQLite requires a WHERE clause to
+        # disambiguate an ON CONFLICT attached to a SELECT, so the "fill the gaps" path would have to
+        # synthesise one.  This mirrors ``ensure_operational_memory_index``.
+        cursor = conn.execute(
+            f"""
+            INSERT OR REPLACE INTO claim_index ({columns})
+            SELECT src.claim_id,
 {_claim_index_value_expr("src")},
-               src.rowid
-        FROM claims AS src
-        {gap_clause}
-        """
-    )
-    result["rebuilt"] = int(cursor.rowcount or 0)
+                   src.rowid
+            FROM claims AS src
+            {gap_clause}
+            """
+        )
+        result["rebuilt"] = int(cursor.rowcount or 0)
+
+    if conn.in_transaction:
+        _apply()
+    elif conn is getattr(_LOCAL, "conn", None):
+        with transaction():
+            _apply()
+    else:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _apply()
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
     return result
 
 
@@ -907,33 +966,49 @@ def ensure_operational_memory_index(
         "deleted": 0,
         "rebuilt": 0,
     }
-    if not force and result["canonical"] == result["projected"]:
+    if (not force and result["canonical"] == result["projected"]) or _is_query_only(conn):
         return result
 
     columns = ", ".join(_OM_INDEX_COLUMNS)
-    if force:
-        result["deleted"] = conn.execute("DELETE FROM operational_memory_index").rowcount
-        gap_clause = ""
-    else:
-        result["deleted"] = conn.execute(
-            "DELETE FROM operational_memory_index "
-            "WHERE memory_id NOT IN (SELECT memory_id FROM operational_memory)"
-        ).rowcount
-        gap_clause = (
-            "WHERE src.memory_id NOT IN (SELECT memory_id FROM operational_memory_index)"
-        )
-    result["rebuilt"] = conn.execute(
-        f"""
-        INSERT OR REPLACE INTO operational_memory_index ({columns})
-        SELECT src.memory_id,
+
+    def _apply() -> None:
+        if force:
+            result["deleted"] = conn.execute("DELETE FROM operational_memory_index").rowcount
+            gap_clause = ""
+        else:
+            result["deleted"] = conn.execute(
+                "DELETE FROM operational_memory_index "
+                "WHERE memory_id NOT IN (SELECT memory_id FROM operational_memory)"
+            ).rowcount
+            gap_clause = (
+                "WHERE src.memory_id NOT IN (SELECT memory_id FROM operational_memory_index)"
+            )
+        result["rebuilt"] = conn.execute(
+            f"""
+            INSERT OR REPLACE INTO operational_memory_index ({columns})
+            SELECT src.memory_id,
 {_om_index_value_expr('src')}
-        FROM operational_memory AS src
-        {gap_clause}
-        """
-    ).rowcount
-    result["projected"] = conn.execute(
-        "SELECT COUNT(*) FROM operational_memory_index"
-    ).fetchone()[0]
+            FROM operational_memory AS src
+            {gap_clause}
+            """
+        ).rowcount
+        result["projected"] = conn.execute(
+            "SELECT COUNT(*) FROM operational_memory_index"
+        ).fetchone()[0]
+
+    if conn.in_transaction:
+        _apply()
+    elif conn is getattr(_LOCAL, "conn", None):
+        with transaction():
+            _apply()
+    else:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _apply()
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
     return result
 
 
@@ -959,9 +1034,6 @@ def operational_memory_index_drift(conn: sqlite3.Connection | None = None) -> di
 # ``PRAGMA data_version`` moves when another connection commits and
 # ``Connection.total_changes`` moves for this connection's own writes, so an
 # untouched database is cleared by two constant-time reads instead.
-_OM_INDEX_GUARD: dict = {"fingerprint": None}
-
-
 def operational_memory_index_fingerprint(conn: sqlite3.Connection | None = None) -> tuple:
     conn = conn or get_connection()
     return (
@@ -977,10 +1049,11 @@ def ensure_operational_memory_index_cheap(conn: sqlite3.Connection | None = None
     Returns the reconciliation result, or ``None`` when the guard short-circuited.
     """
     conn = conn or get_connection()
-    if _OM_INDEX_GUARD["fingerprint"] == operational_memory_index_fingerprint(conn):
+    fingerprint = operational_memory_index_fingerprint(conn)
+    if getattr(_LOCAL, "om_index_fingerprint", None) == fingerprint:
         return None
     result = ensure_operational_memory_index(conn)
-    _OM_INDEX_GUARD["fingerprint"] = operational_memory_index_fingerprint(conn)
+    _LOCAL.om_index_fingerprint = operational_memory_index_fingerprint(conn)
     return result
 
 # --- idempotency index recovery ---------------------------------------------
@@ -1984,6 +2057,7 @@ def _init_db_once(db_key: str):
             ("lease_until", "TEXT"),
             ("idempotency_key", "TEXT"),
             ("validation_mode", "TEXT DEFAULT 'full'"),
+            ("payload_sha256", "TEXT"),
         ]
         for column_name, column_type in outbox_columns:
             try:
@@ -3160,15 +3234,16 @@ def enqueue_mutation(filename: str, mutation_type: str, payload_text: str | None
                 raise ValueError("Idempotency key has a different active payload or validation mode")
             return int(existing["id"])
         revision = conn.execute("SELECT COALESCE(MAX(projection_generation),0)+1 FROM mutation_outbox WHERE filename=?", (filename,)).fetchone()[0]
+        payload_digest = hashlib.sha256(payload_text.encode("utf-8")).hexdigest() if payload_text is not None else None
         if existing:
             outbox_id = int(existing["id"])
             conn.execute("UPDATE mutation_outbox SET status='pending', attempt_count=0, last_error=NULL, available_at=?, "
                          "started_at=NULL,completed_at=NULL,lease_until=NULL,lease_owner=NULL,lease_token=NULL, "
-                         "payload_text=?,validation_mode=?,projection_generation=?,base_version=NULL,superseded_by=NULL WHERE id=?",
-                         (now, payload_text, validation_mode, revision, outbox_id))
+                         "payload_text=?,payload_sha256=?,validation_mode=?,projection_generation=?,base_version=NULL,superseded_by=NULL WHERE id=?",
+                         (now, payload_text, payload_digest, validation_mode, revision, outbox_id))
         else:
-            cursor = conn.execute("INSERT INTO mutation_outbox (filename,mutation_type,payload_text,status,attempt_count,created_at,available_at,idempotency_key,validation_mode,projection_generation) "
-                                  "VALUES (?,?,?,'pending',0,?,?,?,?,?)", (filename, mutation_type, payload_text, now, now, idempotency_key, validation_mode, revision))
+            cursor = conn.execute("INSERT INTO mutation_outbox (filename,mutation_type,payload_text,payload_sha256,status,attempt_count,created_at,available_at,idempotency_key,validation_mode,projection_generation) "
+                                  "VALUES (?,?,?,?,'pending',0,?,?,?,?,?)", (filename, mutation_type, payload_text, payload_digest, now, now, idempotency_key, validation_mode, revision))
             outbox_id = int(cursor.lastrowid)
         conn.execute("UPDATE mutation_outbox SET status='superseded',superseded_by=?,lease_until=NULL,lease_owner=NULL,lease_token=NULL "
                      "WHERE filename=? AND id<>? AND status IN ('pending','processing','failed') AND projection_generation<?",
@@ -3191,9 +3266,76 @@ def bind_mutation_versions(outbox_ids: list[int], versions: dict[str, str]):
 
 def is_managed_projection_state(filename: str, mutation_type: str, payload_text: str | None = None) -> bool:
     init_db()
-    row = get_connection().execute("SELECT mutation_type,payload_text FROM mutation_outbox WHERE filename=? ORDER BY "
-                                  + mutation_outbox_revision_order() + " LIMIT 1", (str(filename),)).fetchone()
-    return row is not None and row["mutation_type"] == mutation_type and (mutation_type == "delete" or row["payload_text"] == payload_text)
+    conn = get_connection()
+    has_digest = "payload_sha256" in _table_columns(conn, "mutation_outbox")
+    cols = "mutation_type, payload_text, payload_sha256" if has_digest else "mutation_type, payload_text"
+    row = conn.execute(
+        f"SELECT {cols} FROM mutation_outbox WHERE filename=? ORDER BY " + mutation_outbox_revision_order() + " LIMIT 1",
+        (str(filename),),
+    ).fetchone()
+    if row is None or row["mutation_type"] != mutation_type:
+        return False
+    if mutation_type == "delete":
+        return True
+    if row["payload_text"] is not None:
+        return row["payload_text"] == payload_text
+    if has_digest and row["payload_sha256"] and payload_text is not None:
+        return row["payload_sha256"] == hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+    return payload_text is None and row["payload_text"] is None
+
+
+def list_failed_outbox_rows(filename: str | None = None) -> list[dict]:
+    init_db()
+    conn = get_connection()
+    sql = "SELECT id, filename, mutation_type, attempt_count, last_error, created_at FROM mutation_outbox WHERE status='failed'"
+    params: tuple = ()
+    if filename:
+        sql += " AND filename = ?"
+        params = (str(filename),)
+    sql += " ORDER BY id ASC"
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def retry_failed_outbox_rows(filename: str | None = None) -> int:
+    ensure_mutation_outbox_fencing()
+    conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    with transaction():
+        if filename:
+            cur = conn.execute(
+                "UPDATE mutation_outbox SET status='pending', attempt_count=0, available_at=?, "
+                "lease_until=NULL, lease_owner=NULL, lease_token=NULL "
+                "WHERE status='failed' AND filename=?",
+                (now, str(filename)),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE mutation_outbox SET status='pending', attempt_count=0, available_at=?, "
+                "lease_until=NULL, lease_owner=NULL, lease_token=NULL WHERE status='failed'",
+                (now,),
+            )
+        return int(cur.rowcount or 0)
+
+
+def clear_failed_outbox_rows(filename: str | None = None) -> int:
+    ensure_mutation_outbox_fencing()
+    conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    with transaction():
+        if filename:
+            cur = conn.execute(
+                "UPDATE mutation_outbox SET status='cancelled', completed_at=?, "
+                "lease_until=NULL, lease_owner=NULL, lease_token=NULL "
+                "WHERE status='failed' AND filename=?",
+                (now, str(filename)),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE mutation_outbox SET status='cancelled', completed_at=?, "
+                "lease_until=NULL, lease_owner=NULL, lease_token=NULL WHERE status='failed'",
+                (now,),
+            )
+        return int(cur.rowcount or 0)
 
 
 def claim_mutation_outbox(limit: int = 50, lease_seconds: int = 120, *, lease_owner: str | None = None) -> list[dict]:
@@ -3344,34 +3486,75 @@ def reclaim_free_space(
     conn = conn or get_connection()
     before = free_space_report(conn)
     threshold_bytes = max(0.0, float(min_free_mb)) * 1024 * 1024
+    desired_page_size = _sqlite_page_size()
+    needs_page_size_change = int(conn.execute("PRAGMA page_size").fetchone()[0]) != desired_page_size
     permitted = allow
     if permitted is None:
         permitted = str(os.environ.get("VECTOR_LAKE_RECLAIM_FREE_SPACE", "")).strip().lower() in {
             "1", "true", "yes", "on",
         }
     result = {**before, "vacuumed": False, "freed_bytes": 0, "seconds": 0.0, "reason": ""}
-    if before["free_bytes"] < threshold_bytes:
+    if before["free_bytes"] < threshold_bytes and not needs_page_size_change:
         result["reason"] = (
             f"freelist is {before['free_bytes'] / 1e6:.0f} MB, below the {min_free_mb:.0f} MB threshold"
         )
         return result
     if not permitted:
+        reclaim_msg = f"{before['free_bytes'] / 1e6:.0f} MB reclaimable"
+        if needs_page_size_change:
+            reclaim_msg += f" (page_size migration to {desired_page_size} pending)"
         result["reason"] = (
-            f"{before['free_bytes'] / 1e6:.0f} MB reclaimable; not permitted "
+            f"{reclaim_msg}; not permitted "
             "(set VECTOR_LAKE_RECLAIM_FREE_SPACE=1, or run it in a maintenance window)"
         )
         return result
     if dry_run:
-        result["reason"] = f"dry run: would reclaim {before['free_bytes'] / 1e6:.0f} MB"
+        dry_msg = f"dry run: would reclaim {before['free_bytes'] / 1e6:.0f} MB"
+        if needs_page_size_change:
+            dry_msg += f" and migrate page_size to {desired_page_size}"
+        result["reason"] = dry_msg
         return result
 
     started = time.monotonic()
     _arm_busy_timeout(conn, 600.0)
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.execute("VACUUM")
+        desired_page_size = _sqlite_page_size()
+        needs_page_size_change = int(conn.execute("PRAGMA page_size").fetchone()[0]) != desired_page_size
+        switched_journal_mode = False
+        if needs_page_size_change:
+            try:
+                # SQLite cannot alter page_size in WAL mode; temporarily switch to DELETE journal mode
+                conn.execute("PRAGMA journal_mode=DELETE")
+                conn.execute(f"PRAGMA page_size={desired_page_size}")
+                switched_journal_mode = True
+            except sqlite3.OperationalError as exc:
+                if before["free_bytes"] < threshold_bytes:
+                    log.warning(
+                        "Skipping vacuum: could not switch journal_mode to DELETE for page_size migration (%s); "
+                        "active readers hold WAL and freelist is below threshold.",
+                        exc,
+                    )
+                    result["reason"] = (
+                        f"skipped page_size migration to {desired_page_size}: "
+                        f"cannot switch off WAL ({exc})"
+                    )
+                    return result
+                log.warning(
+                    "Could not switch journal_mode to DELETE for page_size migration (%s); "
+                    "another process may hold an active read connection. Proceeding with WAL vacuum.",
+                    exc,
+                )
+        try:
+            conn.execute("VACUUM")
+        finally:
+            if switched_journal_mode:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError as exc:
+                    log.error("Could not restore PRAGMA journal_mode=WAL after VACUUM: %s", exc)
     finally:
-        _arm_busy_timeout(conn, float(BEGIN_LOCK_BUDGET_SECONDS))
+        _arm_busy_timeout(conn, DB_BUSY_TIMEOUT_MS / 1000.0)
     after = free_space_report(conn)
     result.update(
         {
@@ -3420,7 +3603,6 @@ def mark_file_processed(
     keep working; ``COALESCE`` then keeps any snapshot already on the row instead of clearing
     it on a write that carries none.
     """
-    from datetime import datetime, timezone
     conn = get_connection()
     now_str = datetime.now(timezone.utc).isoformat()
     with transaction():
@@ -3491,8 +3673,6 @@ def enqueue_job(
         # A finished job is also "not unfinished"; keep the two switches from being used as if
         # they were independent when they are nested.
         replace_terminal = True
-    import uuid
-    from datetime import datetime, timezone
     init_db()
     conn = get_connection()
     job_id = uuid.uuid4().hex
@@ -3808,7 +3988,8 @@ def expire_stale_subagent_jobs(max_age_seconds: int = 86400) -> int:
     now_str = datetime.now(timezone.utc).isoformat()
     with transaction():
         cursor = conn.execute(
-            "UPDATE jobs SET status = 'failed', retries = retries + 1, "
+            "UPDATE jobs SET status = 'failed', "
+            "retries = retries + CASE WHEN COALESCE(lease_generation, 0) > 0 THEN 1 ELSE 0 END, "
             "error_msg = 'Subagent task packet expired before finalization', updated_at = ?, "
             "available_at = ?, lease_until = NULL, lease_owner = NULL, lease_token = NULL "
             "WHERE status = 'awaiting_subagent' AND updated_at < ?",
@@ -4021,8 +4202,6 @@ def release_job_for_retry(job_id: str, reason: str, *, claim: dict | None = None
     ``retries`` is left alone, so ``claim_pending_jobs`` keeps dispatching while the budget
     lasts; only the lease is released.
     """
-    from datetime import datetime, timezone
-
     conn = get_connection()
     import math
 
@@ -4044,7 +4223,6 @@ def release_job_for_retry(job_id: str, reason: str, *, claim: dict | None = None
 
 
 def update_job_status(job_id: str, status: str, error_msg: str = "", *, claim: dict | None = None):
-    from datetime import datetime, timezone
     conn = get_connection()
     with transaction():
         now_str = datetime.now(timezone.utc).isoformat()

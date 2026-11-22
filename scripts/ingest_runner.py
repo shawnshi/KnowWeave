@@ -45,7 +45,7 @@ from vector_lake.ingest_execution import BackendCircuit, BackendFailure  # noqa:
 from vector_lake.ingest_backend import (SELECTION_SOURCES, builtin_model_argv,
                                         check_ingest_backend, resolve_ingest_backend,
                                         is_supervisor_child, legacy_runner_is_live,
-                                        report_ingest_conflict)  # noqa: E402
+                                        process_create_time_ns, report_ingest_conflict)  # noqa: E402
 from vector_lake.tool_ingest import (  # noqa: E402
     claim_ingest_tasks,
     finalize_ingest,
@@ -532,7 +532,9 @@ def _run_consumer(args, selection, supervisor_pid) -> int:
     execution = BackendCircuit(_runtime_dir() / "runner_backend_state.json", selection.backend,
                                selection.model_command, reset=getattr(args, "reset_backend", False))
     idle_cycles = 0
-    stats = {"started_at": _utc_now(), "pid": os.getpid(), "shadow": args.shadow,
+    stats = {"started_at": _utc_now(), "pid": os.getpid(),
+             "pid_create_time_ns": process_create_time_ns(os.getpid()),
+             "shadow": args.shadow,
              "model_command": bool(args.model_cmd), "effective_backend": selection.backend,
              "selection_source": args.model_source or selection.source,
              "resolved_model_command": selection.model_command, "supervisor_pid": supervisor_pid,

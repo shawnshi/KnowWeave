@@ -36,8 +36,8 @@ if ($Python) {
     $exe = $Python
 }
 else {
-    $candidate = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
-    $exe = if (Test-Path $candidate) { $candidate } else { (Get-Command python.exe).Source }
+    $venvPython = Join-Path $root '.venv\Scripts\python.exe'
+    $exe = if (Test-Path $venvPython) { $venvPython } else { (Get-Command python.exe).Source }
 }
 if (-not (Test-Path $exe)) { throw "python interpreter not found: $exe" }
 

@@ -91,3 +91,102 @@ def test_unix_builder_reuses_wheel_linker_and_validates_receipt(tmp_path, monkey
         with pytest.raises(SystemExit):
             INSTALL.build()
         assert output_binary.read_bytes() == b'previous build'
+
+
+def test_windows_build_failure_preserves_context_and_redacts_proxy_credentials(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(INSTALL, 'sys', SimpleNamespace(platform='win32', executable=sys.executable))
+    monkeypatch.setattr(INSTALL, 'CRATE', tmp_path)
+    monkeypatch.setenv('HTTPS_PROXY', 'http://alice:super-secret@127.0.0.1:7898')
+    stderr_lines = [
+        'error: failed to get `pulldown-cmark` as a dependency of package `vector-lake-core v0.2.8`',
+        'Caused by:',
+        '  download of pu/ll/pulldown-cmark failed',
+        'Caused by:',
+        '  failed to download from https://index.crates.io/pu/ll/pulldown-cmark',
+        'Caused by:',
+        '  network error context line 7',
+        '  network error context line 8',
+        '  network error context line 9',
+        '  network error context line 10',
+        '  Caused by:',
+        '    [7] Could not connect to server (Failed to connect to index.crates.io:443 over proxy 127.0.0.1 after 2017 ms)',
+    ]
+
+    def fail_cargo(argv, **kwargs):
+        assert kwargs['encoding'] == 'utf-8'
+        assert kwargs['errors'] == 'replace'
+        return subprocess.CompletedProcess(argv, 101, '', '\n'.join(stderr_lines))
+
+    monkeypatch.setattr(INSTALL.subprocess, 'run', fail_cargo)
+    with pytest.raises(SystemExit) as failure:
+        INSTALL.build()
+    msg = str(failure.value)
+    assert 'error: failed to get `pulldown-cmark`' in msg
+    assert 'HTTPS_PROXY=http://<redacted>@127.0.0.1:7898' in msg
+    assert 'super-secret' not in msg
+    assert 'alice' not in msg
+    assert os.environ['HTTPS_PROXY'] == 'http://alice:super-secret@127.0.0.1:7898'
+
+
+def test_windows_build_offline_passes_offline_flag(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(INSTALL, 'sys', SimpleNamespace(platform='win32', executable=sys.executable))
+    monkeypatch.setattr(INSTALL, 'CRATE', tmp_path)
+    fake_dll = tmp_path / 'vector_lake_core.dll'
+    fake_dll.write_bytes(b'fake-dll')
+    monkeypatch.setattr(INSTALL, 'DLL', fake_dll)
+    captured = []
+
+    def run_cargo(argv, **kwargs):
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 0, '', '')
+
+    monkeypatch.setattr(INSTALL.subprocess, 'run', run_cargo)
+    assert INSTALL.build(offline=True) == fake_dll
+    assert captured == [['cargo', '+stable-x86_64-pc-windows-msvc', 'build', '--release', '--locked', '--offline']]
+
+
+def test_no_build_rejects_stale_artifact_unless_allowed(tmp_path, monkeypatch):
+    crate_dir = tmp_path / 'crate'
+    (crate_dir / 'src').mkdir(parents=True)
+    for rel in ('Cargo.toml', 'Cargo.lock'):
+        p = crate_dir / rel
+        p.write_text('# stub\n', encoding='utf-8')
+        os.utime(p, (1000, 1000))
+    pyproject = crate_dir / 'pyproject.toml'
+    pyproject.write_text('[project]\nname = "vector-lake-core"\nversion = "0.2.8"\n', encoding='utf-8')
+    os.utime(pyproject, (1000, 1000))
+    rs_file = crate_dir / 'src' / 'lib.rs'
+    rs_file.write_text('// updated\n', encoding='utf-8')
+    dll = crate_dir / 'target' / 'release' / 'vector_lake_core.dll'
+    dll.parent.mkdir(parents=True)
+    dll.write_bytes(b'old-dll')
+    os.utime(dll, (1000, 1000))
+    os.utime(rs_file, (2000, 2000))
+
+    assert INSTALL._stale_source_files(dll, crate_dir) == [Path('src/lib.rs')]
+
+    monkeypatch.setattr(INSTALL, 'CRATE', crate_dir)
+    monkeypatch.setattr(INSTALL, 'PYPROJECT', pyproject)
+    monkeypatch.setattr(INSTALL, 'DLL', dll)
+    installed = []
+    activated = []
+    monkeypatch.setattr(INSTALL, 'install', lambda d, v: installed.append((d, v)) or d)
+    monkeypatch.setattr(INSTALL, 'activate', lambda v, check=True: activated.append(v))
+
+    with pytest.raises(SystemExit) as failure:
+        INSTALL.main(['--no-build'])
+    msg = str(failure.value)
+    assert 'stale build artifact' in msg
+    assert 'src/lib.rs' in msg
+    assert installed == []
+    assert activated == []
+
+    assert INSTALL.main(['--no-build', '--allow-stale']) == 0
+    assert installed == [(dll, '0.2.8')]
+    assert activated == ['0.2.8']

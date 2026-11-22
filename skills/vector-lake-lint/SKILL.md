@@ -43,12 +43,6 @@ triggers:
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - 检查 lint_vector_lake 返回结果是否有效。
-      - 确认 auto_fix 的执行范围。
-      - 验证 Sandbox 是否已正确隔离报告。
-    </thought>
     - Output a concise markdown report detailing the number of scanned nodes, identified issues, and resolved items.
   </output_format>
 

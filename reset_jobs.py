@@ -46,7 +46,12 @@ def main() -> int:
 
     with transaction():
         cursor = conn.execute(
-            "UPDATE jobs SET status = 'queued', lease_until = NULL "
+            "UPDATE jobs "
+            "SET status = 'queued', "
+            "    lease_owner = NULL, "
+            "    lease_token = NULL, "
+            "    lease_until = NULL, "
+            "    lease_generation = COALESCE(lease_generation, 0) + 1 "
             "WHERE status = 'dispatched' AND (lease_until IS NULL OR lease_until < ?)",
             (now,),
         )

@@ -29,7 +29,7 @@ Copy-Item config.example.json config.json
 
 `config.json` 核心字段说明：
 
-* `ingest.backend`：后台摄取的模型执行 CLI，可选 `pi`、`gemini`、`codex`，默认 `pi`。这是嵌套字段，不是顶层 `backend`，也不是模型名称或 MCP 客户端类型；所选 CLI 需安装在 Runner 所在主机并完成其原生认证，Pi 后端还需 subagent 能力。
+* `ingest.backend`：后台摄取的模型执行 CLI，可选 `pi`、`gemini`、`codex`、`agy`，默认 `pi`。这是嵌套字段，不是顶层 `backend`，也不是模型名称或 MCP 客户端类型；所选 CLI 需安装在 Runner 所在主机并完成其原生认证，Pi 后端还需 subagent 能力。
 * `memory_dir`：自定义 `MEMORY` 根目录；优先级为 `VECTOR_LAKE_MEMORY_DIR`、此字段、宿主历史默认路径。新部署建议显式设置绝对路径，避免误用宿主目录。
 * `target_directories`：摄入扫描目录；留空时扫描当前 `MEMORY/raw`，非空时替代默认目录（相对路径基于项目根目录）。
 * `exclude_paths`：默认排除 `stocks/`、`garmin/`、`personal-insights/`；配置会覆盖默认列表。另有代码级规则拒绝 `privacy/.../Diary/...` 来源，不能通过配置解除。
@@ -78,7 +78,7 @@ Watchdog 的 wiki/raw watcher 与后台循环统一接受线程监督，异常�
 
 `config.json` 与环境变量共同控制运行范围和模型调用。该文件是机器相关配置，**不入 git**：克隆后执行 `cp config.example.json config.json` 再按本机填写。文件缺失时使用代码内置默认值（含默认排除列表 `exclude_paths`），不会退化为“无排除”。
 
-* `ingest.backend`：后台摄取的模型执行 CLI，只接受 `pi` / `gemini` / `codex`；字段缺失或空对象时兼容默认 `pi`，非法值或未知 ingest 字段明确报错。它不等于连接 MCP 的客户端，所选 CLI 须安装在 Runner 所在主机/容器。
+* `ingest.backend`：后台摄取的模型执行 CLI，只接受 `pi` / `gemini` / `codex` / `agy`；字段缺失或空对象时兼容默认 `pi`，非法值或未知 ingest 字段明确报错。它不等于连接 MCP 的客户端，所选 CLI 须安装在 Runner 所在主机/容器。
 * `target_directories`：raw source 扫描路径。
 * `exclude_paths`：排除目录。
 * `supported_extensions`：当前启用的输入扩展名。
@@ -101,7 +101,7 @@ python scripts/ingest_model_cli.py --backend gemini --check
 
 Codex/Gemini 接缝使用原始素材和 dispatch snapshot，不继承 Pi 的 subagent 机制。适配器将工作目录设为任务临时目录，并配置禁用执行/文件工具、扩展、用户 MCP、hooks 与额外上下文读取；Codex 请求只读 sandbox 与 ephemeral 会话，Gemini 使用临时系统设置、空 core tools 和 deny-all policy。这些是 CLI 级限制，不是 OS 隔离，也不以本地参数检查替代实机效果验证。结果只经现有 `finalize_ingest` 入库；临时输出/设置结束后清理，不复制凭证，认证仍由 CLI 自身完成。处理来源前需确认数据与模型服务授权，配置字段不能替代授权。
 
-Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁用 feature gates；Gemini 要求 `--output-format` / `--extensions` / `--policy`。不支持这些能力的版本明确拒绝启动。CLI 探针仅核验本地参数，后端权限和供应商模型的实机行为仍需用脱敏样本独立验收。
+Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁用 feature gates；Gemini 要求 `--output-format` / `--extensions` / `--policy`；Antigravity (`agy`) 要求 `--input-format stream-json`、`--output-format stream-json`、`--mode plan`、`--sandbox`、`--settings`、`--json-schema`、`--print-timeout` 并注入拒绝所有工具与工作区外访问的临时 settings。不支持这些能力的版本明确拒绝启动。CLI 探针仅核验本地参数，后端权限和供应商模型的实机行为仍需用脱敏样本独立验收。
 
 配置在启动时读取，不热切换。状态记录 `effective_backend` 和 `selection_source`；Runner 另记 `resolved_model_command`，保留旧 `model_command` 布尔字段。`.runner_service.lock` 是所有入口的 root 级所有权门：直接 Runner 持有它，监督器只允许自己的实际子进程通过已占用的门；每个模型消费者还须持有 `.runner_consumer.lock`。冲突方不领取任务、不覆盖赢家 PID/状态，输出 requested/effective backend 和 `configuration_mismatch`；直接 Runner 冲突返回 `4`，监督器保留既有重复启动返回 `0` 的协议。未知/损坏旧记录报告 unknown，不声称新配置生效。仍在运行的旧无锁 Runner 会由其 PID 记录阻止并行启动；不会自动删除 PID 文件或终止旧进程。状态路径在写入时解析，避免导入时缓存跨越 root 隔离边界。
 
@@ -130,7 +130,8 @@ Codex 要求 `exec` 的输出 schema/最终消息/ephemeral 参数及工具禁�
 * `VECTOR_LAKE_RUNNER_EXPECTED=0`：不再把缺失的摄取 Runner 报为告警；用于不需要摄取的主机。
 * `VECTOR_LAKE_RUNNER_AUTOSTART=0`：不让 `watchdog_sync.py` 拉起并看护摄取 Runner（保留 `runner_absent` 告警，用于手工管理 Runner 的主机）。默认开启。
 * `VECTOR_LAKE_RUNNER_MODEL_CMD`：显式覆盖模型接缝命令。自动启动、手动监督器和直接 Runner 共用 `--model-cmd` > 此环境变量 > `config.json` 的 `ingest.backend` > 默认 Pi 的解析顺序；空白覆盖值忽略，非法配置仍报错。自定义命令维持原有 shell/stdin/stdout 协议，内置接缝按 Python argv 启动。
-* `VECTOR_LAKE_RUNNER_PI_BIN` / `VECTOR_LAKE_RUNNER_GEMINI_BIN` / `VECTOR_LAKE_RUNNER_CODEX_BIN`：对应 CLI 的可执行文件或 PATH 名称，默认 `pi` / `gemini` / `codex`。Pi 保留托管安装路径的后备解析；显式不可用的二进制不回退到其他安装或服务。`VECTOR_LAKE_RUNNER_SUBAGENT_AGENT` 仅适用于 Pi，默认项目级 `vector-lake-ingestor`（`.pi/agents/vector-lake-ingestor.md`，仅 `read` 工具、fresh 上下文，不继承全局/项目材料或技能）；默认 profile 缺失时拒绝替换为 reviewer。显式代理覆盖仍受所选代理自己的权限与输出契约约束。Pi 接缝从仓库根启动，原生任务包/模型结果验证与 `finalize_ingest` 不变。各接缝共用 `VECTOR_LAKE_RUNNER_MODEL_TIMEOUT`，Runner 另读 `VECTOR_LAKE_RUNNER_COOLDOWN`。
+* `VECTOR_LAKE_RUNNER_PI_BIN` / `VECTOR_LAKE_RUNNER_GEMINI_BIN` / `VECTOR_LAKE_RUNNER_CODEX_BIN` / `VECTOR_LAKE_RUNNER_AGY_BIN`：对应 CLI 的可执行文件或 PATH 名称，默认 `pi` / `gemini` / `codex` / `agy`。Pi 保留托管安装路径的后备解析；显式不可用的二进制不回退到其他安装或服务。`VECTOR_LAKE_RUNNER_SUBAGENT_AGENT` 仅适用于 Pi，默认项目级 `vector-lake-ingestor`（`.pi/agents/vector-lake-ingestor.md`，fresh 上下文，不继承全局/项目材料或技能）；默认 profile 缺失时拒绝替换为 reviewer。显式代理覆盖仍受所选代理自己的权限与输出契约约束。Pi 接缝从仓库根启动，原生任务包/模型结果验证与 `finalize_ingest` 不变。各接缝共用 `VECTOR_LAKE_RUNNER_MODEL_TIMEOUT`，Runner 另读 `VECTOR_LAKE_RUNNER_COOLDOWN`。
+* `VECTOR_LAKE_SQLITE_PAGE_SIZE`：新建 SQLite 库（或经 `reclaim_free_space` 离线/无读锁窗口切出 WAL 时）的目标页大小（字节，默认 `16384`，仅接受 `512..65536` 的 2 次幂）。存在活跃 WAL 读连接且空闲空间低于阈值时跳过空跑 `VACUUM`。
 * `VECTOR_LAKE_RUNNER_REPAIR_ATTEMPTS`：可修正的输出/格式错误在 `finalize_ingest` 拒绝后最多修正的轮数（默认 `2`；`0` 关闭）。各轮共享同一模型截止时间，不另领超时预算；源变化、过期版本或租约冲突不进入模型格式修正，须重新派发。缺失版本字段与真正的陈旧版本不同，仍可由模型修正。重试不能替代校验。
 * `VECTOR_LAKE_RUNNER_SHADOW=1`：让自动拉起的 Runner 不写 Wiki 页面，默认关闭。直接运行 `scripts/ingest_runner.py` 默认 shadow，使用 `--no-shadow` 才写页；shadow 跳过模型调用，但仍会认领任务、处理重复来源并记录运行状态，不是零副作用模式。
 * `VECTOR_LAKE_CATCHUP_INTERVAL_SECONDS`：守护进程的周期性兜底间隔，单位是**秒**，不是启用开关。部署示例采用 `600` 秒（10 分钟）；未设置时应用缺省为 `900` 秒，`0` 关闭，`1` 表示每轮结束后仅等待 1 秒。兜底做三件事：按扫描规则准备尚未处理或内容已变更的 raw、把超过时限的陈旧摄取任务作废、以及按批次重建缺失或输入已变的向量。它不把所有“缺少 Source 页面”的已处理记录自动重摄入；历史拒收、信任基线和校验隔离不自动改写；恢复旧拒收使用显式受控重编清单，不清空队列或手改哈希。
@@ -208,7 +209,7 @@ SQL-backed 词法节点在可选向量工作前完成物化。到期后上下文
 
 ## MCP 客户端接入 (MCP Client Configuration)
 
-知序（KnowWeave）以标准 Model Context Protocol (MCP) 向宿主（Pi、Claude Desktop、Cursor 等）暴露 20 个工具；准确注册面由 `mcp_server.py` 与 `tests/test_command_surface.py` 核验。
+知序（KnowWeave）以标准 Model Context Protocol (MCP) 向宿主（Pi、Claude Desktop、Cursor 等）暴露 23 个工具；准确注册面由 `mcp_server.py` 与 `tests/test_command_surface.py` 核验。
 
 **在客户端配置文件（如 `claude_desktop_config.json` 或 `.mcp.json`）中添加：**
 

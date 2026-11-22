@@ -4,7 +4,7 @@
 
 ## 当前交付边界
 
-- Windows x64 0.2.5 包已由已有、输入哈希匹配的构建导出，并在没有 Cargo/rustc/maturin 的新环境中实测安装。
+- Windows x64 0.2.8 包须由输入哈希匹配的构建导出（修改 `crates/vector_lake_core/src/*.rs` 后需在在线或 CI `native` 通道通过 `maturin build --release --locked` 重新构建），并在没有 Cargo/rustc/maturin 的新环境中安装验收。
 - `.github/workflows/native-wheels.yml` 配置 Windows x64、macOS arm64/x64、Linux x64 自动构建和隔离安装验证。远程工作流尚未执行，不能视为这些平台已通过。
 - **尚无公开 Release/PyPI 下载渠道。CI 当前只生成任务临时目录中的包，不上传或发布，任务结束后不能下载它。** Windows 本地包可以由获授权的所有者供可信本地测试使用；其他平台需先执行实际构建。
 - 尝试引入的上传 action 在锁定依赖的公开漏洞查询中有版本匹配，尚未核清可达性，因此没有加入最终工作流。这不是已证实利用，也不是对所有上传方式的否定。分发渠道应另行审查接入。

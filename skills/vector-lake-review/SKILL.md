@@ -28,13 +28,13 @@ triggers: When the user asks to review the Vector Lake governance queue, pending
     <step1>Invoke the `review_governance_list` MCP tool from the `Reson-KnowWeave-mcp` server to list all pending review items.</step1>
     <step2>Extract and call out the visible pending index and preserve the stable item_id for each item.</step2>
     <step3>If the user requests to resolve an item, use the `resolve_governance_item` MCP tool after approval.</step3>
-    <step4>If an item points to a missing page gap, suggest using the `trigger_autonomous_research` MCP tool to fetch real internet data.</step4>
+    <step4>If an item points to a missing page gap, suggest using `python cli.py research [--dry-run]` via CLI to formulate research targets.</step4>
   </workflow>
 
   <tool_dispatch>
     - `review_governance_list` (Reson-KnowWeave-mcp): To list all pending review items.
     - `resolve_governance_item` (Reson-KnowWeave-mcp): To resolve a specific item.
-    - `trigger_autonomous_research` (Reson-KnowWeave-mcp): To fetch real internet data to fill a missing page gap.
+    - `bash`: `python cli.py research [--dry-run]` to scan missing page gaps and formulate research targets.
     - `invoke_subagent`: Required for concurrent tasks.
   </tool_dispatch>
 
@@ -45,12 +45,6 @@ triggers: When the user asks to review the Vector Lake governance queue, pending
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Reviewing governance list structure.
-      - Mapping missing gaps to research triggers.
-      - Verifying item_id stability in output.
-    </thought>
     - Present the items clearly using Markdown.
     - Call out the visible pending index.
     - Preserve and explicitly state the stable item_id shown by the tool.

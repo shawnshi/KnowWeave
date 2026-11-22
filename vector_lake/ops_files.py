@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
+import time
 
 
 if os.name == 'nt':
@@ -22,7 +23,8 @@ if os.name == 'nt':
     def _windows_open(path, directory=False):
         flags = 0x00200000 | (0x02000000 if directory else 0)  # OPEN_REPARSE_POINT / BACKUP_SEMANTICS
         access = 0x80000000
-        handle = _kernel.CreateFileW(str(path), access, 3, None, 3, flags, None)  # no FILE_SHARE_DELETE
+        share = 3 if directory else 7  # keep no FILE_SHARE_DELETE on directories; allow delete-share on regular files
+        handle = _kernel.CreateFileW(str(path), access, share, None, 3, flags, None)
         if handle == ctypes.c_void_p(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
         attributes = _Attributes()
@@ -107,10 +109,17 @@ def atomic_public(parent, filename, temporary, data):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        if os.name == 'nt':
-            os.replace(tmp, target)
-        else:
-            os.replace(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent)
+        for attempt in range(5):
+            try:
+                if os.name == 'nt':
+                    os.replace(tmp, target)
+                else:
+                    os.replace(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
     finally:
         try:
             if os.name == 'nt':

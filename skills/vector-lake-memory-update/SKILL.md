@@ -50,12 +50,6 @@ triggers: When the user requests to save a preference, decision, fact, or task s
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Verification of `memory_type` enum constraints.
-      - Confirmation that no local filesystem edits (write_to_file) were attempted on memory files.
-      - Validation of user approval state at Fable 5 checkpoint.
-    </thought>
     Return a standardized markdown confirmation detailing the classified type and the content successfully registered in Vector Lake.
   </output_format>
 

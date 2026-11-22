@@ -59,11 +59,6 @@ triggers: When the user asks to check projection health, inspect index drift, tr
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - 检查每个投影的状态是否与权威源对齐。
-      - 核对是否有未入库的 outbox lag 或未嵌入向量。
-    </thought>
     Present a clean markdown summary of the 8 projections, their state, and recommended remediation if any degradation is observed.
   </output_format>
 

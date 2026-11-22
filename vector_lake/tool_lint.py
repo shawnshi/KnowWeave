@@ -39,12 +39,10 @@ from vector_lake.node_vocabulary import (
     strip_prefix,
 )
 
-try:
-    import vector_lake_core
-    HAVE_CORE = True
-except ImportError:
-    vector_lake_core = None
-    HAVE_CORE = False
+from vector_lake.native_core import load_native_core
+
+vector_lake_core, _CORE_LOAD_ERROR = load_native_core()
+HAVE_CORE = vector_lake_core is not None
 
 
 # ``VALID_STATUS`` is capitalised while the check below lowercases the page value,

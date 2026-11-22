@@ -33,9 +33,9 @@
 ### 1\. 环境与部署路径
 
 * Python **≥ 3.10**；目标系统为 Windows 11+、macOS 26+，以及符合内核要求的指定 Linux 发行版。目标与实际验收范围见 [平台说明](docs/PLATFORM_SUPPORT.md)，不能把 CI 配置当成已实测支持。
-* **基础部署**可不安装可选 `vector_lake_core`；相关能力会按各自契约降级或提示不可用。其他依赖如 rjieba 仍含原生二进制，这不是“禁用所有 Rust/C 扩展”。
+* **基础部署**可不安装可选 `vector_lake_core`；相关能力会按各自契约降级或提示不可用；加载路径由 `vector_lake/native_core.py` 执行 ABI 版本门禁（当前期望 `0.2.8`），版本不匹配时自动回落纯 Python 并告警。本地从源码更新构建通过 `scripts/install_core.py` 写入版本化不可变槽位，支持 `--offline` 离线构建，并在 `--no-build` 模式下默认拦阻陈旧构建产物（须显式传 `--allow-stale` 才放行）。其他依赖如 rjieba 仍含原生二进制，这不是“禁用所有 Rust/C 扩展”。
 * **预编译核心部署**仅在已取得可信、匹配 checkout / 平台的包时使用 [免编译安装](docs/NATIVE_WHEELS.md)。当前没有公开 Release/PyPI 核心下载渠道；CI 构建包只在任务临时目录，不可据此下载。普通部署不安装 Rust/Cargo/maturin，缺包不自动源码编译。
-* **完整摄取**另需选择并安装 Pi / Gemini / Codex CLI，在运行它的同一用户身份下完成认证。安装 Python SDK、配置 embedding Key 或通过 `--check`，都不能证明文本模型已经可用。
+* **完整摄取**另需选择并安装 Pi / Gemini / Codex / AGY CLI，在运行它的同一用户身份下完成认证。安装 Python SDK、配置 embedding Key 或通过 `--check`，都不能证明文本模型已经可用。
 
 以下主线使用 **Windows PowerShell、仓库根目录、已激活的项目 venv**。不要在未激活的新终端照抄裸 `python`。如果激活脚本受本机策略限制，不修改全局策略；将下文每个 `python` 替换为 `.\.venv\Scripts\python.exe` 的实际路径。macOS/Linux 使用 `python3 -m venv .venv` 与 `source .venv/bin/activate`，其平台构建/验收限制仍适用。
 
@@ -67,7 +67,7 @@ Copy-Item 'docs/examples/purpose.md' (Join-Path $MemoryRoot 'purpose.md')
 $config = Get-Content 'config.example.json' -Raw | ConvertFrom-Json
 $config.memory_dir = $MemoryRoot
 $config.target_directories = @((Join-Path $MemoryRoot 'raw'))
-$config.ingest.backend = 'pi' # 也可选 gemini / codex，须先安装并认证对应 CLI
+$config.ingest.backend = 'pi' # 也可选 gemini / codex / agy，须先安装并认证对应 CLI
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path (Get-Location) 'config.json'), ($config | ConvertTo-Json -Depth 8), $utf8)
 $env:VECTOR_LAKE_MEMORY_DIR = $MemoryRoot
@@ -174,7 +174,7 @@ flowchart LR
 |FTS5 / 图检索 / rjieba|全文、CJK 分词与图扩展|核心检索路径；rjieba 是原生绑定，不存在纯 Python jieba 回退|
 |Gemini embedding / sqlite-vec、可选 Tantivy|向量检索与搜索镜像|依赖凭据/配置/实际可用性，缺失不能冒充健康|
 |Rust `vector_lake_core`|图、解析、重排等可选加速|可选；不同入口的降级契约不同|
-|Pi / Gemini / Codex CLI|宿主侧文本模型调用|自动文本摄取需选其一，认证和权限独立于 embedding|
+|Pi / Gemini / Codex / AGY CLI|宿主侧文本模型调用|自动文本摄取需选其一，认证和权限独立于 embedding|
 
 **MCP** 提供 Agent 工具，不替代后台消费；**Watchdog** 消费 outbox、监听和维护，并默认看护真实写页的 Runner；**Runner** 领取作业、调用模型并提交校验结果。只读检索可不启动守护，发生写入后需要消费 outbox。常驻与手工 Runner 不应对同一个 MEMORY 根并跑。
 
@@ -270,11 +270,11 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 |首次部署配置|建议 / 行为|
 |-|-|
 |`memory_dir`|显式绝对路径；实际优先级为 `VECTOR_LAKE_MEMORY_DIR` → `config.json` → 宿主历史默认目录|
-|`ingest.backend`|选择 `pi` / `gemini` / `codex`；后端选择为 `--model-cmd` → `VECTOR_LAKE_RUNNER_MODEL_CMD` → 文件配置 → Pi|
+|`ingest.backend`|选择 `pi` / `gemini` / `codex` / `agy`；后端选择为 `--model-cmd` → `VECTOR_LAKE_RUNNER_MODEL_CMD` → 文件配置 → Pi|
 |`target_directories`|新演示显式指定 MEMORY/raw 的绝对路径；留空使用当前 MEMORY/raw，相对路径以仓库根目录为基准|
 |`exclude_paths` / `supported_extensions`|保留隐私排除；默认处理 `.md` / `.txt`，不自动解析 PDF 等格式|
 |`purpose.md`|版本化目的、范围、证据层级和 SIR 复审合同；[演示模板](docs/examples/purpose.md) 不是正式业务政策|
-|`GEMINI_API_KEY`|仅用于 embedding；不是 Pi/Gemini/Codex 文本认证的统一替代品|
+|`GEMINI_API_KEY`|仅用于 embedding；不是 Pi/Gemini/Codex/AGY 文本认证的统一替代品|
 |`VECTOR_LAKE_RUNNER_AUTOSTART` / `VECTOR_LAKE_RUNNER_SHADOW`|控制自动 Runner；shadow 仍有队列/状态副作用，不能当只读模式|
 
 **凭据来源不能混为一谈：**普通 `cli.py` 的非 `ops-status` 分支在存在时会加载 `~/.gemini/.env`，默认不覆盖已设置的环境变量；它不是自动读取仓库 `.env`。`ops-status` 提前走显式路径的只读分支。MCP、Watchdog 与直接 Runner 不通过 CLI 的该加载分支，凭据应由各自宿主/任务环境或所选 CLI 的原生认证提供。不要把不相关凭据复制进项目配置。
@@ -286,11 +286,11 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 
 |类别|开关|说明|
 |-|-|-|
-|Runner 执行与恢复|`VECTOR_LAKE_RUNNER_AUTOSTART`、`VECTOR_LAKE_RUNNER_CODEX_BIN`、`VECTOR_LAKE_RUNNER_CONCURRENCY`、`VECTOR_LAKE_RUNNER_COOLDOWN`、`VECTOR_LAKE_RUNNER_EXPECTED`、`VECTOR_LAKE_RUNNER_GEMINI_BIN`、`VECTOR_LAKE_RUNNER_HOLD_SHADOW_LEASE`、`VECTOR_LAKE_RUNNER_MODEL_CMD`、`VECTOR_LAKE_RUNNER_MODEL_TIMEOUT`、`VECTOR_LAKE_RUNNER_PI_BIN`、`VECTOR_LAKE_RUNNER_REPAIR_ATTEMPTS`、`VECTOR_LAKE_RUNNER_SHADOW`、`VECTOR_LAKE_RUNNER_STALE_SECONDS`、`VECTOR_LAKE_RUNNER_STRICT`、`VECTOR_LAKE_RUNNER_SUBAGENT_AGENT`|[参考](docs/CONFIGURATION.md)|
+|Runner 执行与恢复|`VECTOR_LAKE_RUNNER_AGY_BIN`、`VECTOR_LAKE_RUNNER_AUTOSTART`、`VECTOR_LAKE_RUNNER_CODEX_BIN`、`VECTOR_LAKE_RUNNER_CONCURRENCY`、`VECTOR_LAKE_RUNNER_COOLDOWN`、`VECTOR_LAKE_RUNNER_EXPECTED`、`VECTOR_LAKE_RUNNER_GEMINI_BIN`、`VECTOR_LAKE_RUNNER_HOLD_SHADOW_LEASE`、`VECTOR_LAKE_RUNNER_MODEL_CMD`、`VECTOR_LAKE_RUNNER_MODEL_TIMEOUT`、`VECTOR_LAKE_RUNNER_PI_BIN`、`VECTOR_LAKE_RUNNER_REPAIR_ATTEMPTS`、`VECTOR_LAKE_RUNNER_SHADOW`、`VECTOR_LAKE_RUNNER_STALE_SECONDS`、`VECTOR_LAKE_RUNNER_STRICT`、`VECTOR_LAKE_RUNNER_SUBAGENT_AGENT`|[参考](docs/CONFIGURATION.md)|
 |原生与图计算|`VECTOR_LAKE_CORE_VERSION`、`VECTOR_LAKE_TOKENIZER`|[参考](docs/CONFIGURATION.md)|
 |摄取与补扫|`VECTOR_LAKE_AUTHOR_SOURCES`、`VECTOR_LAKE_CATCHUP_EMBEDDING_BATCH`、`VECTOR_LAKE_CATCHUP_EMBEDDING_BUDGET_SECONDS`、`VECTOR_LAKE_CATCHUP_INTERVAL_SECONDS`、`VECTOR_LAKE_MAX_AWAITING_SUBAGENT_AGE_SECONDS`、`VECTOR_LAKE_MAX_AWAITING_SUBAGENT_JOBS`、`VECTOR_LAKE_SOURCE_RANK_PENALTY`、`VECTOR_LAKE_SUBAGENT_BACKLOG_BLOCKING`、`VECTOR_LAKE_SUBAGENT_RUN_ID`|[参考](docs/CONFIGURATION.md)|
 |数据路径与载荷|`VECTOR_LAKE_DB_PATH`、`VECTOR_LAKE_MEMORY_DIR`、`VECTOR_LAKE_MEMORY_GRAM_LATENCY_SEARCHES`、`VECTOR_LAKE_MEMORY_GRAM_MAX_BASE_AGE_SECONDS`、`VECTOR_LAKE_MEMORY_SEARCH`、`VECTOR_LAKE_OUTBOX_PAYLOAD_KEEP_DAYS`、`VECTOR_LAKE_PAYLOAD_MAX_BYTES`、`VECTOR_LAKE_PAYLOAD_ROOT`|[参考](docs/CONFIGURATION.md)|
-|检索、索引与运维|`VECTOR_LAKE_AUTHOR_ANNOTATE`、`VECTOR_LAKE_AUTHOR_BOOST`、`VECTOR_LAKE_AUTHOR_FACET`、`VECTOR_LAKE_BACKUP_KEEP`、`VECTOR_LAKE_BACKUP_MAX_BYTES`、`VECTOR_LAKE_CANDIDATE_DEPTH`、`VECTOR_LAKE_CANDIDATE_POOL`、`VECTOR_LAKE_CLAIM_BLOCKS`、`VECTOR_LAKE_DISABLE_WRITE_HEALTH_GATE`、`VECTOR_LAKE_EMBEDDING_DIMENSION`、`VECTOR_LAKE_EMBEDDING_MAX_BATCH_ITEMS`、`VECTOR_LAKE_EMBEDDING_MAX_BATCH_TOKENS`、`VECTOR_LAKE_EMBEDDING_MAX_CHARS_PER_ITEM`、`VECTOR_LAKE_EMBEDDING_MAX_CONSECUTIVE_FAILURES`、`VECTOR_LAKE_EMBEDDING_MAX_RETRIES`、`VECTOR_LAKE_EMBEDDING_MAX_TOKENS_PER_ITEM`、`VECTOR_LAKE_EMBEDDING_MODEL`、`VECTOR_LAKE_EMBEDDING_PREWARM`、`VECTOR_LAKE_EMBEDDING_RPM`、`VECTOR_LAKE_EMBEDDING_RUN_STALE_SECONDS`、`VECTOR_LAKE_EMBEDDING_TIMEOUT_MS`、`VECTOR_LAKE_EMBEDDING_TPM`、`VECTOR_LAKE_EMBEDDING_TRANSPORT`、`VECTOR_LAKE_EMBEDDING_UTILIZATION`、`VECTOR_LAKE_ENTITY_NAME_PRIORITY`、`VECTOR_LAKE_EXPANSION_QUOTA`、`VECTOR_LAKE_FALLBACK_REPARSE_SECONDS`、`VECTOR_LAKE_FTS`、`VECTOR_LAKE_FUSION`、`VECTOR_LAKE_IGNORE_SCHEDULED_LINT_STATE`、`VECTOR_LAKE_LEIDEN_L0_RESOLUTION`、`VECTOR_LAKE_LEIDEN_L1_RESOLUTION`、`VECTOR_LAKE_LEIDEN_SEED`、`VECTOR_LAKE_METADATA_FIRST`、`VECTOR_LAKE_MODEL_DEADLINE_MONOTONIC`、`VECTOR_LAKE_NO_BROWSER`、`VECTOR_LAKE_NUMERIC_THREADS`、`VECTOR_LAKE_OUTBOX_BACKLOG_BLOCKING`、`VECTOR_LAKE_OUTBOX_FAILURE_NONBLOCKING`、`VECTOR_LAKE_OUTBOX_MAX_BACKLOG`、`VECTOR_LAKE_OUTBOX_MAX_PENDING_AGE_SECONDS`、`VECTOR_LAKE_QUERY_CONTEXT_TTL`、`VECTOR_LAKE_RECLAIM_FREE_SPACE`、`VECTOR_LAKE_RERANK_WEIGHT`、`VECTOR_LAKE_SEARCH_LEDGER`、`VECTOR_LAKE_SQLITE_CACHE_KIB`、`VECTOR_LAKE_SQLITE_MMAP_BYTES`、`VECTOR_LAKE_STALE_TASK_MAX_AGE_SECONDS`、`VECTOR_LAKE_TERMINAL_FAILED_JOBS_BLOCKING`、`VECTOR_LAKE_TIMELINE_PARITY_BLOCKING`、`VECTOR_LAKE_VECTOR_INDEX`、`VECTOR_LAKE_VECTOR_SIM_SCALE`、`VECTOR_LAKE_WRITE_LOCK_CONTENTION_WINDOW_SECONDS`|[参考](docs/CONFIGURATION.md)|
+|检索、索引与运维|`VECTOR_LAKE_AUTHOR_ANNOTATE`、`VECTOR_LAKE_AUTHOR_BOOST`、`VECTOR_LAKE_AUTHOR_FACET`、`VECTOR_LAKE_BACKUP_KEEP`、`VECTOR_LAKE_BACKUP_MAX_BYTES`、`VECTOR_LAKE_CANDIDATE_DEPTH`、`VECTOR_LAKE_CANDIDATE_POOL`、`VECTOR_LAKE_CLAIM_BLOCKS`、`VECTOR_LAKE_DISABLE_WRITE_HEALTH_GATE`、`VECTOR_LAKE_EMBEDDING_DIMENSION`、`VECTOR_LAKE_EMBEDDING_MAX_BATCH_ITEMS`、`VECTOR_LAKE_EMBEDDING_MAX_BATCH_TOKENS`、`VECTOR_LAKE_EMBEDDING_MAX_CHARS_PER_ITEM`、`VECTOR_LAKE_EMBEDDING_MAX_CONSECUTIVE_FAILURES`、`VECTOR_LAKE_EMBEDDING_MAX_RETRIES`、`VECTOR_LAKE_EMBEDDING_MAX_TOKENS_PER_ITEM`、`VECTOR_LAKE_EMBEDDING_MODEL`、`VECTOR_LAKE_EMBEDDING_PREWARM`、`VECTOR_LAKE_EMBEDDING_RPM`、`VECTOR_LAKE_EMBEDDING_RUN_STALE_SECONDS`、`VECTOR_LAKE_EMBEDDING_TIMEOUT_MS`、`VECTOR_LAKE_EMBEDDING_TPM`、`VECTOR_LAKE_EMBEDDING_TRANSPORT`、`VECTOR_LAKE_EMBEDDING_UTILIZATION`、`VECTOR_LAKE_ENTITY_NAME_PRIORITY`、`VECTOR_LAKE_EXPANSION_QUOTA`、`VECTOR_LAKE_FALLBACK_REPARSE_SECONDS`、`VECTOR_LAKE_FTS`、`VECTOR_LAKE_FUSION`、`VECTOR_LAKE_IGNORE_SCHEDULED_LINT_STATE`、`VECTOR_LAKE_LEIDEN_L0_RESOLUTION`、`VECTOR_LAKE_LEIDEN_L1_RESOLUTION`、`VECTOR_LAKE_LEIDEN_SEED`、`VECTOR_LAKE_METADATA_FIRST`、`VECTOR_LAKE_MODEL_DEADLINE_MONOTONIC`、`VECTOR_LAKE_NO_BROWSER`、`VECTOR_LAKE_NUMERIC_THREADS`、`VECTOR_LAKE_OUTBOX_BACKLOG_BLOCKING`、`VECTOR_LAKE_OUTBOX_FAILURE_NONBLOCKING`、`VECTOR_LAKE_OUTBOX_MAX_BACKLOG`、`VECTOR_LAKE_OUTBOX_MAX_PENDING_AGE_SECONDS`、`VECTOR_LAKE_QUERY_CONTEXT_TTL`、`VECTOR_LAKE_RECLAIM_FREE_SPACE`、`VECTOR_LAKE_RERANK_WEIGHT`、`VECTOR_LAKE_SEARCH_LEDGER`、`VECTOR_LAKE_SQLITE_CACHE_KIB`、`VECTOR_LAKE_SQLITE_MMAP_BYTES`、`VECTOR_LAKE_SQLITE_PAGE_SIZE`、`VECTOR_LAKE_STALE_TASK_MAX_AGE_SECONDS`、`VECTOR_LAKE_TERMINAL_FAILED_JOBS_BLOCKING`、`VECTOR_LAKE_TIMELINE_PARITY_BLOCKING`、`VECTOR_LAKE_VECTOR_INDEX`、`VECTOR_LAKE_VECTOR_SIM_SCALE`、`VECTOR_LAKE_WRITE_LOCK_CONTENTION_WINDOW_SECONDS`|[参考](docs/CONFIGURATION.md)|
 
 </details>
 
@@ -311,7 +311,7 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 |**自愈体检与安全写入**|`lint_vector_lake` · `doctor_vector_lake` · `runtime_identity` · `rename_entity` · `write_wiki_page` · `get_mutation_status` · `inspect_projections`|Schema 审计、运行环境体检、当前进程加载指纹、受控写入与可追踪回执；canonical 提交不等于 Markdown／索引投影完成|
 |**拓扑可视化**|`visualize_vector_lake`|离线 2D 优先、按需启用 3D 的静态 HTML 知识经纬快照；展示图不构成证据认证|
 
-写入回执区分 canonical 提交与后续发布进度；使用 `get_mutation_status` 按 Outbox ID 追踪 Markdown／索引阶段。完成必须绑定精确的当前 canonical 目标与原生完成状态；superseded 只沿有界、同页等价的原生后继核验，不把任意新版本或旧意图直接当成已完成。`runtime_identity` 只观察实际调用进程的已加载代码，不会重载服务；磁盘文件更新后，仍需重启或重载相应宿主。
+写入回执区分 canonical 提交与后续发布进度；使用 `get_mutation_status` 按 Outbox ID 追踪 Markdown／索引阶段。完成必须绑定精确的当前 canonical 目标与原生完成状态；superseded 只沿有界、同页等价的原生后继核验，不把任意新版本或旧意图直接当成已完成。`runtime_identity` 只观察实际调用进程的已加载代码与原生扩展来源（兼容直接安装与 `vector_lake_core_<ver>` 增量槽位，拒绝多源并发加载或 shim `_impl` 漂移），不会重载服务；磁盘文件更新后，仍需重启或重载相应宿主。
 
 ### 写入完成不等于所有派生投影就绪
 
@@ -445,6 +445,9 @@ python cli.py merge-suggestions --limit 20
 python cli.py graph
 # 两者默认仅预览；显式 --apply 才写入，仍须另行授权。
 python cli.py gc --days 30
+python cli.py gc --days 30 --domain Medical_IT --apply --force
+python cli.py outbox
+python cli.py outbox --retry --apply
 python cli.py delete "<raw-source-path>"
 ```
 
@@ -559,6 +562,8 @@ node --test tests/topology_ui.test.cjs
 |`vector_lake/claim_extractor.py` / `claim_migration.py`|完整断言身份、来源归属及显式分页迁移|
 |`vector_lake/tool_relations.py`|有界关系读取及缺口／来源说明|
 |`vector_lake/watchdog_app.py`|常驻消费与维护|
+|`vector_lake/native_core.py`|可选 Rust 原生扩展（`vector_lake_core`）ABI 版本门禁与受控加载|
+|`vector_lake/runtime_identity.py`|只读进程身份、字节码指纹与原生扩展来源观测|
 |`scripts/ingest_runner.py`|宿主侧模型调用与结果提交|
 
 完整 [模块地图与技术细节](docs/ARCHITECTURE.md#module-map)、[运行限制与恢复](docs/OPERATIONS.md)、[配置参考](docs/CONFIGURATION.md)。本项目不随附 slash command 兼容层，MCP 是 Agent 主接口。

@@ -463,7 +463,7 @@ def test_project_ingestor_profile_has_only_read_and_no_ambient_context():
     profile = REPO / ".pi" / "agents" / "vector-lake-ingestor.md"
     parts = profile.read_text(encoding="utf-8").split("---", 2)
     metadata = yaml.safe_load(parts[1])
-    assert metadata["tools"] == "read"
+    assert metadata["tools"] == ""
     assert metadata["defaultContext"] == "fresh"
     assert metadata["acceptanceRole"] == "read-only"
     assert metadata["extensions"] == ""

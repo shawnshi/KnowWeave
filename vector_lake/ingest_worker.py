@@ -38,9 +38,32 @@ def _subagent_ingest_prompt(instructions: str) -> str:
     )
 
 
+def _runner_paused_or_open() -> str | None:
+    from vector_lake.wiki_utils import get_meta_dir
+
+    status_path = get_meta_dir() / "runtime" / "runner_status.json"
+    try:
+        record = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    state = str(record.get("status") or "").lower()
+    if state in {"paused", "backend_paused"}:
+        return f"runner status is {state}"
+    backend = record.get("backend")
+    if isinstance(backend, dict) and str(backend.get("status") or "").lower() == "open":
+        return "runner backend circuit is open"
+    return None
+
+
 def process_jobs():
     from vector_lake.tool_ingest import requeue_legacy_ingest_jobs, refresh_ingest_dispatch_payload
 
+    pause_reason = _runner_paused_or_open()
+    if pause_reason:
+        log.info("Skipping ingest dispatch because %s", pause_reason)
+        return
     requeue_legacy_ingest_jobs()
     # Short lease: this step only builds a task packet and marks the job awaiting, which is
     # milliseconds of local work.  It used to claim for an hour, so a restart (or a crash) between

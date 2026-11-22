@@ -1,11 +1,11 @@
 import hashlib
 import calendar
-import pickle
 from functools import lru_cache
 import json
 import re
 from datetime import date, datetime, timezone
 from contextlib import nullcontext
+from vector_lake import retrieval_runtime
 from vector_lake.db_store import get_connection, init_db, read_snapshot
 
 # An event-ledger entry carries its date, and optionally its event tag, as a text prefix:
@@ -179,9 +179,8 @@ def _timeline_claims_fingerprint(conn=None) -> str:
     for statement in statements:
         digest.update(statement.encode("utf-8"))
         for row in conn.execute(statement):
-            # Serialization-only C encoding avoids the measured JSON/UTF-8 copy cost;
-            # SQLite supplies primitives and no pickle is ever loaded or persisted.
-            encoded = pickle.dumps(tuple(row), protocol=4)
+            # Deterministic UTF-8 JSON row serialization without pickle.
+            encoded = json.dumps(tuple(row), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
             digest.update(len(encoded).to_bytes(8, "big"))
             digest.update(encoded)
     from vector_lake.db_store import get_db_path
@@ -369,22 +368,28 @@ def _timeline_projection_health() -> dict:
     if readonly and cached.get("fingerprint") == fingerprint and cached.get("health") is not None:
         health = cached["health"]
     else:
-        actual_ids = {str(row[0]) for row in conn.execute("SELECT id FROM timeline_events")}
-        expected_ids = set()
-        mismatches = coarse = 0
         columns = ", ".join(_PAYLOAD_FIELDS)
-
-        @lru_cache(maxsize=4096)
-        def title(key):
-            row = conn.execute("SELECT canonical_name FROM entities WHERE entity_id = ?", (key,)).fetchone()
-            return str(row[0] or key) if row else key
-
-        rows = conn.execute("SELECT claim_id, claim_text, data_json, updated_at FROM claims WHERE f_claim_type = 'timeline-event'")
+        actual_map = {
+            str(r["id"]): r
+            for r in conn.execute(f"SELECT id, {columns} FROM timeline_events")
+        }
+        actual_ids = set(actual_map.keys())
+        rows = conn.execute(
+            "SELECT claim_id, claim_text, data_json, updated_at FROM claims WHERE f_claim_type = 'timeline-event'"
+        ).fetchall()
+        subject_lists = []
+        subject_ids: set[str] = set()
         for row in rows:
             subjects = _claim_subject_ids(json.loads(row["data_json"]))
-            event = _event_from_claim_row(row, {key: title(key) for key in subjects})
+            subject_lists.append(subjects)
+            subject_ids.update(subjects)
+        entity_titles = _entity_title_map(subject_ids) if subject_ids else {}
+        expected_ids = set()
+        mismatches = coarse = 0
+        for row, subjects in zip(rows, subject_lists):
+            event = _event_from_claim_row(row, {key: entity_titles.get(key, key) for key in subjects})
             expected_ids.add(event["id"])
-            actual = conn.execute(f"SELECT {columns} FROM timeline_events WHERE id = ?", (event["id"],)).fetchone()
+            actual = actual_map.get(event["id"])
             mismatches += bool(actual and any(actual[field] != event[field] for field in _PAYLOAD_FIELDS))
             coarse += event["event_date"] is not None and event["event_date_source"] == DATE_SOURCE_COARSE
         health = {
@@ -528,9 +533,12 @@ def search_timeline_events(entity_name: str | None = None, action: str | None = 
     everything or nothing while reading as if it discriminated.  The column stays for a
     future producer; the parameter comes back with it.
     """
-    conn = get_connection()
-    with nullcontext(conn) if conn.in_transaction else read_snapshot():
-        return _search_timeline_events(entity_name, action, limit)
+    scope_query = (str(entity_name or "").strip() or str(action or "").strip() or "timeline")[:retrieval_runtime.MAX_QUERY_CHARS]
+    with retrieval_runtime.request_scope(scope_query):
+        conn = get_connection()
+        retrieval_runtime.track_connection(conn)
+        with nullcontext(conn) if conn.in_transaction else read_snapshot():
+            return _search_timeline_events(entity_name, action, limit)
 
 
 def _search_timeline_events(entity_name, action, limit):
@@ -593,18 +601,22 @@ def _search_timeline_events(entity_name, action, limit):
     query = "SELECT claim_id, claim_text, data_json, updated_at FROM claims WHERE f_claim_type = 'timeline-event'"
     params = []
 
-    def subject_field(raw, title):
+    def subject_field(raw, title, _titles=None):
         subjects = _claim_subject_ids(json.loads(raw))
         if not title:
             return subjects[0] if subjects else ''
-        titles = _entity_title_map(set(subjects))
+        titles = _titles if _titles is not None else _entity_title_map(set(subjects))
         return ', '.join(str(titles.get(str(item)) or item) for item in subjects)
 
     if entity_name:
         # T12 drift regression: use canonical identities in this read snapshot, not
         # the incomplete projection. LIKE remains SQLite's own wildcard/case rule.
-        conn.create_function('timeline_subject_id', 1, lambda raw: subject_field(raw, False))
-        conn.create_function('timeline_subject_title', 1, lambda raw: subject_field(raw, True))
+        all_titles = {
+            str(r[0]): str(r[1] or r[0])
+            for r in conn.execute("SELECT entity_id, canonical_name FROM entities")
+        }
+        conn.create_function('timeline_subject_id', 1, lambda raw: subject_field(raw, False), deterministic=True)
+        conn.create_function('timeline_subject_title', 1, lambda raw, _t=all_titles: subject_field(raw, True, _t), deterministic=True)
         query += " AND (timeline_subject_id(data_json) LIKE ? OR timeline_subject_title(data_json) LIKE ? OR claim_text LIKE ?)"
         params.extend([f"%{entity_name}%"] * 3)
     if action:

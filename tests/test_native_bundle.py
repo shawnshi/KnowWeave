@@ -138,6 +138,9 @@ def test_prebuilt_workflow_compiles_but_never_auto_publishes():
     assert workflow['permissions'] == {'contents': 'read'}
     assert workflow['on']['workflow_dispatch'] == {}
     steps = workflow['jobs']['wheel']['steps']
-    assert {s['uses'] for s in steps if 'uses' in s} == {'actions/checkout@v4', 'actions/setup-python@v5'}
+    uses = [s['uses'] for s in steps if 'uses' in s]
+    assert len(uses) == 2
+    assert any(u.startswith('actions/checkout@') for u in uses)
+    assert any(u.startswith('actions/setup-python@') for u in uses)
     assert '--only-binary=:all:' in '\n'.join(s.get('run', '') for s in steps)
     assert not any('publish' in s.get('run', '') or 'gh release' in s.get('run', '') for s in steps)

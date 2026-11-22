@@ -45,13 +45,6 @@ triggers: 'User requests to resolve a pending Vector Lake governance item.'
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      1. 提取 item_id 和 resolution 类型。
-      2. 校验 resolution 是否为合法值 ('skip', 'create', 'merge', 'acknowledge')。
-      3. 确认是否已经获得人类批准 (Fable 5 Checkpoint)。
-      4. 确认辅助数据已落盘至 scratch/。
-    </thought>
     - A clear summary of the resolved governance item.
     - The final state of the resolution (success/failure).
   </output_format>

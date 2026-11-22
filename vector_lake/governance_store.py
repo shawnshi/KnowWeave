@@ -1096,8 +1096,8 @@ def _query_memory_functions(conn, now):
         return result
 
     # SQL must share current state/score derivation before LIMIT, without persisting payloads.
-    conn.create_function('memory_current_state', 1, lambda raw: evaluate(raw)[0])
-    conn.create_function('memory_current_score', 1, lambda raw: evaluate(raw)[1])
+    conn.create_function('memory_current_state', 1, lambda raw: evaluate(raw)[0], deterministic=True)
+    conn.create_function('memory_current_score', 1, lambda raw: evaluate(raw)[1], deterministic=True)
 
 
 def score_memory_object(memory: dict, now=None) -> dict:
@@ -1139,12 +1139,35 @@ def score_memory_object(memory: dict, now=None) -> dict:
     }
 
 
+_CONTROLLED_MEMORY_PAGES = frozenset({
+    "Concept_UserPreferences.md",
+    "Concept_SystemDecisions.md",
+    "Concept_AgentTaskState.md",
+    "Concept_OperationalFacts.md",
+})
+
+
 def _memory_object_from_claim(claim: dict) -> dict:
     memory_type = infer_memory_type(claim)
     memory_key = _infer_memory_key(claim, memory_type)
     memory_id = _stable_id("mem", f"{claim.get('claim_id')}:{memory_type}:{memory_key}")
     source_ids = list(claim.get("source_ids", []))
     evidence_ids = list(claim.get("evidence_ids", []))
+    source_page = str(claim.get("source_page") or "").strip()
+    is_controlled = source_page in _CONTROLLED_MEMORY_PAGES
+    raw_confidence = claim.get("confidence")
+    confidence = 0.72 if raw_confidence is None else raw_confidence
+    raw_authority = claim.get("authority_score")
+    if raw_authority is None:
+        authority = 0.95 if is_controlled else (0.72 if source_ids else 0.48)
+    else:
+        authority = float(raw_authority)
+    if source_page and not is_controlled and claim.get("evidence_support") != "verified":
+        authority = min(authority, 0.80)
+    raw_importance = claim.get("importance_score")
+    importance = 0.55 if raw_importance is None else raw_importance
+    raw_reinforcement = claim.get("reinforcement_count")
+    reinforcement = len(evidence_ids) if raw_reinforcement is None else raw_reinforcement
     memory = {
         "memory_id": memory_id,
         "memory_type": memory_type,
@@ -1171,10 +1194,10 @@ def _memory_object_from_claim(claim: dict) -> dict:
         "review_after": claim.get("review_after"),
         "created_at": claim.get("created_at"),
         "updated_at": claim.get("updated_at"),
-        "confidence": claim.get("confidence", 0.72),
-        "authority_score": claim.get("authority_score", 0.72 if source_ids else 0.48),
-        "importance_score": claim.get("importance_score", 0.55),
-        "reinforcement_count": claim.get("reinforcement_count", len(evidence_ids)),
+        "confidence": confidence,
+        "authority_score": authority,
+        "importance_score": importance,
+        "reinforcement_count": reinforcement,
         "ttl_days": claim.get("ttl_days") or MEMORY_TTL_DAYS.get(memory_type, 365),
         "contradicts_claim_ids": list(claim.get("contradicts", [])),
         "supersedes_claim_ids": list(claim.get("supersedes", claim.get("supersedes_claim_ids", []))),
@@ -1287,6 +1310,16 @@ def _resolve_memory_conflicts(store: dict) -> dict:
         starts = _parse_dt(base.get("valid_from"))
         pending = base["validity_state"] == "not-yet-valid" and starts and _current_memory(base, starts, restore_supersession=True)["validity_state"] in {"active", "expiring-soon"}
         if not eligible and not pending:
+            continue
+        verified_support = (
+            "evidence_ids" not in base
+            or str(base.get("source_page") or "").strip() in _CONTROLLED_MEMORY_PAGES
+            or (
+                base.get("evidence_support") == "verified"
+                and bool(set(base.get("verified_evidence_ids", [])) & set(base.get("evidence_ids", [])))
+            )
+        )
+        if not verified_support:
             continue
         for target in memory.get("supersedes_claim_ids", []):
             if target in by_claim_id:
@@ -2086,18 +2119,46 @@ def search_memory_packet_views(
 
 
 def build_claim_graph_projection(limit_nodes: int | None = None) -> dict:
+    import heapq
+    from vector_lake import governance_metrics
+
     max_degree = 12
     entity_window = 6
     source_window = 4
     entities = load_entities()["items"]
     sources = load_sources()["items"]
-    claims = annotated_claims()
-    
-    # Sort claims by update time to ensure we keep the most recent/relevant if limiting
-    claims.sort(key=lambda c: _dt_rank(c.get("updated_at")), reverse=True)
-
     if limit_nodes is None:
         limit_nodes = 2500  # Hard cap to prevent 3D-force-graph from freezing the browser
+
+    use_fast_sql = (
+        getattr(annotated_claims, "__module__", None) == __name__
+        and getattr(annotated_claims, "__qualname__", None) == "annotated_claims"
+        and getattr(load_claims, "__module__", None) == __name__
+        and getattr(load_claims, "__qualname__", None) == "load_claims"
+    )
+    if use_fast_sql:
+        initialize_meta_store()
+        conn = get_connection()
+        ranked = heapq.nlargest(
+            max(0, int(limit_nodes)),
+            conn.execute("SELECT claim_id, json_extract(data_json, '$.updated_at') FROM claims"),
+            key=lambda row: _dt_rank(row[1]),
+        )
+        selected_ids = [str(row[0]) for row in ranked]
+        claims = []
+        for start in range(0, len(selected_ids), 500):
+            batch = selected_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            for row in conn.execute(
+                f"SELECT data_json FROM claims WHERE claim_id IN ({placeholders})",
+                tuple(batch),
+            ):
+                claims.append(governance_metrics.annotate_claim_validity(json.loads(row["data_json"])))
+    else:
+        claims = annotated_claims()
+
+    # Sort claims by update time to ensure we keep the most recent/relevant if limiting
+    claims.sort(key=lambda c: _dt_rank(c.get("updated_at")), reverse=True)
 
     if limit_nodes is not None:
         claims = claims[:limit_nodes]
@@ -2848,16 +2909,20 @@ def sync_pages_to_canonical(page_paths: list[str], origin: str, auto_approve: bo
         else:
             deleted_paths.append(str(path))
                 
-    # V10.1 Delete orphaned entities in SQLite when Markdown file is deleted/renamed
+    # V10.1 Delete orphaned entities and related canonical rows in SQLite when Markdown file is deleted/renamed
     if deleted_paths:
-        for path in deleted_paths:
-            basename = os.path.basename(path)
-            if basename.endswith(".md"):
-                page_key = basename[:-3]
-                entity_id = _stable_id("entity", page_key)
-                delete_entity(entity_id)
-                import logging
-                logging.getLogger("governance").info(f"Deleted orphan entity {entity_id} ({page_key}) from SQLite due to missing markdown file.")
+        import logging
+        from vector_lake import db_store
+        deleted_keys = {
+            os.path.basename(path)[:-3]
+            for path in deleted_paths
+            if os.path.basename(path).endswith(".md")
+        }
+        for page_key in sorted(deleted_keys):
+            db_store.delete_node_cascade(page_key, affected_page_keys=deleted_keys)
+            logging.getLogger("governance").info(
+                f"Cascade-deleted orphan page {page_key} from SQLite due to missing markdown file."
+            )
 
     if not existing_paths:
         return None

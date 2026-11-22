@@ -113,14 +113,23 @@ def _tokens(text: str) -> str:
 def _open(path: Path, *, writable: bool) -> sqlite3.Connection:
     if writable:
         path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not path.exists() or path.stat().st_size == 0
         conn = sqlite3.connect(path, timeout=1)
+        if is_new:
+            try:
+                conn.execute('PRAGMA page_size=16384')
+            except sqlite3.OperationalError:
+                pass
         conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA temp_store=MEMORY')
     else:
         from vector_lake import retrieval_runtime
         state = retrieval_runtime.current()
         timeout = min(1.0, retrieval_runtime.remaining_seconds()) if state is not None else 1.0
         conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=timeout)
         conn.execute('PRAGMA query_only=ON')
+        conn.execute('PRAGMA temp_store=MEMORY')
         if state is not None:
             import time
             conn.set_progress_handler(lambda: int(time.monotonic() >= state.deadline), 1000)
@@ -154,6 +163,22 @@ def _schema(conn):
     conn.execute('CREATE TABLE IF NOT EXISTS chunks(chunk_id TEXT PRIMARY KEY,page_key TEXT NOT NULL REFERENCES documents(page_key) ON DELETE CASCADE,start_line INTEGER NOT NULL,end_line INTEGER NOT NULL,heading TEXT NOT NULL,text TEXT NOT NULL)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_key)')
     conn.execute('CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(chunk_id UNINDEXED,tokens)')
+    conn.execute('''
+        CREATE TRIGGER IF NOT EXISTS trg_delete_chunk_fts
+        AFTER DELETE ON chunks
+        BEGIN
+            DELETE FROM chunk_fts WHERE chunk_id = old.chunk_id;
+        END
+    ''')
+    has_vec = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_vectors'").fetchone()
+    if has_vec:
+        conn.execute('''
+            CREATE TRIGGER IF NOT EXISTS trg_delete_chunk_vectors
+            AFTER DELETE ON chunks
+            BEGIN
+                DELETE FROM chunk_vectors WHERE chunk_id = old.chunk_id;
+            END
+        ''')
 
 
 def replace_document(path: Path, page_key: str, content: str, domain: str, *, cluster: str = '',
@@ -186,6 +211,13 @@ def replace_document(path: Path, page_key: str, content: str, domain: str, *, cl
                 if not projection:
                     conn.executemany('INSERT INTO meta(key,value) VALUES (?,?)', expected.items())
                     conn.execute(f'CREATE VIRTUAL TABLE chunk_vectors USING vec0(chunk_id TEXT PRIMARY KEY,domain TEXT partition key,cluster TEXT,status TEXT,embedding FLOAT[{dimension}])')
+                    conn.execute('''
+                        CREATE TRIGGER IF NOT EXISTS trg_delete_chunk_vectors
+                        AFTER DELETE ON chunks
+                        BEGIN
+                            DELETE FROM chunk_vectors WHERE chunk_id = old.chunk_id;
+                        END
+                    ''')
             old = [row[0] for row in conn.execute('SELECT chunk_id FROM chunks WHERE page_key=?', (page_key,))]
             for key in old:
                 conn.execute('DELETE FROM chunk_fts WHERE chunk_id=?', (key,))

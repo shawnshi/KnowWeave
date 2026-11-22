@@ -77,9 +77,19 @@ def _repair_block(repair: dict) -> str:
     )
 
 
-def _brief(packet: dict) -> str:
+def _brief(packet: dict, *, inline_raw: bool = False) -> str:
     metadata = (packet.get("metadata") or {}).get("processed_data") or {}
-    if metadata.get("controlled_recompile") is not None or metadata.get("source_read_path") is not None:
+    has_complete_inline_inputs = (
+        inline_raw
+        and isinstance(packet.get("prompt"), str)
+        and bool(packet["prompt"].strip())
+        and isinstance((packet.get("metadata") or {}).get("output_contract"), str)
+        and bool((packet.get("metadata") or {}).get("output_contract", "").strip())
+        and isinstance(metadata.get("integration_candidates"), list)
+        and bool(metadata.get("filepath"))
+        and bool(metadata.get("hash"))
+    )
+    if metadata.get("controlled_recompile") is not None or metadata.get("source_read_path") is not None or has_complete_inline_inputs:
         from vector_lake.ingest_model_contract import build_cli_prompt
         # The delegated compiler receives actual SHA-checked inline snapshot bytes.
         # Original filepath remains provenance only; never reuse relay_brief's raw-read instruction.
@@ -249,9 +259,13 @@ def main() -> int:
     # Windows consoles default to a legacy codepage; the runner captures this
     # process over a pipe, so an un-reconfigured stdout raises UnicodeEncodeError
     # on any non-ASCII payload and the task silently fails as "model failed".
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")
+            stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
     raw = sys.stdin.read()
@@ -265,7 +279,11 @@ def main() -> int:
         print(f"model seam: pi binary {PI_BIN!r} not found on PATH", file=sys.stderr)
         return 3
 
-    brief = _brief(packet)
+    try:
+        brief = _brief(packet, inline_raw=True)
+    except ValueError as exc:
+        print(f"model seam: {exc}", file=sys.stderr)
+        return 3
     # The rules go to a file and are appended (not passed inline): a long
     # ``--system-prompt`` argument containing newlines is mangled by cmd.exe, which
     # silently produced an empty answer with exit 0.

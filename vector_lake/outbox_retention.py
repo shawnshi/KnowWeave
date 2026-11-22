@@ -23,6 +23,7 @@ when :func:`vector_lake.db_store.reclaim_free_space` runs.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -87,7 +88,24 @@ def prune_outbox_payloads(conn=None, days: int | None = None, dry_run: bool = Fa
         return {**plan, "dry_run": True, "stripped": 0}
 
     placeholders = ",".join("?" for _ in TERMINAL_STATES)
+    has_digest = "payload_sha256" in db_store._table_columns(conn, "mutation_outbox")
     with db_store.transaction():
+        if has_digest:
+            rows_to_digest = conn.execute(
+                "SELECT id, payload_text FROM mutation_outbox"
+                f" WHERE status IN ({placeholders}) AND payload_text IS NOT NULL"
+                " AND payload_sha256 IS NULL"
+                " AND COALESCE(completed_at, started_at, created_at) < ?",
+                (*TERMINAL_STATES, plan["cutoff"]),
+            ).fetchall()
+            if rows_to_digest:
+                conn.executemany(
+                    "UPDATE mutation_outbox SET payload_sha256 = ? WHERE id = ?",
+                    [
+                        (hashlib.sha256(str(row["payload_text"]).encode("utf-8")).hexdigest(), int(row["id"]))
+                        for row in rows_to_digest
+                    ],
+                )
         cursor = conn.execute(
             "UPDATE mutation_outbox SET payload_text = NULL"
             f" WHERE status IN ({placeholders}) AND payload_text IS NOT NULL"

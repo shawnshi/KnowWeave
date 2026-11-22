@@ -32,11 +32,11 @@ triggers: 'Triggered when the user asks to research graph gaps, explore knowledg
        - Execute required web searches using `search_web`.
        - Write intermediate validation data to `scratch/` for Sandbox Isolation.
        - Save final results to raw research storage.
-    5. **Ingestion**: The subagent triggers background ingestion via `python cli.py ingest`.
+    5. **Ingestion**: Trigger background ingestion via `python cli.py sync` (or `python scripts/ingest_runner.py` when running a bounded worker pass).
   </workflow>
 
   <tool_dispatch>
-    - `bash`: `python cli.py research [--dry-run]` to scan gaps; `python cli.py ingest` to ingest.
+    - `bash`: `python cli.py research [--dry-run]` to scan gaps; `python cli.py sync` to queue raw files for ingest.
     - `Reson-KnowWeave-mcp`: `review_governance_list` to inspect pending gaps.
     - `invoke_subagent`: MUST be used to orchestrate heavy background operations for the actual research.
   </tool_dispatch>
@@ -48,12 +48,6 @@ triggers: 'Triggered when the user asks to research graph gaps, explore knowledg
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Verify if a dry_run is requested.
-      - Evaluate the feasibility of the emitted directives.
-      - Confirm the main agent is delegating the heavy workflow to a subagent instead of blocking.
-    </thought>
     Provide a concise summary of the generated directives and the status of the subagent delegation.
   </output_format>
 
@@ -64,6 +58,6 @@ triggers: 'Triggered when the user asks to research graph gaps, explore knowledg
   </metrics>
 
   <validation_gate>
-    Ensure temporary artifacts are isolated in the `scratch/` directory and `trigger_autonomous_research` correctly emits actionable targets.
+    Ensure temporary artifacts are isolated in the `scratch/` directory and `python cli.py research` correctly emits actionable targets.
   </validation_gate>
 </delivery_standards>

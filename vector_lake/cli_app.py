@@ -1,6 +1,7 @@
 import argparse
 import json
 import io
+from pathlib import Path
 import sys
 
 try:
@@ -12,7 +13,7 @@ from vector_lake import host_env
 
 
 def _configure_stdout():
-    if sys.stdout.encoding != "utf-8":
+    if getattr(sys.stdout, "encoding", None) != "utf-8" and hasattr(sys.stdout, "buffer"):
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 
@@ -190,8 +191,17 @@ Usage Examples:
 
     gc_parser = subparsers.add_parser("gc", help="[GC] Automatically prune isolated/orphan entities.")
     gc_parser.add_argument("--days", type=int, default=30, help="Prune entities older than this many days (default: 30).")
+    gc_parser.add_argument("--domain", type=str, default="", help="Optional exact domain scope filter.")
+    gc_parser.add_argument("--cluster", type=str, default="", help="Optional exact topic cluster filter.")
+    gc_parser.add_argument("--plan-file", type=str, default=None, help="Path to saved dry-run Expected plan JSON file.")
     gc_parser.add_argument("--apply", action="store_true", help="Persist the prune. Defaults to dry-run.")
     gc_parser.add_argument("--force", action="store_true", help="Bypass the 50%% mass-deletion safety threshold.")
+
+    outbox_parser = subparsers.add_parser("outbox", help="[MAINTENANCE] Inspect or recover failed mutation_outbox rows.")
+    outbox_parser.add_argument("--retry", action="store_true", help="Re-queue failed outbox rows to pending (requires --apply).")
+    outbox_parser.add_argument("--clear-failed", action="store_true", help="Cancel failed outbox rows (requires --apply).")
+    outbox_parser.add_argument("--filename", type=str, default="", help="Optional single wiki filename to target.")
+    outbox_parser.add_argument("--apply", action="store_true", help="Persist the selected outbox recovery action. Defaults to dry-run.")
 
     backup_parser = subparsers.add_parser(
         "backup-retention",
@@ -432,10 +442,37 @@ def main() -> int:
         elif args.command == "delete":
             print(tools.delete_source(args.raw_path, dry_run=not getattr(args, "apply", False)))
         elif args.command == "gc":
+            days = getattr(args, "days", 30)
+            domain = getattr(args, "domain", "") or ""
+            cluster = getattr(args, "cluster", "") or ""
+            apply_gc = bool(getattr(args, "apply", False))
+            force_gc = bool(getattr(args, "force", False))
+            plan_file = getattr(args, "plan_file", None)
+            expected_plan = None
+            if apply_gc:
+                if plan_file:
+                    raw_plan = Path(plan_file).read_text(encoding="utf-8")
+                    if "Expected plan: " in raw_plan:
+                        raw_plan = raw_plan.split("Expected plan: ", 1)[1]
+                    expected_plan = json.loads(raw_plan)
+                elif force_gc:
+                    preview = tools.gc_vector_lake(days=days, dry_run=True, domain=domain, cluster=cluster)
+                    if "Expected plan: " in preview:
+                        expected_plan = json.loads(preview.split("Expected plan: ", 1)[1])
             print(tools.gc_vector_lake(
-                days=getattr(args, "days", 30),
+                days=days,
+                dry_run=not apply_gc,
+                force=force_gc,
+                domain=domain,
+                cluster=cluster,
+                expected_plan=expected_plan,
+            ))
+        elif args.command == "outbox":
+            print(tools.outbox_recovery(
+                retry=getattr(args, "retry", False),
+                clear_failed=getattr(args, "clear_failed", False),
+                filename=getattr(args, "filename", ""),
                 dry_run=not getattr(args, "apply", False),
-                force=getattr(args, "force", False),
             ))
         elif args.command == "backup-retention":
             print(tools.backup_retention_report(

@@ -29,36 +29,40 @@ impl MarkdownBlock {
 /// 清洗 claim 文本中的 Wikilink 与 Typed Link，使其变成纯文本
 pub fn clean_claim_text(raw: &str, limit: usize) -> String {
     let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
+    let mut idx = 0usize;
+    let bytes = raw.as_bytes();
 
-    while let Some(c) = chars.next() {
-        if c == '[' {
-            // 检查是否为 typed link 或 wikilink
-            let rest: String = chars.clone().collect();
-            if let Some(end_idx) = rest.find(']') {
-                let inner = &rest[..end_idx];
-                // 如果是 [[Target|Alias]] 或 [pred:: [[Target|Alias]]]
-                if inner.starts_with('[') && inner.ends_with(']') {
-                    let link_content = &inner[1..inner.len() - 1];
-                    let text_to_use = if let Some(pipe_idx) = link_content.rfind('|') {
-                        &link_content[pipe_idx + 1..]
-                    } else {
-                        link_content
+    while idx < raw.len() {
+        if bytes[idx] == b'[' && raw[idx..].starts_with("[[") {
+            let after_open = idx + 2;
+            if let Some(close_rel) = raw[after_open..].find("]]") {
+                let inner = &raw[after_open..after_open + close_rel];
+                if !inner.contains('\n') && !inner.contains('[') && !inner.is_empty() {
+                    let text_to_use = match inner.rfind('|') {
+                        Some(pipe_idx) => &inner[pipe_idx + 1..],
+                        None => inner,
                     };
                     out.push_str(text_to_use);
-                    for _ in 0..=end_idx {
-                        chars.next();
+                    idx = after_open + close_rel + 2;
+                    if out.chars().count() >= limit {
+                        break;
                     }
                     continue;
                 }
             }
         }
-        out.push(c);
+        let ch = raw[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
         if out.chars().count() >= limit {
             break;
         }
     }
-    out
+    if out.chars().count() > limit {
+        out.chars().take(limit).collect()
+    } else {
+        out
+    }
 }
 
 /// 快速分割 Frontmatter 与 Body

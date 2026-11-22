@@ -9,6 +9,7 @@ import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vector_lake.wiki_utils import get_meta_dir, get_index_path
+from vector_lake.node_vocabulary import NODE_TYPE_SET
 from vector_lake import governance_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -23,26 +24,6 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 from vector_lake.wiki_utils import normalize_memory_key as strip_name, calculate_cosine_similarity
-
-def _get_cache_path():
-    return get_meta_dir() / "embeddings.pkl"
-
-def load_cache() -> dict:
-    import pickle
-    cache_path = _get_cache_path()
-    if cache_path.exists():
-        try:
-            with open(cache_path, "rb") as f:
-                return pickle.load(f)
-        except Exception as e:
-            log.warning(f"Failed to load embeddings cache: {e}")
-    return {"schema_version": "1.0", "embeddings": {}}
-
-def save_cache(cache: dict):
-    import pickle
-    cache_path = _get_cache_path()
-    with open(cache_path, "wb") as f:
-        pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 async def async_run_daemon():
@@ -60,7 +41,7 @@ async def async_run_daemon():
     nodes = index_data.get("nodes", {})
     entities = {
         key: node for key, node in nodes.items()
-        if node.get("type") in ("vendor", "product", "person", "event", "concept", "synthesis", "source")
+        if node.get("type") in NODE_TYPE_SET
     }
 
     for key, node in entities.items():

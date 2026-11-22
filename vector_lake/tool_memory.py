@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 
 from filelock import FileLock
 
@@ -48,7 +49,6 @@ def update_operational_memory(memory_type: str, content: str) -> str:
         if target_path.exists():
             original = target_path.read_text(encoding="utf-8")
             frontmatter, body = split_frontmatter(original)
-            import re
             frontmatter.setdefault("id", f"operational-memory-{memory_type.replace('_', '-')}")
             frontmatter.setdefault("title", title)
             frontmatter["type"] = "concept"
@@ -76,10 +76,12 @@ def update_operational_memory(memory_type: str, content: str) -> str:
 
         if not file_content.endswith("\n"):
             file_content += "\n"
-        clean_content = content.strip().replace("\n", "  \n")
+        clean_content = re.sub(r"[\r\n]+", " ", content.strip())
         file_content += render_template("wiki/operational_memory_entry.md", date=date_text, content=clean_content)
 
         from vector_lake.mutation_coordinator import execute_mutation_plan
-        execute_mutation_plan(filename, content=file_content, is_delete=False)
+        ok, message = execute_mutation_plan(filename, content=file_content, is_delete=False)
+        if not ok:
+            return f"Error: Failed to persist {memory_type} to {filename}: {message}"
 
     return f"Successfully persisted {memory_type} to {filename}; canonical state and outbox intent committed."

@@ -40,12 +40,10 @@ from vector_lake.relation_policy import (
 )
 from vector_lake.schema_validator import validate_schema, SchemaViolationException
 
-try:
-    import vector_lake_core
-    HAVE_CORE = True
-except ImportError:
-    vector_lake_core = None
-    HAVE_CORE = False
+from vector_lake.native_core import load_native_core
+
+vector_lake_core, _CORE_LOAD_ERROR = load_native_core()
+HAVE_CORE = vector_lake_core is not None
 
 # Community detection moved to Leiden (igraph + leidenalg) and lives in
 # scripts/community_clustering_daemon.py; this module never clustered anything.
@@ -58,6 +56,7 @@ DEFAULT_TTL = {
     "source": 365,
     "synthesis": 730,
     "vendor": 1095,
+    "institution": 1095,
     "product": 1095,
     "person": 1095,
     "event": 1095,
@@ -99,15 +98,16 @@ def _resolved_triple_weights(triples, alias_map, unique_cores, valid_keys):
     return weights
 
 TYPE_AFFINITY = {
-    "vendor": {"vendor": 0.8, "product": 1.2, "person": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
-    "product": {"vendor": 1.2, "product": 0.8, "person": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
-    "person": {"vendor": 1.0, "product": 1.0, "person": 0.8, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
-    "event": {"vendor": 1.0, "product": 1.0, "person": 1.0, "event": 0.8, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
-    "concept": {"vendor": 1.2, "product": 1.2, "person": 1.2, "event": 1.2, "concept": 0.8, "source": 1.0, "synthesis": 1.2, "policy": 1.0, "standard": 1.0},
-    "source": {"vendor": 1.0, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.0, "source": 0.5, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
-    "synthesis": {"vendor": 1.0, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 0.8, "policy": 1.0, "standard": 1.0},
-    "policy": {"vendor": 1.0, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.0, "source": 1.0, "synthesis": 1.0, "policy": 0.8, "standard": 1.2},
-    "standard": {"vendor": 1.0, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.0, "source": 1.0, "synthesis": 1.0, "policy": 1.2, "standard": 0.8},
+    "vendor": {"vendor": 0.8, "institution": 1.1, "product": 1.2, "person": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
+    "institution": {"vendor": 1.1, "institution": 0.8, "product": 1.2, "person": 1.1, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.1, "standard": 1.1},
+    "product": {"vendor": 1.2, "institution": 1.2, "product": 0.8, "person": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
+    "person": {"vendor": 1.0, "institution": 1.1, "product": 1.0, "person": 0.8, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
+    "event": {"vendor": 1.0, "institution": 1.0, "product": 1.0, "person": 1.0, "event": 0.8, "concept": 1.2, "source": 1.0, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
+    "concept": {"vendor": 1.2, "institution": 1.2, "product": 1.2, "person": 1.2, "event": 1.2, "concept": 0.8, "source": 1.0, "synthesis": 1.2, "policy": 1.0, "standard": 1.0},
+    "source": {"vendor": 1.0, "institution": 1.0, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.0, "source": 0.5, "synthesis": 1.0, "policy": 1.0, "standard": 1.0},
+    "synthesis": {"vendor": 1.0, "institution": 1.0, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.2, "source": 1.0, "synthesis": 0.8, "policy": 1.0, "standard": 1.0},
+    "policy": {"vendor": 1.0, "institution": 1.1, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.0, "source": 1.0, "synthesis": 1.0, "policy": 0.8, "standard": 1.2},
+    "standard": {"vendor": 1.0, "institution": 1.1, "product": 1.0, "person": 1.0, "event": 1.0, "concept": 1.0, "source": 1.0, "synthesis": 1.0, "policy": 1.2, "standard": 0.8},
 }
 
 LEGACY_EMBEDDED_INDEX_KEYS = (

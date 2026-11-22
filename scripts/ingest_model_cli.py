@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Gemini/Codex model seam: one task packet on stdin, one semantic JSON result on stdout."""
+"""Gemini/Codex/Antigravity model seam: one task packet on stdin, one semantic JSON result on stdout."""
 from __future__ import annotations
 
 import argparse
@@ -21,7 +21,7 @@ def main() -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", required=True, choices=("codex", "gemini"))
+    parser.add_argument("--backend", required=True, choices=("codex", "gemini", "agy"))
     parser.add_argument("--check", action="store_true", help="Check local CLI capabilities without model calls or jobs.")
     args = parser.parse_args()
     try:

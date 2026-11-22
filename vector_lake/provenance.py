@@ -5,6 +5,11 @@ from vector_lake import governance_store
 
 
 def _tokenize(query: str) -> list[str]:
+    from vector_lake import tokenizer as _tokenizer
+
+    tokens = [str(tok).strip().lower() for tok in _tokenizer.cut(query or "") if str(tok).strip()]
+    if tokens:
+        return list(dict.fromkeys(tokens))
     return [token.lower() for token in re.split(r"\W+", query or "") if token.strip()]
 
 
@@ -38,8 +43,9 @@ def build_trace_for_query(query: str, top_k: int = 5) -> dict:
     matches = []
     for claim in scan_rows:
         # Boost score if the claim comes from a top FTS match
-        source_page = claim.get('source_page', '')
-        base_score = 5 if source_page in relevant_pages else 0
+        source_page = str(claim.get('source_page', '') or '')
+        page_key = source_page.removesuffix(".md")
+        base_score = 5 if (source_page in relevant_pages or page_key in relevant_pages) else 0
         
         haystack = f"{claim.get('claim_text', '')} {source_page}".lower()
         match_score = sum(1 for token in tokens if token in haystack)

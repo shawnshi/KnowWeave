@@ -13,14 +13,23 @@ from vector_lake import get_extension_root
 from vector_lake import governance_store
 from vector_lake.wiki_utils import get_claim_graph_path, get_index_path, get_memory_dir
 
-try:
-    import vector_lake_core
-    HAVE_CORE = True
-except ModuleNotFoundError as exc:
-    if exc.name != "vector_lake_core":
-        raise
-    vector_lake_core = None
-    HAVE_CORE = False
+import builtins as _builtins
+from vector_lake.native_core import load_native_core, validate_native_core
+
+if __import__ is not _builtins.__import__:
+    try:
+        import vector_lake_core as _raw_vector_lake_core
+    except ModuleNotFoundError as exc:
+        if exc.name != "vector_lake_core":
+            raise
+        vector_lake_core = None
+        HAVE_CORE = False
+    else:
+        vector_lake_core, _CORE_LOAD_ERROR = validate_native_core(_raw_vector_lake_core)
+        HAVE_CORE = vector_lake_core is not None
+else:
+    vector_lake_core, _CORE_LOAD_ERROR = load_native_core()
+    HAVE_CORE = vector_lake_core is not None
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

@@ -36,6 +36,14 @@ TENSION_H3_SLOT = "### 认知张力与未决争议 (Controversies & Tensions)"
 # merge path has to respect the bound, and a second literal would let the two drift.
 MAX_TAGS = 3
 
+CONTROLLED_MEMORY_TYPE_FILES = {
+    "preference": "Concept_UserPreferences.md",
+    "decision": "Concept_SystemDecisions.md",
+    "task_state": "Concept_AgentTaskState.md",
+    "fact": "Concept_OperationalFacts.md",
+}
+CONTROLLED_MEMORY_PAGES = frozenset(CONTROLLED_MEMORY_TYPE_FILES.values())
+
 # Source pages that exist only to satisfy the schema for nodes whose real provenance was
 # never assigned.  ``Source_Auto_Fixed`` is the live example; its own body says the
 # connected nodes "require future manual review to assign their true provenance".  Citing
@@ -492,6 +500,20 @@ def validate_schema(
     status = str(frontmatter.get("status", "")).title()
     if status and status not in VALID_STATUS:
         raise SchemaViolationException(f"Schema Violation: status '{status}' is invalid. Allowed: {VALID_STATUS}.")
+
+    # 1.4b Operational Memory Privilege Separation (SEC-01)
+    mem_type = str(frontmatter.get("memory_type") or "").strip().lower()
+    if mem_type in {"preference", "decision", "task_state"} and filename != CONTROLLED_MEMORY_TYPE_FILES[mem_type]:
+        raise SchemaViolationException(
+            f"Schema Violation: memory_type '{mem_type}' is restricted to controlled operational memory page "
+            f"'{CONTROLLED_MEMORY_TYPE_FILES[mem_type]}'."
+        )
+    if filename not in CONTROLLED_MEMORY_PAGES:
+        for reserved_key in ("authority_score", "importance_score", "reinforcement_count"):
+            if reserved_key in frontmatter and frontmatter[reserved_key] is not None:
+                raise SchemaViolationException(
+                    f"Schema Violation: reserved scoring field '{reserved_key}' is restricted to controlled operational memory pages."
+                )
 
     # 1.5 Tags Constraints
     tags = frontmatter.get("tags", [])

@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -35,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from filelock import FileLock
 
@@ -118,9 +120,75 @@ def site_packages() -> Path:
     raise SystemExit("vector_lake_core is not installed in any site-packages; install the wheel first")
 
 
-def build() -> Path:
+_PROXY_ENV_KEYS = (
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "CARGO_HTTP_PROXY",
+)
+_NETWORK_FAILURE_MARKERS = (
+    "over proxy",
+    "could not connect",
+    "failed to download",
+    "download of ",
+)
+
+
+def _redact_proxy_value(value: str) -> str:
+    text = value.strip()
+    if "://" in text:
+        parsed = urlsplit(text)
+        if parsed.username is not None or parsed.password is not None:
+            host = parsed.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+            host_port = f"{host}:{port}" if port is not None else host
+            if not host_port:
+                _, _, host_port = parsed.netloc.rpartition("@")
+            return f"{parsed.scheme}://<redacted>@{host_port}{parsed.path}"
+        return text
+    if "@" in text:
+        _, _, host_part = text.rpartition("@")
+        return f"<redacted>@{host_part}"
+    return text
+
+
+def _active_proxy_hints(env: Mapping[str, str] | None = None) -> list[str]:
+    source = os.environ if env is None else env
+    hints: list[str] = []
+    for key in _PROXY_ENV_KEYS:
+        val = source.get(key, "").strip()
+        if val:
+            hints.append(f"{key}={_redact_proxy_value(val)}")
+    return hints
+
+
+def _stale_source_files(dll: Path, crate_dir: Path | None = None) -> list[Path]:
+    root = crate_dir or CRATE
+    dll_mtime_ns = dll.stat().st_mtime_ns
+    candidates = [root / "Cargo.toml", root / "Cargo.lock", root / "pyproject.toml"]
+    src_dir = root / "src"
+    if src_dir.is_dir():
+        candidates.extend(src_dir.rglob("*.rs"))
+    return sorted(
+        path.relative_to(root)
+        for path in candidates
+        if path.is_file() and path.stat().st_mtime_ns > dll_mtime_ns
+    )
+
+
+def build(*, offline: bool = False) -> Path:
     """Build the host extension without changing any installed version or pointer."""
     if sys.platform != "win32":
+        if offline:
+            raise SystemExit("--offline is only supported for direct Windows cargo builds")
         # Maturin supplies macOS extension linking flags and the correct wheel ABI;
         # a bare cargo cdylib is not a portable Python extension build.
         with tempfile.TemporaryDirectory(prefix="vector-lake-core-build-") as directory:
@@ -142,13 +210,36 @@ def build() -> Path:
     argv = ["cargo"]
     if toolchain:
         argv.append(f"+{toolchain}")
-    argv += ["build", "--release"]
+    argv += ["build", "--release", "--locked"]
+    if offline:
+        argv.append("--offline")
     print(f"building: {' '.join(argv)} (in {CRATE})")
-    result = subprocess.run(argv, cwd=CRATE, capture_output=True, text=True)
+    result = subprocess.run(
+        argv,
+        cwd=CRATE,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if result.returncode != 0:
         # The GNU toolchain's failure is not obvious from "linker failed"; say what to use.
-        tail = (result.stderr or "").strip().splitlines()[-6:]
-        raise SystemExit("build failed:\n  " + "\n  ".join(tail))
+        stderr = result.stderr or ""
+        tail = stderr.strip().splitlines()[-20:]
+        lowered = stderr.lower()
+        extra = ""
+        if any(marker in lowered for marker in _NETWORK_FAILURE_MARKERS):
+            hints = _active_proxy_hints()
+            hint_text = (
+                ", ".join(hints)
+                if hints
+                else "(no proxy env vars set; check Windows system proxy or ~/.cargo/config.toml)"
+            )
+            extra = (
+                f"\nproxy hint: {hint_text}\n"
+                "  ensure the configured proxy is listening, or clear stale proxy settings before retrying"
+            )
+        raise SystemExit("build failed:\n  " + "\n  ".join(tail) + extra)
     if not DLL.exists():
         raise SystemExit(f"build reported success but {DLL} is missing")
     return DLL
@@ -233,8 +324,13 @@ def activate(version: str, *, check: bool = True) -> None:
                 "print(c.version(), getattr(c, 'blocks_contract', lambda: 'none')())\n"
             )
             probe = subprocess.run(
-                [sys.executable, "-c", code], capture_output=True, text=True,
-                env=dict(os.environ, VECTOR_LAKE_CORE_VERSION=version), timeout=30,
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=dict(os.environ, VECTOR_LAKE_CORE_VERSION=version),
+                timeout=30,
             )
             if probe.returncode:
                 raise SystemExit(f"activation probe failed for {version}: {probe.stderr.strip()[-300:]}")
@@ -282,13 +378,23 @@ def install(dll: Path, version: str) -> Path:
     return target
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-build", action="store_true", help="install the existing build artifact")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="pass --offline to cargo (requires all Cargo.lock crates in local cache)",
+    )
+    parser.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="allow --no-build even when crate sources are newer than the existing build artifact",
+    )
     parser.add_argument("--activate", metavar="VERSION", help="switch the pointer only")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--check", action="store_true", help="report the active build and exit")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.list:
         print(f"installed: {installed_versions() or 'none'}")
@@ -309,9 +415,19 @@ def main() -> int:
         return 0
 
     version = source_version()
-    dll = DLL if args.no_build else build()
+    dll = DLL if args.no_build else build(offline=args.offline)
     if not dll.exists():
         raise SystemExit(f"{dll} does not exist; run without --no-build")
+    if args.no_build and not args.allow_stale:
+        stale = _stale_source_files(dll)
+        if stale:
+            sample = ", ".join(path.as_posix() for path in stale[:6])
+            suffix = f" (+{len(stale) - 6} more)" if len(stale) > 6 else ""
+            raise SystemExit(
+                f"stale build artifact: {dll} is older than modified crate source(s): {sample}{suffix}; "
+                f"installing it would occupy immutable version slot {version}. "
+                "Rebuild without --no-build, or pass --allow-stale to override."
+            )
     target = install(dll, version)
     print(f"installed {version} -> {target}")
     activate(version)

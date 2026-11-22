@@ -43,11 +43,6 @@ description: 'Show governance debt metrics.'
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Has the debt retrieval completed successfully?
-      - Are there specific debt categories that dominate the metrics?
-    </thought>
     Output a concise, well-structured Markdown summary of the governance debt metrics. Use tables if appropriate.
   </output_format>
 

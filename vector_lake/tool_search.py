@@ -11,6 +11,7 @@ from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 
 import functools
+import inspect
 import ast
 import operator
 from html import escape
@@ -27,14 +28,10 @@ from vector_lake.page_index_projection import (
 from vector_lake.schema_validator import canonical_domain
 from vector_lake.wiki_utils import get_index_path, get_wiki_dir
 
-try:
-    import vector_lake_core
-    HAVE_CORE = True
-except ModuleNotFoundError as exc:
-    if exc.name != "vector_lake_core":
-        raise
-    vector_lake_core = None
-    HAVE_CORE = False
+from vector_lake.native_core import load_native_core
+
+vector_lake_core, _CORE_LOAD_ERROR = load_native_core()
+HAVE_CORE = vector_lake_core is not None
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1285,8 +1282,10 @@ def _rerank_candidates_locally(query: str, candidates: list[tuple[float, dict]])
             [float(score) for score, _ in candidates],
             weight,
         )
-    except Exception as exc:
-        # Fail open: a reranker fault must never drop results.
+    except BaseException as exc:
+        if not (isinstance(exc, Exception) or type(exc).__name__ == "PanicException"):
+            raise
+        # Fail open: a reranker fault or Rust panic must never drop results or crash the host.
         _LAST_RERANK_NOTE.message = f'Local reranking failed: {type(exc).__name__}'
         log.warning("Local reranking failed (%s); keeping upstream order.", type(exc).__name__)
         return candidates
@@ -1912,19 +1911,27 @@ def _search_scored_pages(
             existing_keys = {node["_key"] for _, node in scored}
             expansion_limit = 12 if intent == "entity" else 5
 
-            if HAVE_CORE and hasattr(vector_lake_core, "prepared_personalized_pagerank"):
-                # The same walk on a prebuilt index.  Measured 31.9 -> 1.5 ms per query (20.7x) and
-                # verified bit-identical on 16 edge cases plus the live graph: the legacy call pays for
-                # moving the 39 382-edge dict into Rust and cloning ~150k strings per call, which the
-                # index does once (27.9 ms) per graph generation.
-                from vector_lake import page_index_projection as _pip
+            used_native_ppr = False
+            if HAVE_CORE:
+                try:
+                    if hasattr(vector_lake_core, "prepared_personalized_pagerank"):
+                        # The same walk on a prebuilt index.  Measured 31.9 -> 1.5 ms per query (20.7x) and
+                        # verified bit-identical on 16 edge cases plus the live graph: the legacy call pays for
+                        # moving the 39 382-edge dict into Rust and cloning ~150k strings per call, which the
+                        # index does once (27.9 ms) per graph generation.
+                        from vector_lake import page_index_projection as _pip
 
-                sorted_ppr = vector_lake_core.prepared_personalized_pagerank(
-                    _ppr_index(adj, _pip.adjacency_generation()), list(seed_keys), 0.85, 2
-                )
-            elif HAVE_CORE:
-                sorted_ppr = vector_lake_core.fast_personalized_pagerank(dict(adj), list(seed_keys), 0.85, 2)
-            else:
+                        sorted_ppr = vector_lake_core.prepared_personalized_pagerank(
+                            _ppr_index(adj, _pip.adjacency_generation()), list(seed_keys), 0.85, 2
+                        )
+                    else:
+                        sorted_ppr = vector_lake_core.fast_personalized_pagerank(dict(adj), list(seed_keys), 0.85, 2)
+                    used_native_ppr = True
+                except BaseException as exc:
+                    if type(exc).__name__ != "PanicException":
+                        raise
+                    log.warning("Native PPR panicked (%s); falling back to pure-Python PPR.", type(exc).__name__)
+            if not used_native_ppr:
                 alpha = 0.85
                 restart_mass = (1 - alpha) / len(top_keys)
                 ppr_scores = {k: 1.0 / len(top_keys) for k in seed_keys}
@@ -1946,7 +1953,7 @@ def _search_scored_pages(
                     key=lambda x: x[1],
                     reverse=True
                 )
-            if HAVE_CORE:
+            else:
                 # VL-S02: graph-wide zero entries are not reachable candidates. In RRF a zero
                 # would otherwise become a positive vote merely because it has a list position.
                 sorted_expansions = [(k, v) for k, v in sorted_ppr if k not in existing_keys and v > 0.0]
@@ -2348,9 +2355,16 @@ def assemble_context(
     memory_notes = []
     try:
         runtime.checkpoint()
-        request_views = governance_store.search_memory_packet_views(
-            query, domain=domain, cluster=cluster, _display_groups=True) if scope else None
-        packet_options = {**scope, "_views": request_views} if scope else {}
+        build_params = inspect.signature(build_memory_packet).parameters
+        accepts_views = "_views" in build_params or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in build_params.values()
+        )
+        if accepts_views:
+            request_views = governance_store.search_memory_packet_views(
+                query, domain=domain, cluster=cluster, _display_groups=True)
+            packet_options = {**scope, "_views": request_views}
+        else:
+            packet_options = dict(scope)
         memory_packet = build_memory_packet(
             query, max_chars=burst_budget if burst_budget > nominal_budget else nominal_budget,
             **packet_options,

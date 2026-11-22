@@ -44,12 +44,6 @@ triggers: 'Show provenance trace for a query or identifier to see where knowledg
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Have I retrieved the exact identifier or query correctly?
-      - Is the trace lineage complete and coherent?
-      - Have I respected the anti-patterns and guardrails?
-    </thought>
     Present a clear, structured lineage of the knowledge item, detailing its origin, modifications, and related sources.
   </output_format>
 

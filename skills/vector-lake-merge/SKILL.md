@@ -44,12 +44,6 @@ triggers:
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      1. 分析当前 Vector Lake 中的实体碎片化情况。
-      2. 校验 `merge_suggestions_vector_lake` 的参数设置（如 `enqueue` 状态）。
-      3. 确保 [FABLE 5 CHECKPOINT] 已严格执行并获得人类授权。
-    </thought>
     Present a clean list or table of the merge suggestions, detailing source entities, target entities, and confidence scores. Use standard Markdown formatting.
   </output_format>
 

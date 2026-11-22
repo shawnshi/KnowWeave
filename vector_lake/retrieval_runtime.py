@@ -278,6 +278,14 @@ def request_scope(query, *, top_k=None, max_chars=None):
                 conn.execute(f'PRAGMA busy_timeout={int(timeout)}')
             except Exception as exc:
                 log.warning('Retrieval SQL budget cleanup: %s', safe_error(exc))
+                try:
+                    import sqlite3
+                    if isinstance(exc, sqlite3.Error):
+                        from vector_lake import db_store
+                        if conn is getattr(db_store._LOCAL, 'conn', None):
+                            db_store.close_connection()
+                except Exception:
+                    pass
         try:
             _finish(state)
         except Exception as exc:

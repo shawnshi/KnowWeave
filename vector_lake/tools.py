@@ -47,6 +47,7 @@ from vector_lake.tool_maintenance import (
     backup_retention_report,
     claim_projection_drift_report,
     idempotency_index_report,
+    outbox_recovery,
     repair_claim_pointers,
     repair_idempotency_keys,
 )
@@ -103,6 +104,7 @@ __all__ = [
     "draft_anchors",
     "backfill_anchors",
     "idempotency_index_report",
+    "outbox_recovery",
     "repair_idempotency_keys",
     "repair_claim_pointers",
     "search_vector_lake",

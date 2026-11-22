@@ -535,3 +535,33 @@ def repair_claim_pointers(dry_run: bool = True, batch: int = 2000, edges: bool =
         + (f"; re-keyed {rekeyed} edge row(s)" if edges else "")
         + f". Rollback file: {rollback}"
     )
+
+
+def outbox_recovery(
+    *,
+    retry: bool = False,
+    clear_failed: bool = False,
+    filename: str = "",
+    dry_run: bool = True,
+) -> str:
+    """Inspect, retry, or cancel failed mutation_outbox rows."""
+    if retry and clear_failed:
+        raise ValueError("Specify at most one of --retry or --clear-failed.")
+    target = filename.strip() or None
+    rows = db_store.list_failed_outbox_rows(target)
+    if not rows:
+        return "No failed mutation_outbox rows found."
+    lines = [f"Failed mutation_outbox rows ({len(rows)}):"]
+    for row in rows[:50]:
+        err = (row.get("last_error") or "").replace("\n", " ")[:120]
+        lines.append(f"  id={row['id']} file={row['filename']} type={row['mutation_type']} attempts={row['attempt_count']} error={err}")
+    if len(rows) > 50:
+        lines.append(f"  ... ({len(rows) - 50} more)")
+    if dry_run or (not retry and not clear_failed):
+        lines.append("(Dry run — pass --retry --apply or --clear-failed --apply to mutate.)")
+        return "\n".join(lines)
+    if retry:
+        changed = db_store.retry_failed_outbox_rows(target)
+        return "\n".join([*lines, f"Re-queued {changed} failed outbox row(s) to pending."])
+    changed = db_store.clear_failed_outbox_rows(target)
+    return "\n".join([*lines, f"Cancelled {changed} failed outbox row(s)."])

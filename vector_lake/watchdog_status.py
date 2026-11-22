@@ -102,7 +102,7 @@ def write_status(
                 # failures) and must not read as a fault: a transient database-lock loss
                 # used to make the whole daemon report ``halted``, which both health
                 # surfaces treat as unhealthy, while it recovered by itself.
-                priority = {"halted": 3, "error": 2, "recovering": 1, "processing": 1, "idle": 0}
+                priority = {"halted": 4, "error": 3, "recovering": 2, "processing": 1, "idle": 0}
                 aggregate = max(
                     components.values(),
                     key=lambda item: priority.get(str(item.get("status", "idle")), 0),

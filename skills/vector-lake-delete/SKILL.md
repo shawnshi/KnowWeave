@@ -27,29 +27,26 @@ triggers: 'When the user requests to cascade-delete a raw source or remove a sou
 <execution_workflow>
   <workflow>
     1. **Target Identification:** Extract the `raw_path` argument from the user's request.
-    2. **Blast Radius Preview:** Run `python cli.py delete-source <raw_path>` (defaults to dry-run) via bash to determine the exact impact (nodes and edges to be deleted).
+    2. **Blast Radius Preview:** Run `python cli.py delete <raw_path>` (defaults to dry-run) via bash to determine the exact impact (nodes and edges to be deleted).
     3. **Sandbox Registration:** Log the previewed blast radius into the `scratch/` sandbox isolation area for safe human review.
     4. **[FABLE 5 CHECKPOINT]:** Halt operations. Present the deletion blast radius to the human user and request explicit authorization to proceed.
-    5. **Destructive Execution:** Upon receiving human approval, execute `python cli.py delete-source <raw_path> --apply` via bash.
+    5. **Destructive Execution:** Upon receiving human approval, execute `python cli.py delete <raw_path> --apply` via bash.
     6. **Knowledge Registry Sync:** Run `python cli.py projections` to verify all projections remain healthy.
   </workflow>
 
   <tool_dispatch>
-    - `bash`: `python cli.py delete-source <raw_path> [--apply]` for safe preview and destructive deletion.
+    - `bash`: `python cli.py delete <raw_path> [--apply]` for safe preview and destructive deletion.
     - `Reson-KnowWeave-mcp`: `inspect_projections` to verify projection health after deletion.
     - `invoke_subagent`: Mandatory for concurrent tasks or validation sweeps if needed.
   </tool_dispatch>
 
   <checkpoint_rules>
-    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。任何真实数据删除（`dry_run=False`）前，必须向用户清晰呈现将被级联删除的文件和知识图谱节点列表，并等待人类确认。
+    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。任何真实数据删除（`--apply`）前，必须向用户清晰呈现将被级联删除的文件和知识图谱节点列表，并等待人类确认。
   </checkpoint_rules>
 </execution_workflow>
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。在这里评估要删除的目标路径是否合理，核对 dry_run 返回的级联节点列表是否符合预期，判断是否包含不应删除的全局根节点。]
-    </thought>
     # Deletion Blast Radius Report
     - **Target Source:** [Path]
     - **Wiki Pages Affected:** [List]

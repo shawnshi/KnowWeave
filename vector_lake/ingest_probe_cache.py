@@ -22,11 +22,15 @@ def _signature(path: Path):
 
 def cli_identity(binary: str, backend: str) -> str | None:
     """Recognize native executables or declared npm packages; unknown shims stay uncached."""
-    if backend not in PACKAGE_NAMES:
+    if backend not in PACKAGE_NAMES and backend != "agy":
         return None
     path = Path(binary).resolve()
     try:
-        parts = [_signature(path)]
+        parts: list = [_signature(path)]
+        if backend == "agy":
+            if path.suffix.lower() != ".exe" and path.stat().st_size <= 65536:
+                parts.append(hashlib.sha256(path.read_bytes()).hexdigest())
+            return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
         if path.suffix.lower() == ".exe":
             return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
         roots = list(path.parents)[:5]

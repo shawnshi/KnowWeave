@@ -44,12 +44,6 @@ description: 'Synthesize graph topology insights into the unified review surface
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Does the audit cover the requested nodes/graphs?
-      - Have we properly invoked the `trigger_audit_graph` tool?
-      - Are the insights actionable?
-    </thought>
     Deliver a comprehensive markdown report or an artifact presenting the synthesized graph topology insights, emphasizing actionable knowledge debt.
   </output_format>
 

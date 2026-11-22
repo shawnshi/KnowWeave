@@ -41,12 +41,6 @@ description: 'Validate runtime dependencies and filesystem layout health of Vect
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Did the MCP tool execute properly?
-      - Are the results clearly indicating health or failures?
-      - Have Fable 5 checkpoint conditions been met?
-    </thought>
     Output a structured markdown report summarizing the health status, clearly distinguishing between healthy nodes and critical failures.
   </output_format>
 

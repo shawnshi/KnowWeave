@@ -27,7 +27,7 @@ READ_COLUMNS = {
 UNRECOGNIZED_LEGACY_SECONDS = 86400
 
 PROJECTIONS = ("memory_gram", "vectors", "page_projection", "fts_index", "tantivy_mirror", "claim_index", "timeline_events", "governance_queue")
-STATES = frozenset({"idle", "processing", "recovering", "error", "halted", "starting", "stopped", "running", "paused", "disabled", "unknown"})
+STATES = frozenset({"idle", "processing", "recovering", "error", "halted", "starting", "stopped", "running", "paused", "backend_paused", "disabled", "unknown"})
 JOB_STATES = frozenset({"queued", "dispatched", "awaiting_subagent", "processing", "completed", "failed", "finalizing", "finalized", "cancelled", "superseded", "subagent_processing"})
 OUTBOX_STATES = frozenset({"pending", "processing", "retrying", "completed", "failed", "superseded"})
 
@@ -79,7 +79,7 @@ def _heartbeat(path: Path, now: datetime) -> dict:
             return {"state": "unknown", "reason": "invalid_heartbeat"}
         if any(key in data and data[key] is not None and (type(data[key]) is not int or data[key] < 0) for key in ("task_queue_size", "index_queue_size")) or "shadow" in data and type(data["shadow"]) is not bool:
             return {"state": "unknown", "reason": "invalid_heartbeat"}
-        report = {"state": "degraded" if state in {"error", "halted", "stopped", "unknown"} or age > 120 else "healthy", "status": state, "age_seconds": age}
+        report = {"state": "degraded" if state in {"error", "halted", "stopped", "paused", "backend_paused", "unknown"} or age > 120 else "healthy", "status": state, "age_seconds": age}
         for key in ("task_queue_size", "index_queue_size"):
             value = data.get(key)
             if type(value) is int and value >= 0:

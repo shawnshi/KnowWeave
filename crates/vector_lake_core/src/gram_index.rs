@@ -5,16 +5,28 @@ const FIELD_WEIGHTS: [u32; 16] = [0, 4, 3, 7, 1, 5, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0
 
 /// 打包 `[(doc, mask), ...]` -> 小端 uint32 紧凑字节流
 #[pyfunction]
-pub fn pack_postings(postings: Vec<(u32, u8)>) -> Vec<u8> {
+pub fn pack_postings(postings: Vec<(u32, u8)>) -> PyResult<Vec<u8>> {
     let mut bytes = Vec::with_capacity(postings.len() * 4);
     let mut previous = 0u32;
+    let mut has_prev = false;
     for (doc, mask) in postings {
-        let delta = doc.saturating_sub(previous);
+        if has_prev && doc < previous {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "postings must be in non-decreasing document id order",
+            ));
+        }
+        let delta = doc - previous;
+        if delta > (u32::MAX >> 4) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "postings document id delta overflows 28 bits",
+            ));
+        }
         let value = (delta << 4) | (mask as u32 & 0x0F);
         bytes.extend_from_slice(&value.to_le_bytes());
         previous = doc;
+        has_prev = true;
     }
-    bytes
+    Ok(bytes)
 }
 
 /// 解包小端 uint32 紧凑字节流 -> `[(doc, mask), ...]`
@@ -38,41 +50,44 @@ pub fn unpack_postings(blob: &[u8]) -> Vec<(u32, u8)> {
 #[pyfunction]
 #[pyo3(signature = (blob, weights=None, skip_docs=None))]
 pub fn accumulate_postings(
-    blob: &[u8],
+    py: Python<'_>,
+    blob: Vec<u8>,
     weights: Option<Vec<u32>>,
     skip_docs: Option<HashSet<u32>>,
 ) -> HashMap<u32, u32> {
-    let w = match &weights {
-        Some(custom) if custom.len() >= 16 => {
-            let mut arr = [0u32; 16];
-            arr.copy_from_slice(&custom[..16]);
-            arr
+    py.detach(move || {
+        let w = match &weights {
+            Some(custom) if custom.len() >= 16 => {
+                let mut arr = [0u32; 16];
+                arr.copy_from_slice(&custom[..16]);
+                arr
+            }
+            _ => FIELD_WEIGHTS,
+        };
+
+        let mut accumulator = HashMap::new();
+        if blob.len() % 4 != 0 {
+            return accumulator;
         }
-        _ => FIELD_WEIGHTS,
-    };
 
-    let mut accumulator = HashMap::new();
-    if blob.len() % 4 != 0 {
-        return accumulator;
-    }
+        let mut doc = 0u32;
+        for chunk in blob.chunks_exact(4) {
+            let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            doc = doc.wrapping_add(value >> 4);
 
-    let mut doc = 0u32;
-    for chunk in blob.chunks_exact(4) {
-        let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        doc = doc.wrapping_add(value >> 4);
+            if let Some(ref skip) = skip_docs {
+                if skip.contains(&doc) {
+                    continue;
+                }
+            }
 
-        if let Some(ref skip) = skip_docs {
-            if skip.contains(&doc) {
-                continue;
+            let mask = (value & 0x0F) as usize;
+            if mask > 0 {
+                *accumulator.entry(doc).or_insert(0) += w[mask];
             }
         }
-
-        let mask = (value & 0x0F) as usize;
-        if mask > 0 {
-            *accumulator.entry(doc).or_insert(0) += w[mask];
-        }
-    }
-    accumulator
+        accumulator
+    })
 }
 
 /// 极速单文档 Gram 提取 (单字、双字、长字母数字串)
@@ -142,138 +157,146 @@ pub fn extract_grams(key_blob: &str, text_blob: &str, page_blob: &str) -> HashMa
 #[pyfunction]
 #[pyo3(signature = (term_blobs, idf_factors, skip_docs=None, weights=None))]
 pub fn fast_accumulate_terms(
+    py: Python<'_>,
     term_blobs: Vec<(String, Vec<u8>)>,
     idf_factors: HashMap<String, f64>,
     skip_docs: Option<HashSet<u32>>,
     weights: Option<Vec<u32>>,
 ) -> HashMap<u32, f64> {
-    let w = match &weights {
-        Some(custom) if custom.len() >= 16 => {
-            let mut arr = [0u32; 16];
-            arr.copy_from_slice(&custom[..16]);
-            arr
-        }
-        _ => FIELD_WEIGHTS,
-    };
-
-    let mut accumulator: HashMap<u32, f64> = HashMap::new();
-
-    for (term, blob) in term_blobs {
-        if blob.len() % 4 != 0 {
-            continue;
-        }
-        let factor = match idf_factors.get(&term) {
-            Some(&f) if f > 0.0 => f,
-            _ => continue,
+    py.detach(move || {
+        let w = match &weights {
+            Some(custom) if custom.len() >= 16 => {
+                let mut arr = [0u32; 16];
+                arr.copy_from_slice(&custom[..16]);
+                arr
+            }
+            _ => FIELD_WEIGHTS,
         };
 
-        // 先计算该 term 的 folded 整型权重 (doc -> u32)
-        let mut folded: HashMap<u32, u32> = HashMap::new();
-        let mut doc = 0u32;
+        let mut accumulator: HashMap<u32, f64> = HashMap::new();
 
-        for chunk in blob.chunks_exact(4) {
-            let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            doc = doc.wrapping_add(value >> 4);
+        for (term, blob) in term_blobs {
+            if blob.len() % 4 != 0 {
+                continue;
+            }
+            let factor = match idf_factors.get(&term) {
+                Some(&f) if f > 0.0 => f,
+                _ => continue,
+            };
 
-            if let Some(ref skip) = skip_docs {
-                if skip.contains(&doc) {
-                    continue;
+            // 先计算该 term 的 folded 整型权重 (doc -> u32)
+            let mut folded: HashMap<u32, u32> = HashMap::new();
+            let mut doc = 0u32;
+
+            for chunk in blob.chunks_exact(4) {
+                let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                doc = doc.wrapping_add(value >> 4);
+
+                if let Some(ref skip) = skip_docs {
+                    if skip.contains(&doc) {
+                        continue;
+                    }
+                }
+
+                let mask = (value & 0x0F) as usize;
+                if mask > 0 {
+                    *folded.entry(doc).or_insert(0) += w[mask];
                 }
             }
 
-            let mask = (value & 0x0F) as usize;
-            if mask > 0 {
-                *folded.entry(doc).or_insert(0) += w[mask];
+            // 与 Python 的 _fold 完全一致：factor * (weight as f64)
+            for (_doc_id, weight) in folded {
+                let score = factor * (weight as f64);
+                *accumulator.entry(_doc_id).or_insert(0.0) += score;
             }
         }
 
-        // 与 Python 的 _fold 完全一致：factor * (weight as f64)
-        for (doc_id, weight) in folded {
-            let score = factor * (weight as f64);
-            *accumulator.entry(doc_id).or_insert(0.0) += score;
-        }
-    }
-
-    accumulator
+        accumulator
+    })
 }
 
 /// 单次遍历完成 Postings 解码、DF 统计与 IDF 缩放打分 (支持可选的 scope_docs 与 skip_docs 过滤)
 #[pyfunction]
 #[pyo3(signature = (term_blobs, total_docs, skip_docs=None, scope_docs=None, weights=None))]
 pub fn fast_fused_frequencies_and_relevance(
+    py: Python<'_>,
     term_blobs: Vec<(String, Vec<u8>)>,
     total_docs: u32,
     skip_docs: Option<HashSet<u32>>,
     scope_docs: Option<HashSet<u32>>,
     weights: Option<Vec<u32>>,
 ) -> (HashMap<String, u32>, HashMap<u32, f64>) {
-    let w = match &weights {
-        Some(custom) if custom.len() >= 16 => {
-            let mut arr = [0u32; 16];
-            arr.copy_from_slice(&custom[..16]);
-            arr
-        }
-        _ => FIELD_WEIGHTS,
-    };
+    py.detach(move || {
+        let w = match &weights {
+            Some(custom) if custom.len() >= 16 => {
+                let mut arr = [0u32; 16];
+                arr.copy_from_slice(&custom[..16]);
+                arr
+            }
+            _ => FIELD_WEIGHTS,
+        };
 
-    let total = (total_docs as f64).max(1.0);
-    let mut frequencies: HashMap<String, u32> = HashMap::with_capacity(term_blobs.len());
-    let mut decoded: Vec<(String, HashMap<u32, u32>, u32)> = Vec::with_capacity(term_blobs.len());
+        let total = (total_docs as f64).max(1.0);
+        let mut frequencies: HashMap<String, u32> = HashMap::with_capacity(term_blobs.len());
+        let mut decoded: Vec<(String, HashMap<u32, u32>, u32)> = Vec::with_capacity(term_blobs.len());
 
-    for (term, blob) in term_blobs {
-        if blob.len() % 4 != 0 {
-            frequencies.insert(term, 0);
-            continue;
-        }
-
-        let mut folded: HashMap<u32, u32> = HashMap::new();
-        let mut doc = 0u32;
-        let mut term_df = 0u32;
-
-        for chunk in blob.chunks_exact(4) {
-            let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            doc = doc.wrapping_add(value >> 4);
-
-            if let Some(ref skip) = skip_docs {
-                if skip.contains(&doc) {
-                    continue;
-                }
+        for (term, blob) in term_blobs {
+            if blob.len() % 4 != 0 {
+                frequencies.insert(term, 0);
+                continue;
             }
 
-            let mask = (value & 0x0F) as usize;
-            if mask > 0 {
-                let in_scope = match scope_docs {
-                    Some(ref scope) => scope.contains(&doc),
-                    None => true,
-                };
+            let mut folded: HashMap<u32, u32> = HashMap::new();
+            let mut doc = 0u32;
+            let mut term_df = 0u32;
 
-                if in_scope {
-                    if folded.insert(doc, w[mask]).is_none() {
-                        term_df += 1;
+            for chunk in blob.chunks_exact(4) {
+                let value = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                doc = doc.wrapping_add(value >> 4);
+
+                if let Some(ref skip) = skip_docs {
+                    if skip.contains(&doc) {
+                        continue;
+                    }
+                }
+
+                let mask = (value & 0x0F) as usize;
+                if mask > 0 {
+                    let in_scope = match scope_docs {
+                        Some(ref scope) => scope.contains(&doc),
+                        None => true,
+                    };
+
+                    if in_scope {
+                        let prev_exists = folded.contains_key(&doc);
+                        *folded.entry(doc).or_insert(0) += w[mask];
+                        if !prev_exists {
+                            term_df += 1;
+                        }
                     }
                 }
             }
+
+            frequencies.insert(term.clone(), term_df);
+            decoded.push((term, folded, term_df));
         }
 
-        frequencies.insert(term.clone(), term_df);
-        decoded.push((term, folded, term_df));
-    }
+        let mut accumulator: HashMap<u32, f64> = HashMap::new();
+        for (_term, folded, df) in decoded {
+            if df == 0 || folded.is_empty() {
+                continue;
+            }
+            let factor = (1.0 + total / (df as f64)).ln();
+            if factor <= 0.0 {
+                continue;
+            }
+            for (doc, weight) in folded {
+                *accumulator.entry(doc).or_insert(0.0) += factor * (weight as f64);
+            }
+        }
 
-    let mut accumulator: HashMap<u32, f64> = HashMap::new();
-    for (_term, folded, df) in decoded {
-        if df == 0 || folded.is_empty() {
-            continue;
-        }
-        let factor = (1.0 + total / (df as f64)).ln();
-        if factor <= 0.0 {
-            continue;
-        }
-        for (doc, weight) in folded {
-            *accumulator.entry(doc).or_insert(0.0) += factor * (weight as f64);
-        }
-    }
-
-    (frequencies, accumulator)
+        (frequencies, accumulator)
+    })
 }
 
 /// Intersect document ids; exact substring verification still belongs to Python.

@@ -79,18 +79,29 @@ def payload_root_from_env() -> Path | None:
     """``VECTOR_LAKE_PAYLOAD_ROOT`` as a usable root, or ``None`` when unset.
 
     A configured root that resolves to a filesystem anchor (``C:\\``, ``/``, a UNC
-    share root) puts every path "inside the sandbox" and therefore disables the
-    gate.  That is rejected outright rather than silently downgrading the check:
-    the operator has to name a real directory.
+    share root) or a broad host/user/repository/MEMORY root puts general host
+    files "inside the sandbox" and disables the gate.  Reject those outright so
+    the operator has to name a dedicated directory.
     """
     raw = (os.environ.get("VECTOR_LAKE_PAYLOAD_ROOT") or "").strip()
     if not raw:
         return None
+    from vector_lake import get_extension_root
+
     resolved = _resolve(raw)
-    if resolved == Path(resolved.anchor):
+    disallowed = {
+        Path(resolved.anchor),
+        Path.home().resolve(),
+        *host_home_dirs(),
+        get_extension_root().resolve(),
+    }
+    mem_override = (os.environ.get("VECTOR_LAKE_MEMORY_DIR") or "").strip()
+    if mem_override:
+        disallowed.add(_resolve(mem_override))
+    disallowed.add(legacy_memory_root())
+    if resolved in disallowed:
         raise PayloadRootError(
-            f"VECTOR_LAKE_PAYLOAD_ROOT={raw!r} resolves to the filesystem root "
-            f"{resolved}; that would make the payload sandbox vacuous. Point it at "
-            "a dedicated directory instead."
+            f"VECTOR_LAKE_PAYLOAD_ROOT={raw!r} resolves to {resolved}, which is too broad "
+            "and would make the payload sandbox vacuous. Point it at a dedicated directory instead."
         )
     return resolved

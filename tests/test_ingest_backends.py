@@ -18,7 +18,7 @@ from vector_lake.tool_ingest import calculate_hash
 REPO = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("backend", ["pi", "gemini", "codex"])
+@pytest.mark.parametrize("backend", ["pi", "gemini", "codex", "agy"])
 def test_config_selects_builtin_backend(backend):
     selection = ingest_backend.resolve_ingest_backend(env={}, config={"ingest": {"backend": backend}})
     assert selection.backend == backend
@@ -158,14 +158,17 @@ def _fake_cli(tmp_path: Path, backend: str, monkeypatch, payload: dict | None = 
     program.write_text(
         "import json,os,sys\nfrom pathlib import Path\n"
         f"backend={backend!r}\nfeatures={sorted(ingest_cli.CODEX_REQUIRED_FEATURES)!r}\n"
-        "if '--help' in sys.argv:\n print('--sandbox --ephemeral --output-schema --output-last-message --output-format --extensions --policy --prompt'); sys.exit(0)\n"
+        "if '--help' in sys.argv:\n print('--sandbox --ephemeral --output-schema --output-last-message --output-format --extensions --policy --prompt --input-format --mode --settings --json-schema --print-timeout'); sys.exit(0)\n"
         "if sys.argv[1:]==['features','list']:\n print('\\n'.join(f'{key} stable true' for key in features+['secret_auth_storage'])); sys.exit(0)\n"
-        "prompt=sys.stdin.read()\n"
+        "raw_stdin=sys.stdin.read()\n"
+        "prompt=json.loads(raw_stdin)['message']['content'] if backend=='agy' else raw_stdin\n"
         "assert 'HOST-SUPPLIED CONTEXT' in prompt\n"
+        "settings_path=os.environ['GEMINI_CLI_SYSTEM_SETTINGS_PATH'] if backend=='gemini' else (sys.argv[sys.argv.index('--settings')+1] if backend=='agy' else None)\n"
         f"Path({str(record)!r}).write_text(json.dumps({{'argv':sys.argv,'cwd':os.getcwd(),'prompt':prompt,"
-        "'settings':json.loads(Path(os.environ['GEMINI_CLI_SYSTEM_SETTINGS_PATH']).read_text()) if backend=='gemini' else None}),encoding='utf-8')\n"
+        "'settings':json.loads(Path(settings_path).read_text()) if settings_path else None}),encoding='utf-8')\n"
         f"payload=Path({str(result_path)!r}).read_text(encoding='utf-8')\n"
         "if backend=='codex':\n Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(payload,encoding='utf-8'); print('diagnostic event, not the answer')\n"
+        "elif backend=='agy':\n print('startup diagnostic notice'); print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':payload}}))\n"
         "else:\n print(json.dumps({'response':payload,'stats':{}}))\n",
         encoding="utf-8",
     )
@@ -179,7 +182,7 @@ def _fake_cli(tmp_path: Path, backend: str, monkeypatch, payload: dict | None = 
     return record
 
 
-@pytest.mark.parametrize("backend", ["codex", "gemini"])
+@pytest.mark.parametrize("backend", ["codex", "gemini", "agy"])
 def test_real_subprocess_seam_protocol_and_cleanup(backend, isolated_memory, tmp_path, monkeypatch):
     packet = _packet(isolated_memory)
     record = _fake_cli(tmp_path, backend, monkeypatch)
@@ -193,6 +196,14 @@ def test_real_subprocess_seam_protocol_and_cleanup(backend, isolated_memory, tmp
         assert "mcp_servers={}" in argv and "features.shell_tool=false" in argv
         assert "features.secret_auth_storage=false" not in argv
         assert "features.skip_host_skill_discovery=true" in argv
+    elif backend == "agy":
+        settings = invocation["settings"]
+        assert settings["allowNonWorkspaceAccess"] is False
+        assert settings["trustedWorkspaces"] == []
+        assert "command(*)" in settings["permissions"]["deny"]
+        assert "read(*)" in settings["permissions"]["deny"]
+        assert "--mode" in argv and argv[argv.index("--mode") + 1] == "plan"
+        assert "--sandbox" in argv
     else:
         settings = invocation["settings"]
         assert settings["admin"]["mcp"]["enabled"] is False
@@ -201,7 +212,7 @@ def test_real_subprocess_seam_protocol_and_cleanup(backend, isolated_memory, tmp
         assert "--policy" in argv and argv[argv.index("--extensions") + 1] == "none"
 
 
-@pytest.mark.parametrize("backend", ["codex", "gemini"])
+@pytest.mark.parametrize("backend", ["codex", "gemini", "agy"])
 @pytest.mark.parametrize("script", ["ingest_runner.py", "ingest_runner_service.py"])
 def test_fresh_check_entrypoints_never_claim_or_write_status(backend, script, isolated_memory, tmp_path, monkeypatch):
     _fake_cli(tmp_path, backend, monkeypatch)
@@ -241,7 +252,7 @@ def test_deadline_is_shared_with_capability_probes(isolated_memory, monkeypatch)
         ingest_cli.invoke_cli(_packet(isolated_memory), "codex")
 
 
-@pytest.mark.parametrize("backend", ["codex", "gemini"])
+@pytest.mark.parametrize("backend", ["codex", "gemini", "agy"])
 def test_real_queue_claim_model_subprocess_and_finalizer(backend, isolated_memory, tmp_path, monkeypatch):
     from vector_lake import db_store, ingest_worker, subagent_handoff, tool_ingest
     from tests.test_ingest_manifest import _raw_and_candidate, _relation
@@ -276,6 +287,11 @@ def test_real_queue_claim_model_subprocess_and_finalizer(backend, isolated_memor
     ("gemini", '{"error":{"code":"AUTH"},"response":"{}"}', 0, "returned an error"),
     ("gemini", '{"response":"```json\\n{}\\n```"}', 0, "child JSON invalid"),
     ("gemini", '{}', 0, "omitted its final response"),
+    ("agy", '{"event":"result","result":{"error":{"code":"AUTH"},"response":"{}"}}', 0, "returned an error"),
+    ("agy", '{"event":"result","result":{"status":"ERROR","response":"{}"}}', 0, "returned an error"),
+    ("agy", "{broken json line", 0, "stream-json line is not JSON"),
+    ("agy", "", 0, "omitted its final response"),
+    ("agy", "", 1, "exited 1"),
     ("codex", "", 0, "no final message"),
     ("codex", "", 1, "exited 1"),
     ("gemini", "", 1, "exited 1"),
@@ -584,3 +600,27 @@ def test_normal_and_dead_owned_pid_probes(tmp_path):
         stop_contained(process)
         process.wait(timeout=5)
     assert ingest_backend.pid_is_live(process.pid) is False
+
+
+def test_agy_probe_cache_and_batch_metachar_rejection(isolated_memory, tmp_path, monkeypatch):
+    from vector_lake import ingest_probe_cache
+
+    launcher = tmp_path / "agy.cmd"
+    launcher.write_text("@echo off\necho ok\n", encoding="utf-8")
+    assert ingest_probe_cache.cli_identity(str(launcher), "agy") is not None
+    calls = []
+    ingest_probe_cache.cached_capabilities(
+        "agy", str(launcher), "p1", time.monotonic() + 30,
+        lambda: (calls.append(1) or ingest_cli.CliCapabilities(str(launcher))),
+        ingest_cli.CliCapabilities,
+    )
+    ingest_probe_cache.cached_capabilities(
+        "agy", str(launcher), "p1", time.monotonic() + 30,
+        lambda: (calls.append(1) or ingest_cli.CliCapabilities(str(launcher))),
+        ingest_cli.CliCapabilities,
+    )
+    assert len(calls) == 1
+
+    monkeypatch.setattr(ingest_cli.os, "name", "nt")
+    with pytest.raises(ValueError, match="unsafe cmd.exe"):
+        ingest_cli._launcher([str(launcher), "--settings", "bad&whoami.json"])

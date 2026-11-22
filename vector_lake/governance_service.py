@@ -135,7 +135,14 @@ def resolve_governance_item(item_id: str, resolution: str = "skip", change_manif
         return _resolve_locked(item_id, resolution, change_manifest)
 
 
+_ALLOWED_RESOLUTIONS = frozenset({
+    "skip", "create", "merge", "acknowledge", "approve", "reject", "defer", "dismiss",
+})
+
+
 def _resolve_locked(item_id: str, resolution: str = "skip", change_manifest: dict | None = None) -> dict | None:
+    if not isinstance(resolution, str) or resolution not in _ALLOWED_RESOLUTIONS:
+        raise ValueError(f"Unsupported governance resolution {resolution!r}; expected one of {sorted(_ALLOWED_RESOLUTIONS)}")
     queue = governance_store.load_governance_queue()
     for item in queue["items"]:
         if item.get("item_id") != item_id:

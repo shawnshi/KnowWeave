@@ -13,7 +13,7 @@ def main() -> int:
     print(f"==> Building vector-lake-core from {CRATE_DIR}...")
     try:
         subprocess.run(
-            ["maturin", "build", "--release"],
+            ["maturin", "build", "--release", "--locked"],
             cwd=CRATE_DIR,
             check=True,
         )

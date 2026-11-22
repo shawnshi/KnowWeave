@@ -39,9 +39,10 @@ def _rust_blocks(body: str):
         return None
     if "\x00" in body or "\ufffd" in body:
         return None
-    try:
-        import vector_lake_core
-    except ImportError:
+    from vector_lake.native_core import load_native_core
+
+    vector_lake_core, _ = load_native_core()
+    if vector_lake_core is None:
         return None
     if getattr(vector_lake_core, "blocks_contract", None) is None:
         return None
@@ -111,13 +112,13 @@ def claim_type_for_heading(kind: str, heading: str, text: str) -> str:
     when the rule changes; two copies of it would drift.
     """
     heading_lower = (heading or "").lower()
-    if any(k in heading_lower for k in COMPILED_TRUTH_HEADING_MARKERS):
-        return "compiled-truth"
     if (
         any(k in heading_lower for k in LEDGER_HEADING_MARKERS)
         and not _is_page_scope_disclaimer(text)
     ):
         return "timeline-event"
+    if any(k in heading_lower for k in COMPILED_TRUTH_HEADING_MARKERS):
+        return "compiled-truth"
     return _claim_type_for_block(kind)
 
 
@@ -653,6 +654,19 @@ def extract_page_objects(
             return anchored
         return list(dict.fromkeys([*sources, *anchored]))
 
+    def _parse_declared_relations(raw_text: str) -> list[dict[str, str]]:
+        cleaned = re.sub(r"```.*?```", "", str(raw_text or ""), flags=re.DOTALL)
+        cleaned = re.sub(r"`.*?`", "", cleaned)
+        seen_pairs: set[tuple[str, str]] = set()
+        declared: list[dict[str, str]] = []
+        for match in re.finditer(r"\[([^\[\]]+?)::\s*\[\[([^\[\]]+?)\]\]\]", cleaned):
+            predicate = match.group(1).strip()
+            target = match.group(2).split("|")[0].strip().removesuffix(".md")
+            if predicate and target and (predicate, target) not in seen_pairs:
+                seen_pairs.add((predicate, target))
+                declared.append({"predicate": predicate, "target": target})
+        return declared
+
     def make_claim(text, kind, scope, locator, raw_text, *, explicit_id=None, legacy_text=None) -> dict:
         identity_text = f"{page_key}:summary:{text}" if scope == "page" else f"{page_key}:{text}"
         claim_id = explicit_id or _stable_id("claim", identity_text)
@@ -660,6 +674,7 @@ def extract_page_objects(
         legacy_identity = f"{page_key}:summary:{legacy_text}" if scope == "page" else f"{page_key}:{legacy_text}"
         legacy_id = _stable_id("claim", legacy_identity)
         inline_sources = _parse_inline_sources(raw_text)
+        declared_relations = _parse_declared_relations(raw_text)
         refs = attributed_sources(inline_sources)
         evidence_ids = []
         for ref in refs:
@@ -695,6 +710,7 @@ def extract_page_objects(
         occurrence = {
             "locator": dict(locator), "claim_type": claim_type, "temporal_anchor": temporal,
             "evidence_ids": list(evidence_ids), "source_ids": attached_ids, "inline_sources": inline_sources,
+            "declared_relations": [dict(rel) for rel in declared_relations],
         }
         return {
             "claim_id": claim_id,
@@ -717,6 +733,7 @@ def extract_page_objects(
             "evidence_gap": "" if evidence_ids else ("no_source" if not sources else "ambiguous_source"),
             "source_ids": attached_ids,
             "inline_sources": inline_sources,
+            "declared_relations": [dict(rel) for rel in declared_relations],
             "locator": dict(locator),
             **validity_defaults,
             "temporal_anchor": temporal,
@@ -748,6 +765,12 @@ def extract_page_objects(
                     existing["metadata_conflicts"].append(field)
             for field in ("claim_types", "evidence_ids", "source_ids", "inline_sources", "legacy_claim_ids"):
                 existing[field] = list(dict.fromkeys([*existing[field], *claim[field]]))
+            seen_rel = {(r["predicate"], r["target"]) for r in existing.get("declared_relations", [])}
+            for rel in claim.get("declared_relations", []):
+                key = (rel["predicate"], rel["target"])
+                if key not in seen_rel:
+                    seen_rel.add(key)
+                    existing.setdefault("declared_relations", []).append(dict(rel))
             existing["source_ids"].sort()
             if existing["evidence_ids"]:
                 existing["evidence_gap"] = ""

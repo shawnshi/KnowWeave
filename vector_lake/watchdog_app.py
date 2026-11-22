@@ -123,6 +123,7 @@ class _WatchLoop:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("watchdog_sync")
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
 DEBOUNCE_SECONDS = 3.0
 index_queue = queue.Queue()
@@ -515,8 +516,13 @@ def heal_timeline_projection(force: bool = False) -> dict:
     return {"healed": True, "report": report, "parity": parity}
 
 
-def process_tantivy_mirror_step() -> dict:
+_last_tantivy_idle_write = 0.0
+_last_tantivy_state = ""
+
+
+def process_tantivy_mirror_step(throttle_idle: bool = False) -> dict:
     """One lexical step on the existing worker; never drain the whole backlog."""
+    global _last_tantivy_idle_write, _last_tantivy_state
     from vector_lake import db_store, tantivy_index
 
     db_store.init_db()
@@ -525,13 +531,25 @@ def process_tantivy_mirror_step() -> dict:
         stats["phase"] == "needs_clear" and stats["attempt_count"] >= 3
     )
     state = "error" if blocked else "processing" if stats["status"] == "pending" else "idle"
+    now_t = time.monotonic()
+    if (
+        throttle_idle
+        and state == "idle"
+        and _last_tantivy_state == "idle"
+        and (now_t - _last_tantivy_idle_write) < 30.0
+    ):
+        return stats
+    reported_queue_size = 0 if stats["status"] == "disabled" else stats["pending"]
     write_status(
-        state, stats["pending"], index_queue.qsize(),
+        state, reported_queue_size, index_queue.qsize(),
         f"Tantivy {stats['status']}: phase={stats['phase']}, pending={stats['pending']}, "
         f"blocked={stats['blocked']}, control_attempts={stats['attempt_count']}",
         stats["last_error"] or ("mirror intents blocked; explicit repair required" if blocked else ""),
         component="tantivy",
     )
+    _last_tantivy_state = state
+    if state == "idle":
+        _last_tantivy_idle_write = now_t
     return stats
 
 
@@ -547,7 +565,7 @@ def index_worker_loop():
         try:
             # Independent of Markdown's cooldown and failures; cleanup below owns the connection.
             try:
-                process_tantivy_mirror_step()
+                process_tantivy_mirror_step(throttle_idle=True)
             except Exception as exc:  # noqa: BLE001 - lexical failure cannot stop Markdown work
                 log.error("Tantivy worker error: %s: %s", type(exc).__name__, exc)
                 write_status(

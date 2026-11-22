@@ -6,7 +6,9 @@ import os
 import random
 import re
 import shutil
+import stat
 import string
+import time
 import uuid
 from pathlib import Path
 from typing import List, TypedDict
@@ -14,14 +16,13 @@ from typing import List, TypedDict
 import yaml
 from vector_lake import get_extension_root, host_env
 from vector_lake.node_vocabulary import NODE_PREFIXES, NODE_TYPE_ALTERNATION, NON_NODE_WIKI_FILES
+from vector_lake.path_safety import is_link_or_junction
 from vector_lake.yaml_utils import load_yaml, dump_yaml
 
-try:
-    import vector_lake_core
-    HAVE_CORE = True
-except ImportError:
-    vector_lake_core = None
-    HAVE_CORE = False
+from vector_lake.native_core import load_native_core
+
+vector_lake_core, _CORE_LOAD_ERROR = load_native_core()
+HAVE_CORE = vector_lake_core is not None
 
 _META_DIR_CACHE = None
 _CONFIG_CACHE: dict = {}
@@ -283,35 +284,81 @@ def projection_hash(content: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _has_reserved_device_component(path: Path) -> bool:
+    is_reserved = getattr(os.path, "isreserved", None)
+    if callable(is_reserved) and is_reserved(str(path)):
+        return True
+    if os.name == "nt":
+        reserved = {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+        }
+        for part in path.parts:
+            stem = part.split(".", 1)[0].rstrip(" .").upper()
+            if stem in reserved:
+                return True
+    return False
+
+
+def _has_link_or_junction_ancestor(candidate: Path, stop_at: Path | None = None) -> bool:
+    current = candidate
+    while True:
+        if is_link_or_junction(current):
+            return True
+        if stop_at is not None and current == stop_at:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return False
+
+
+def is_excluded_raw_path(path: Path | str, exclude_paths) -> bool:
+    parts = tuple(p.casefold() for p in Path(str(path)).parts if p and p not in ("/", "\\"))
+    for raw_excl in exclude_paths or ():
+        excl_parts = tuple(
+            segment.casefold()
+            for segment in re.split(r"[\\/]+", str(raw_excl or "").strip())
+            if segment
+        )
+        if not excl_parts or len(excl_parts) > len(parts):
+            continue
+        width = len(excl_parts)
+        if any(parts[idx : idx + width] == excl_parts for idx in range(len(parts) - width + 1)):
+            return True
+    return False
+
+
 def resolve_ingest_source_path(raw) -> Path | None:
-    """Resolve a raw source path inside the raw root, or ``None`` when it escapes it.
-
-    An ingest item names its source as ``filepath``, and that string is not trustworthy: it
-    arrives in a task packet built by the host runner.  Every reader used to hand it straight
-    to ``open``, so a malformed packet could publish any file the ingest process can read -- a
-    key, a database, another application's config -- as a canonical wiki page.  Accepting only
-    a path that resolves inside ``raw/`` is what makes "the source of this page" a fact about
-    the raw tree rather than about the filesystem.
-
-    Both spellings that occur in practice are accepted: a rooted path (all 1866 live ledger
-    rows are absolute) and one written relative to the memory root or the raw root
-    (``raw/x.md``, ``x.md`` -- the form hand-written packets and tests use).
-    """
+    """Resolve a raw source path inside the raw root, or ``None`` when it escapes it."""
     raw_text = str(raw or "").strip()
     if not raw_text:
         return None
-    root = get_raw_dir().resolve()
+    raw_root = get_raw_dir()
+    if _has_link_or_junction_ancestor(raw_root):
+        return None
+    root = raw_root.resolve()
     path = Path(raw_text)
     if not path.is_absolute():
         parts = [part for part in re.split(r"[\\/]+", raw_text) if part]
-        if parts and parts[0].lower() == root.name:
+        if parts and parts[0].lower() == root.name.lower():
             parts = parts[1:]
         path = root.joinpath(*parts) if parts else root
+    if _has_reserved_device_component(path):
+        return None
     try:
+        if path.exists() and _has_link_or_junction_ancestor(path, raw_root if str(path).startswith(str(raw_root)) else None):
+            return None
         resolved = path.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    return resolved if resolved.is_relative_to(root) else None
+    if _has_reserved_device_component(resolved) or not resolved.is_relative_to(root):
+        return None
+    if resolved.exists() and is_link_or_junction(resolved):
+        return None
+    return resolved
 
 
 def validate_raw_ingest_source_path(value: str) -> Path:
@@ -319,11 +366,14 @@ def validate_raw_ingest_source_path(value: str) -> Path:
     path = resolve_ingest_source_path(value)
     if path is None:
         raise ValueError("source escaped the raw root")
+    if path.exists():
+        info = path.lstat()
+        if is_link_or_junction(path):
+            raise ValueError("ingest source symlink or junction is rejected")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+            raise ValueError("hardlinked ingest source is rejected")
     config = load_config()
-    if is_private_raw_source(str(path)) or any(
-        str(excluded).casefold() in path.as_posix().casefold()
-        for excluded in config.get("exclude_paths", [])
-    ):
+    if is_private_raw_source(str(path)) or is_excluded_raw_path(path, config.get("exclude_paths", [])):
         raise ValueError("ingest source is in an excluded directory")
     if path.suffix.lower() not in config.get("supported_extensions", [".md", ".txt"]):
         raise ValueError("ingest source format is excluded")
@@ -616,11 +666,25 @@ def atomic_write_text(
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     # The payload owns its newlines; Windows translation would turn CRLF into CRCRLF.
-    with open(temp_path, "w", encoding="utf-8", newline="") as handle:
-        handle.write(content)
-        flush_durable(handle)
-    os.replace(temp_path, path)
-    fsync_directory(path.parent)
+    try:
+        with open(temp_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            flush_durable(handle)
+        for attempt in range(5):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        fsync_directory(path.parent)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 def ensure_parent_dir(path: str | Path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -643,8 +707,8 @@ def write_markdown_file(path: str | Path, frontmatter: dict, body: str, skip_val
                 raise SafeWriteError(f"丢失了证据时间线 (Evidence Timeline)。旧文件有 {old_timeline_count} 条记录，新文件只有 {new_timeline_count} 条记录。请调用 read_resource 重新读取当前文件状态，并使用 Append 模式进行增量合并，而不是直接覆盖。")
         except SafeWriteError:
             raise
-        except Exception:
-            pass
+        except (OSError, ValueError) as exc:
+            log.warning("Existing markdown pre-write check failed for %s (%s); continuing.", path.name, type(exc).__name__)
 
     filename = path.name
     if not skip_validation:

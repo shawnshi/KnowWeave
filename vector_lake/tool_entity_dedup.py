@@ -7,7 +7,7 @@ import re
 from collections import Counter
 from filelock import FileLock
 from vector_lake import get_extension_root
-from vector_lake.wiki_utils import get_index_path, normalize_memory_key
+from vector_lake.wiki_utils import atomic_write_text, get_index_path, normalize_memory_key
 
 log = logging.getLogger("vector-lake-entity-dedup")
 
@@ -126,7 +126,11 @@ def check_duplicate_entity(candidate_title: str, candidate_type: str, candidate_
                 index_data = json.load(f)
         except Exception as e:
             log.warning(f"Could not load index for PIEA check: {e}")
-            return json.dumps({"is_duplicate": False, "reason": "Could not read index."})
+            return json.dumps({
+                "status": "error",
+                "is_duplicate": None,
+                "reason": f"Could not read index: {type(e).__name__}",
+            }, ensure_ascii=False)
         nodes = index_data.get("nodes", {})
 
     CONFIG_PATH = get_extension_root() / "config.json"
@@ -273,8 +277,7 @@ def check_duplicate_entity(candidate_title: str, candidate_type: str, candidate_
                 "timestamp": time.time()
             }
             
-            with open(pending_path, "w", encoding="utf-8") as f:
-                json.dump(pending_data, f, ensure_ascii=False)
+            atomic_write_text(pending_path, json.dumps(pending_data, ensure_ascii=False))
                 
             return json.dumps({
                 "is_duplicate": False, 
@@ -283,12 +286,9 @@ def check_duplicate_entity(candidate_title: str, candidate_type: str, candidate_
                 
     except Exception as e:
         log.error(f"Error accessing pending entities lock: {e}")
-
-    # Fallback return if lock fails
-    from vector_lake.wiki_utils import normalize_entity_name
-    new_key = normalize_entity_name(f"{candidate_type.capitalize()}_{candidate_title}")
-    return json.dumps({
-        "is_duplicate": False, 
-        "instruction": f"Safe to create new entity. You MUST use the exact filename: {new_key}.md"
-    })
+        return json.dumps({
+            "status": "error",
+            "is_duplicate": None,
+            "reason": f"Pending registry error: {type(e).__name__}",
+        }, ensure_ascii=False)
 

@@ -114,7 +114,7 @@ def test_missing_native_file_is_not_a_successful_identity(tmp_path, monkeypatch)
     from vector_lake import runtime_identity as ri
     import importlib.machinery
     for name in list(sys.modules):
-        if name == 'vector_lake_core' or name.startswith('vector_lake_core.'):
+        if ri._is_core_module_name(name):
             monkeypatch.delitem(sys.modules, name)
     core = types.ModuleType('vector_lake_core')
     core.__file__ = str(tmp_path / ('missing' + importlib.machinery.EXTENSION_SUFFIXES[0]))
@@ -315,3 +315,98 @@ def test_non_module_loaded_entry_and_missing_function_are_honest(tmp_path, monke
     record = ri._module_record(mod.__name__, path, ('absent',))
     assert record['functions']['absent']['status'] == 'missing'
     assert record['status'] == 'function_code_mismatch'
+
+
+def test_native_record_resolves_versioned_slot_shim(tmp_path, monkeypatch):
+    import hashlib
+    import importlib.machinery
+    from vector_lake import runtime_identity as ri
+
+    for name in list(sys.modules):
+        if ri._is_core_module_name(name):
+            monkeypatch.delitem(sys.modules, name)
+
+    ext_suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+    slot_dir = tmp_path / 'vector_lake_core_0_2_8'
+    slot_dir.mkdir()
+    slot_file = slot_dir / f'vector_lake_core{ext_suffix}'
+    slot_bytes = b'synthetic-native-0-2-8'
+    slot_file.write_bytes(slot_bytes)
+
+    impl = types.ModuleType('vector_lake_core_0_2_8.vector_lake_core')
+    impl.__file__ = str(slot_file)
+    impl.version = lambda: '0.2.8'
+
+    shim = types.ModuleType('vector_lake_core')
+    shim.__file__ = str(tmp_path / 'vector_lake_core' / '__init__.py')
+    shim._impl = impl
+    shim.version = impl.version
+
+    unrelated = types.ModuleType('vector_lake_core_helper')
+    unrelated.__file__ = str(tmp_path / f'helper{ext_suffix}')
+
+    monkeypatch.setitem(sys.modules, 'vector_lake_core_0_2_8.vector_lake_core', impl)
+    monkeypatch.setitem(sys.modules, 'vector_lake_core', shim)
+    monkeypatch.setitem(sys.modules, 'vector_lake_core_helper', unrelated)
+
+    record = ri._native_record()
+    assert record['status'] == 'loaded'
+    assert record['version'] == '0.2.8'
+    assert Path(record['binary_path']).resolve() == slot_file.resolve()
+    assert record['on_disk_binary_sha256'] == hashlib.sha256(slot_bytes).hexdigest()
+
+
+def test_native_record_rejects_multiple_loaded_slots(tmp_path, monkeypatch):
+    import importlib.machinery
+    from vector_lake import runtime_identity as ri
+
+    for name in list(sys.modules):
+        if ri._is_core_module_name(name):
+            monkeypatch.delitem(sys.modules, name)
+
+    ext_suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+    impl_old = types.ModuleType('vector_lake_core_0_2_1.vector_lake_core')
+    impl_old.__file__ = str(tmp_path / f'old{ext_suffix}')
+    impl_new = types.ModuleType('vector_lake_core_0_2_8.vector_lake_core')
+    impl_new.__file__ = str(tmp_path / f'new{ext_suffix}')
+    impl_new.version = lambda: '0.2.8'
+
+    shim = types.ModuleType('vector_lake_core')
+    shim.__file__ = str(tmp_path / 'vector_lake_core' / '__init__.py')
+    shim._impl = impl_new
+    shim.version = impl_new.version
+
+    monkeypatch.setitem(sys.modules, 'vector_lake_core_0_2_1.vector_lake_core', impl_old)
+    monkeypatch.setitem(sys.modules, 'vector_lake_core_0_2_8.vector_lake_core', impl_new)
+    monkeypatch.setitem(sys.modules, 'vector_lake_core', shim)
+
+    record = ri._native_record()
+    assert record['status'] == 'unverifiable'
+    assert 'Expected exactly one loaded core extension origin' in record['reason']
+
+
+def test_native_record_rejects_shim_impl_mismatch(tmp_path, monkeypatch):
+    import importlib.machinery
+    from vector_lake import runtime_identity as ri
+
+    for name in list(sys.modules):
+        if ri._is_core_module_name(name):
+            monkeypatch.delitem(sys.modules, name)
+
+    ext_suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+    impl = types.ModuleType('vector_lake_core_0_2_8.vector_lake_core')
+    impl.__file__ = str(tmp_path / f'slot{ext_suffix}')
+    impl.version = lambda: '0.2.8'
+
+    other_impl = types.ModuleType('other_impl')
+    shim = types.ModuleType('vector_lake_core')
+    shim.__file__ = str(tmp_path / 'vector_lake_core' / '__init__.py')
+    shim._impl = other_impl
+    shim.version = lambda: '0.2.8'
+
+    monkeypatch.setitem(sys.modules, 'vector_lake_core_0_2_8.vector_lake_core', impl)
+    monkeypatch.setitem(sys.modules, 'vector_lake_core', shim)
+
+    record = ri._native_record()
+    assert record['status'] == 'unverifiable'
+    assert 'shim implementation' in record['reason']

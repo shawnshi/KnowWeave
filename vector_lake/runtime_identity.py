@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -53,6 +54,8 @@ def _constant(value):
         return ['float', struct.pack('!d', value).hex()]
     if isinstance(value, complex):
         return ['complex', struct.pack('!dd', value.real, value.imag).hex()]
+    if isinstance(value, slice):
+        return ['slice', [_constant(value.start), _constant(value.stop), _constant(value.step)]]
     if value is Ellipsis:
         return ['ellipsis']
     if value is None or isinstance(value, (str, int, bool)):
@@ -170,19 +173,33 @@ def _module_record(name: str, expected_path: Path, functions: tuple[str, ...], c
         return {**record, 'status': 'source_unverifiable', 'error_type': type(exc).__name__}
 
 
+_VERSIONED_CORE_MODULE_RE = re.compile(r'vector_lake_core_\d+(?:_\d+)*\.vector_lake_core')
+
+
+def _is_core_module_name(name: str) -> bool:
+    return (
+        name == 'vector_lake_core'
+        or name.startswith('vector_lake_core.')
+        or bool(_VERSIONED_CORE_MODULE_RE.fullmatch(name))
+    )
+
+
 def _native_record() -> dict:
     core = sys.modules.get('vector_lake_core')
     if core is None:
         return {'status': 'not_loaded'}
     binaries = {}
     for name, module in list(sys.modules.items()):
-        if name == 'vector_lake_core' or name.startswith('vector_lake_core.'):
+        if _is_core_module_name(name):
             filename = getattr(module, '__file__', '') or ''
             if any(filename.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES):
                 binaries[Path(filename).resolve()] = module
     if len(binaries) != 1:
         return {'status': 'unverifiable', 'reason': 'Expected exactly one loaded core extension origin'}
     path, = binaries
+    impl = getattr(core, '_impl', None)
+    if isinstance(impl, types.ModuleType) and binaries[path] is not impl:
+        return {'status': 'unverifiable', 'reason': 'Loaded core shim implementation does not match discovered extension origin'}
     try:
         # This hashes disk bytes, NOT a claim to hash the already-mapped native image.
         digest = hashlib.sha256()

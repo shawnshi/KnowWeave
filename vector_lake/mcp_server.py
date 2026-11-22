@@ -101,34 +101,12 @@ def search_timeline(entity_name: str = "", action: str = "", limit: int = 10) ->
             the claim's structured field or from its ``[date] [Tag]`` prefix. Leave empty for all.
         limit: Number of events to return (default 10).
     """
+    clamped_limit = max(1, min(int(limit), 100))
     return search_timeline_events(
         entity_name=entity_name if entity_name else None,
         action=action if action else None,
-        limit=limit
+        limit=clamped_limit
     )
-
-# [CLI-only / Internal]
-def rebuild_timeline_events(dry_run: bool = True, limit: int = 0) -> str:
-    """[MAINTENANCE / REPAIR] Rebuild the timeline_events projection from timeline-event claims. Prefer CLI 'cli.py projections --reconcile --only timeline_events'."""
-    return tools.rebuild_timeline_events_from_claims(
-        dry_run=dry_run,
-        limit=limit if limit and limit > 0 else None,
-    )
-
-# [CLI-only / Internal]
-def memory_gram_index_status() -> str:
-    """Report the exact n-gram index used by operational-memory search.
-
-    The index answers ``search_operational_memory`` in ~0.1-0.5 s instead of the
-    O(rows x terms) scan.  When it reports ``usable=False`` the search silently
-    falls back to the slower exact scan; run the rebuild to restore the fast path.
-    """
-    return tools.memory_gram_index_report()
-
-# [CLI-only / Internal]
-def rebuild_memory_gram_index(dry_run: bool = True) -> str:
-    """[MAINTENANCE / HEAVY] Bulk-rebuild the operational-memory n-gram index (minutes on a large corpus). Prefer CLI 'cli.py gram-index --apply' or background daemon."""
-    return tools.rebuild_memory_gram_index(dry_run=dry_run)
 
 # [CLI-only / Internal]
 def backup_retention_report(keep: int = 0, max_bytes: int = 0, dry_run: bool = True) -> str:
@@ -190,35 +168,6 @@ def inspect_projections() -> str:
             line += f" -> degrades: {entry['degrades']}"
         lines.append(line)
     return "\n".join(lines)
-
-# [CLI-only / Internal]
-def projection_report(limit: int = 20) -> str:
-    """Report drift between Wiki pages, SQLite canonical entities, and index.json."""
-    return tools.projection_diff_report(limit=limit)
-
-# [CLI-only / Internal]
-def canonical_backfill(dry_run: bool = True, limit: int = 50) -> str:
-    """[MAINTENANCE / DISASTER RECOVERY] Backfill missing SQLite canonical rows from existing Wiki pages. Prefer CLI 'cli.py canonical-backfill'."""
-    return tools.canonical_backfill_missing_wiki(dry_run=dry_run, limit=limit)
-
-# [CLI-only / Internal]
-def projection_rebuild_index(dry_run: bool = True) -> str:
-    """[MAINTENANCE / DISASTER RECOVERY] Rebuild index.json, FTS, embeddings, and claim_topology from SQLite canonical state. Prefer CLI 'cli.py projection-rebuild-index'."""
-    return tools.rebuild_index_projection(dry_run=dry_run)
-
-# [CLI-only / Internal]
-def embedding_backfill(dry_run: bool = True, limit: int = 0, include_existing: bool = False) -> str:
-    """[MAINTENANCE / HEAVY] Backfill missing vector embeddings under RPM/TPM rate limits. Prefer CLI 'cli.py embedding-backfill'."""
-    return tools.embedding_backfill_projection(
-        dry_run=dry_run,
-        limit=limit if limit and limit > 0 else None,
-        include_existing=include_existing,
-    )
-
-# [CLI-only / Internal]
-def wiki_restore(dry_run: bool = True, limit: int = 10) -> str:
-    """[MAINTENANCE / DISASTER RECOVERY] Restore missing Wiki Markdown pages from canonical metadata. Prefer CLI 'cli.py wiki-restore'."""
-    return tools.restore_missing_wiki_from_canonical(dry_run=dry_run, limit=limit)
 
 @mcp.tool()
 def get_query_evidence(query: str, node_keys: list[str], domain: str, cluster: str = '') -> str:
@@ -314,7 +263,6 @@ def _payload_path_allowed(abs_path) -> bool:
 def _read_payload(payload_file: str) -> str:
     if not payload_file:
         return ""
-    import os
     from pathlib import Path
 
     abs_path = Path(payload_file).resolve()
@@ -348,41 +296,6 @@ def update_operational_memory(memory_type: str, payload_file: str = "", content:
             return str(e)
     return tool_memory.update_operational_memory(memory_type, text_content)
 
-# [CLI-only / Internal]
-def sync_vector_lake() -> str:
-    """(Legacy Alias) Trigger an ingestion batch scan. Replaced by the asynchronous Subagent pipeline, now wraps prepare_ingest_batch."""
-    try:
-        return tools.sync_vector_lake()
-    except Exception as e:
-        import traceback
-        logging.error(f"MCP Tool Exception (sync_vector_lake): {e}\n{traceback.format_exc()}")
-        return f"MCP Exception: {str(e)}\n{traceback.format_exc()}"
-
-# [CLI-only / Internal]
-def claim_evidence_queue(
-    apply: bool = False,
-    group: str = "prefix",
-    batch_pages: int = 100,
-    page_limit: int = 25,
-) -> str:
-    """Dispatch the unsupported-claim debt to the governance queue as cohort batches.
-
-    Args:
-        apply: Enqueue the batches.  Defaults to a dry run that only reports the plan.
-        group: Cohort axis -- ``prefix`` (the page prefix) or ``month`` (the claim's created month).
-        batch_pages: Pages covered by one governance item.
-        page_limit: Page names stored on each item.
-    """
-    try:
-        return tools.claim_evidence_queue(
-            dry_run=not apply, group=group, batch_pages=batch_pages, page_limit=page_limit
-        )
-    except Exception as e:
-        import traceback
-        logging.error(f"MCP Tool Exception (claim_evidence_queue): {e}\n{traceback.format_exc()}")
-        return f"MCP Exception: {str(e)}\n{traceback.format_exc()}"
-
-
 @mcp.tool()
 def lint_vector_lake(auto_fix: bool = False) -> str:
     """Run self-healing audit on the Wiki nodes.
@@ -395,7 +308,7 @@ def lint_vector_lake(auto_fix: bool = False) -> str:
     except Exception as e:
         import traceback
         logging.error(f"MCP Tool Exception (lint_vector_lake): {e}\n{traceback.format_exc()}")
-        return f"MCP Exception: {str(e)}\n{traceback.format_exc()}"
+        return f"MCP Exception: {type(e).__name__}: {str(e)}"
 
 @mcp.tool()
 def preview_query_context(
@@ -502,23 +415,6 @@ def resolve_governance_item(
         except Exception as e:
             return str(e)
     return tools.review_vector_lake(action="resolve", index=item_id, resolution=resolution, change_manifest=manifest)
-# [CLI-only / Internal]
-def trigger_autonomous_research(dry_run: bool = False) -> str:
-    """Autonomously scan graph gaps and governance queue to formulate web research directives.
-    
-    Args:
-        dry_run: If true, just lists the topics without emitting a SYSTEM DIRECTIVE.
-    """
-    return tools.research_vector_lake(dry_run=dry_run)
-
-# [CLI-only / Internal]
-def review_strategic_purpose(as_of: str = "") -> str:
-    """Review due Standing Intelligence Requirements without changing the Wiki.
-
-    Args:
-        as_of: Optional YYYY-MM-DD date. Defaults to the current day.
-    """
-    return tools.review_strategic_purpose(as_of=as_of)
 
 @mcp.tool()
 def get_governance_debt(top: int = 20) -> str:
@@ -533,16 +429,6 @@ def get_governance_debt(top: int = 20) -> str:
 def trigger_audit_graph() -> str:
     """Synthesize graph topology insights into the unified review surface."""
     return tools.audit_graph()
-
-# [CLI-only / Internal]
-def delete_source(raw_path: str, dry_run: bool = True) -> str:
-    """Cascade-delete a raw source and all related wiki pages.
-    
-    Args:
-        raw_path: Path to the raw source file to remove.
-        dry_run: Preview what would be deleted without making changes.
-    """
-    return tools.delete_source(raw_path, dry_run=dry_run)
 
 @mcp.tool()
 def runtime_identity() -> str:
@@ -640,54 +526,6 @@ def gc_vector_lake(
     return tools.gc_vector_lake(**kwargs)
 
 # [CLI-only / Internal]
-def prepare_ingest_batch(batch_size: int = 5) -> str:
-    """Scan for unprocessed raw sources and prepare subagent ingestion instructions.
-    
-    Args:
-        batch_size: Number of files to process in this batch (default: 5).
-    """
-    return tools.prepare_ingest_batch(batch_size=batch_size)
-
-# [CLI-only / Internal]
-def list_ingest_tasks(limit: int = 20, include_queued: bool = True) -> str:
-    """List queued or awaiting-subagent ingest jobs."""
-    return tools.list_ingest_tasks(limit=limit, include_queued=include_queued)
-
-# [CLI-only / Internal]
-def claim_ingest_tasks(limit: int = 5, lease_seconds: int = 3600) -> str:
-    """Lease awaiting ingest task packets to the current-environment subagent host."""
-    return tools.claim_ingest_tasks(limit=limit, lease_seconds=lease_seconds)
-
-# [CLI-only / Internal]
-def list_terminal_failed_ingest_jobs() -> str:
-    """[SCHEDULER / INTERNAL] List ingest jobs that spent their attempt budget, with the source each names."""
-    return tools.list_terminal_failed_ingest_jobs()
-
-
-# [CLI-only / Internal]
-def close_terminal_failed_ingest_jobs(source_ingested_only: bool = True) -> str:
-    """[SCHEDULER / INTERNAL] Mark terminal-failed jobs superseded once their source has been ingested."""
-    return tools.close_terminal_failed_ingest_jobs(source_ingested_only=source_ingested_only)
-
-
-# [CLI-only / Internal]
-def list_abandoned_ingest_sources() -> str:
-    """[SCHEDULER / INTERNAL] List raw sources withheld from dispatch after repeated deterministic failures."""
-    return tools.list_abandoned_ingest_sources()
-
-
-# [CLI-only / Internal]
-def clear_abandoned_ingest_sources(filepath: str = "") -> str:
-    """[SCHEDULER / INTERNAL] Allow abandoned ingest source(s) to be dispatched again (empty filepath = all)."""
-    return tools.clear_abandoned_ingest_sources(filepath or None)
-
-
-# [CLI-only / Internal]
-def expire_ingest_tasks(max_age_seconds: int = 86400) -> str:
-    """[SCHEDULER / INTERNAL] Expire stale awaiting-subagent ingest jobs so they can be retried deliberately."""
-    return tools.expire_ingest_tasks(max_age_seconds=max_age_seconds)
-
-# [CLI-only / Internal]
 def finalize_ingest(
     files_written: list | None = None,
     processed_data: dict | None = None,
@@ -704,7 +542,6 @@ def finalize_ingest(
     """
     import json
     try:
-        import json
         if files_written_payload_file or raw_files_payload_file:
             if not files_written_payload_file or not raw_files_payload_file:
                 return "Error: Both payload files are required when using the file-based ingest contract."
@@ -733,17 +570,20 @@ def visualize_vector_lake(output_dir: str | None = None) -> str:
 
     ``output_dir`` is an *output* directory, not an input sandbox: this call
     writes exactly one file (``vector_lake_graph.html``) into it, so the gate
-    only requires a directory under a known host home.  Compare
-    ``_read_payload``, which additionally requires the ``<root>/<project>/scratch``
-    shape because it reads arbitrary caller-named content.  When ``output_dir``
-    is omitted the file goes to the lake's own ``<MEMORY>/scratch`` tree.
+    only requires a subdirectory inside an approved agent sandbox or host home
+    (never the home/host root itself).  When ``output_dir`` is omitted the file
+    goes to the lake's own ``<MEMORY>/scratch`` tree.
     """
     if output_dir:
+        from pathlib import Path
         from vector_lake import host_env
 
-        if not host_env.is_within_host_home(output_dir):
+        resolved = Path(output_dir).resolve()
+        if resolved in set(host_env.host_home_dirs()) or resolved == Path.home().resolve() or not (
+            _payload_path_allowed(resolved) or host_env.is_within_host_home(resolved)
+        ):
             return "Error: Output directory must be inside an approved agent sandbox."
-    return tools.visualize_vector_lake(output_dir)
+    return tools.visualize_vector_lake(output_dir, open_browser=False)
 
 @mcp.tool()
 def write_wiki_page(filename: str, payload_file: str) -> str:
@@ -772,41 +612,6 @@ def write_wiki_page(filename: str, payload_file: str) -> str:
 
 import uuid
 from vector_lake.governance_store import load_governance_queue, save_governance_queue, _utc_now
-
-# [CLI-only / Internal]
-def propose_schema_mutation(new_category: str, payload_file: str, parent_category: str = "Uncategorized") -> str:
-    """Propose a new taxonomy category to the ontology team.
-    
-    Args:
-        new_category: The name of the new category.
-        payload_file: Absolute path to a temporary file containing a brief definition or justification for the category.
-        parent_category: The parent category (default: 'Uncategorized').
-    """
-    try:
-        description = _read_payload(payload_file)
-    except Exception as e:
-        return str(e)
-    from vector_lake.governance_store import governance_queue_session
-
-    with governance_queue_session():
-        queue = load_governance_queue()
-        item_id = f"gov_{uuid.uuid4().hex[:12]}"
-        queue.setdefault("items", []).append({
-            "item_id": item_id,
-            "type": "schema-mutation",
-            "title": f"New Schema Category: {new_category}",
-            "description": f"Definition: {description}\nParent: {parent_category}",
-            "created_at": _utc_now(),
-            "status": "pending",
-            "source": "mcp-agent",
-            "affected_ids": [],
-            "search_queries": [],
-            "affected_pages": ["SCHEMA_CATEGORIES.md"],
-        })
-        save_governance_queue(queue)
-    return f"Schema mutation proposed and logged as {item_id} for review."
-
-
 
 @mcp.tool()
 def get_mutation_status(outbox_ids: list[int], max_hops: int = 32) -> dict:
@@ -912,23 +717,6 @@ def batch_replace_links(
         return f"{message} Index completion pending verification via get_mutation_status." if ok else message
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return f"Error during scoped link replacement: {type(exc).__name__}: {exc}"
-
-# [CLI-only / Internal]
-def bulk_reconciliation(payload_file: str, dry_run: bool = True) -> str:
-    """Execute a batch of graph reconciliation operations (merge, replace_only, alias).
-    
-    Args:
-        payload_file: Absolute path to a temporary JSON file containing the operations array.
-        dry_run: Whether to perform a dry run (default: True).
-    """
-    import json
-    try:
-        content = _read_payload(payload_file)
-        operations = json.loads(content)
-    except Exception as e:
-        return str(e)
-    from vector_lake.tool_bulk_reconciliation import bulk_reconcile
-    return bulk_reconcile(operations, dry_run)
 
 def main():
     """Own synchronous embedding clients for this CLI server lifetime."""

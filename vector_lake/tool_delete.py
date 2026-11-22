@@ -3,8 +3,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
-
 from vector_lake.wiki_utils import (
     canonical_source_name,
     get_memory_dir,
@@ -12,6 +10,7 @@ from vector_lake.wiki_utils import (
     normalize_sources,
     read_markdown_file,
 )
+from vector_lake.yaml_utils import dump_yaml
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -48,7 +47,7 @@ def delete_source(raw_path: str, dry_run: bool = True) -> str:
         if not normalized:
             return False
         candidate = normalized[0].lower()
-        return candidate == raw_ref_lower or Path(candidate).name == raw_basename_lower
+        return candidate == raw_ref_lower
 
     if not wiki_dir.exists():
         return "Wiki directory not found."
@@ -127,7 +126,7 @@ def delete_source(raw_path: str, dry_run: bool = True) -> str:
             mutations.append({"filename": filename, "is_delete": True})
             deleted += 1
         elif action == "REMOVE_REF":
-            fm_str = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
+            fm_str = dump_yaml(frontmatter, allow_unicode=True, sort_keys=False)
             mutations.append({"filename": filename, "content": f"---\n{fm_str}---\n{body}"})
             updated += 1
 

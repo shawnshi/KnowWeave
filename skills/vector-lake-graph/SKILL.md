@@ -43,12 +43,6 @@ triggers: "Visualize graph, show topology, render vector lake, 3d network graph"
 
 <delivery_standards>
   <output_format>
-    <thought>
-      [执行自我推演与 Metrics 校验区。该区域内容作为模型的推理草稿。]
-      - Are all nodes retrieved from the Logic Lake?
-      - Is the HTML file self-contained?
-      - Did the MCP tool return success?
-    </thought>
     Return the absolute path of the generated HTML dashboard, using Markdown link syntax to allow the user to click and view it in a browser.
   </output_format>
 

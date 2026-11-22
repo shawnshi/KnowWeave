@@ -4,6 +4,9 @@ import ast
 from vector_lake.yaml_utils import load_yaml
 from vector_lake.template_loader import render_template
 
+_MAX_PY_SKELETON_BYTES = 512 * 1024
+
+
 def parse_static_skeleton(filepath: str) -> str:
     """
     Deterministically parses highly structured files (Python, JSON, YAML)
@@ -30,13 +33,23 @@ def parse_static_skeleton(filepath: str) -> str:
                 template_name, variables = "wiki/static_skeleton/json_array.md", {"length": length, "first_type": first_type}
                 
         elif ext == ".py":
+            if os.path.getsize(filepath) > _MAX_PY_SKELETON_BYTES:
+                raise ValueError(f"Python file exceeds {_MAX_PY_SKELETON_BYTES} bytes static skeleton limit.")
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
             tree = ast.parse(content)
             
             classes = [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
-            functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
-            imports = [node.names[0].name for node in ast.walk(tree) if isinstance(node, ast.Import)]
+            functions = [
+                node.name for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            imports = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports.append(node.names[0].name)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imports.append(node.module)
             
             template_name, variables = "wiki/static_skeleton/python.md", {
                 "imports": ", ".join(imports) if imports else "None",

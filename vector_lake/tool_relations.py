@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 
+from vector_lake import retrieval_runtime as runtime
 from vector_lake.db_store import get_db_path
 from vector_lake.relation_catalog import (
     RelationInputError,
@@ -52,6 +54,18 @@ def _scoped_context(conn, nodes, selected):
                     or type(locator.get("block_index")) is not int or locator["block_index"] <= 0):
                 continue
             bound = set()
+            declared = claim.get("declared_relations")
+            if declared is not None:
+                if not isinstance(declared, list):
+                    raise RelationInputError("claim declared_relations must be a list")
+                for item in declared:
+                    if not isinstance(item, dict) or not isinstance(item.get("predicate"), str) or not isinstance(item.get("target"), str):
+                        raise RelationInputError("claim declared_relations entries must carry string predicate and target")
+                    target_key = item["target"].split("|")[0].strip().removesuffix(".md")
+                    target, _ = resolve(target_key)
+                    key = (source, target, item["predicate"].strip())
+                    if key in matches:
+                        bound.add(key)
             for token in re.finditer(r"\[([^\[\]]+?)::\s*\[\[([^\[\]]+?)\]\]\]", row["claim_text"] or ""):
                 target, _ = resolve(token[2].split("|")[0].strip().removesuffix(".md"))
                 key = (source, target, token[1].strip())
@@ -118,6 +132,9 @@ def get_relations(entity_name: str, domain: str, cluster: str = "", depth: int =
         # pragmas. A relation reader owns only this short-lived mode=ro connection.
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
         conn.row_factory = sqlite3.Row
+        state = runtime.current()
+        deadline = state.deadline if state is not None else (time.monotonic() + runtime.REQUEST_SECONDS)
+        conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 1000)
         conn.execute("BEGIN")
         index = get_index_path()
         if index.exists():
@@ -197,4 +214,8 @@ def get_relations(entity_name: str, domain: str, cluster: str = "", depth: int =
         return {**response, "status": "error", "error": {"code": "read_error", "type": type(exc).__name__}}
     finally:
         if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
             conn.close()

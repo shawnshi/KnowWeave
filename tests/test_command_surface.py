@@ -279,3 +279,30 @@ def test_all_current_entrypoint_retrieval_examples_parse_with_domain():
             assert parser.parse_args(tokens[2:]).domain.strip()
             examples += 1
     assert examples >= 15
+
+
+def test_shipped_skills_have_no_thought_tags_and_only_valid_commands():
+    from vector_lake.cli_app import build_parser
+
+    parser = build_parser()
+    subparsers = [a for a in parser._actions if hasattr(a, "choices") and isinstance(a.choices, dict)]
+    valid_cli_commands = set(subparsers[0].choices.keys()) if subparsers else set()
+    stale_symbols = (
+        "gc_vector_lake",
+        "trigger_autonomous_research",
+        "sync_vector_lake",
+        "prepare_ingest_batch",
+        "claim_ingest_tasks",
+        "finalize_ingest",
+        "delete-source",
+    )
+    skill_files = sorted(ROOT.glob("skills/*/SKILL.md"))
+    assert len(skill_files) >= 20
+    for path in skill_files:
+        text = path.read_text(encoding="utf-8")
+        rel = path.relative_to(ROOT).as_posix()
+        assert "<thought>" not in text and "</thought>" not in text, f"{rel} retains scratch <thought> tags"
+        for cli_cmd in re.findall(r"\bcli\.py\s+([a-z][a-z0-9_-]*)", text):
+            assert cli_cmd in valid_cli_commands, f"{rel} references invalid CLI subcommand {cli_cmd!r}"
+        for stale in stale_symbols:
+            assert stale not in text, f"{rel} references removed symbol {stale!r}"

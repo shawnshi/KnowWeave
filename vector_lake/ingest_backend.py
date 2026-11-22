@@ -14,6 +14,13 @@ BACKEND_COMMANDS = {
     "pi": "python scripts/ingest_model_pi_subagents.py",
     "gemini": "python scripts/ingest_model_cli.py --backend gemini",
     "codex": "python scripts/ingest_model_cli.py --backend codex",
+    "agy": "python scripts/ingest_model_cli.py --backend agy",
+}
+_RUNNER_BIN_ENV = {
+    "pi": "VECTOR_LAKE_RUNNER_PI_BIN",
+    "gemini": "VECTOR_LAKE_RUNNER_GEMINI_BIN",
+    "codex": "VECTOR_LAKE_RUNNER_CODEX_BIN",
+    "agy": "VECTOR_LAKE_RUNNER_AGY_BIN",
 }
 SELECTION_SOURCES = ("cli", "environment", "config", "default")
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +47,7 @@ def validate_ingest_config(config: dict) -> None:
         raise ValueError("config.ingest supports only the backend field")
     backend = ingest.get("backend", "pi")
     if not isinstance(backend, str) or backend not in BACKEND_COMMANDS:
-        raise ValueError("config.ingest.backend must be pi, gemini or codex")
+        raise ValueError("config.ingest.backend must be pi, gemini, codex or agy")
 
 
 def resolve_ingest_backend(model_cmd: str | None = None, *, env: Mapping | None = None,
@@ -74,7 +81,8 @@ def builtin_model_argv(command: str, repo_root: Path | None = None) -> list[str]
 
 
 def find_cli_binary(backend: str) -> str | None:
-    name = os.environ.get(f"VECTOR_LAKE_RUNNER_{backend.upper()}_BIN", backend)
+    env_var = _RUNNER_BIN_ENV.get(backend)
+    name = os.environ.get(env_var, backend) if env_var else backend
     found = shutil.which(name)
     if found or backend != "pi" or name != "pi":
         return found
@@ -106,6 +114,11 @@ def check_ingest_backend(selection: IngestBackend) -> dict:
             "capability_scope": "headless_flags_and_feature_gates",
             "execution_boundary": "tools_disabled; cli_read_only_sandbox_requested",
             "local_retention": "ephemeral_cli_and_temporary_adapter_files; provider_policy_is_separate",
+        },
+        "agy": {
+            "capability_scope": "headless_flags_and_settings",
+            "execution_boundary": "plan_mode_sandbox_and_deny_all_tools_policy",
+            "local_retention": "ephemeral_adapter_files; host_cli_provider_policy_is_separate",
         },
         "custom": {
             "capability_scope": "not_checked",
@@ -207,6 +220,44 @@ def pid_is_live(pid: int) -> bool:
         return True
 
 
+def process_create_time_ns(pid: int) -> int | None:
+    """Return process creation timestamp (100ns/tick normalized to ns) when inspectable."""
+    pid = normalize_pid(pid)
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class _FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        api.OpenProcess.restype = wintypes.HANDLE
+        api.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_FILETIME),
+            ctypes.POINTER(_FILETIME),
+            ctypes.POINTER(_FILETIME),
+            ctypes.POINTER(_FILETIME),
+        ]
+        api.GetProcessTimes.restype = wintypes.BOOL
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = api.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            creation, exited, kernel, user = _FILETIME(), _FILETIME(), _FILETIME(), _FILETIME()
+            if not api.GetProcessTimes(
+                handle, ctypes.byref(creation), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)
+            ):
+                return None
+            ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            return int(ticks) * 100
+        finally:
+            api.CloseHandle(handle)
+    return None
+
+
 def read_runtime_record(filename: str) -> dict:
     from vector_lake.wiki_utils import get_meta_dir
     path = get_meta_dir() / "runtime" / filename
@@ -239,6 +290,11 @@ def read_ingest_owner_record() -> dict:
             continue
         if not pid_is_live(pid):
             continue
+        recorded_ct = record.get("pid_create_time_ns")
+        if isinstance(recorded_ct, int) and not isinstance(recorded_ct, bool):
+            actual_ct = process_create_time_ns(pid)
+            if actual_ct is not None and actual_ct != recorded_ct:
+                continue
         try:
             stamp = datetime.fromisoformat(str(record.get("updated_at") or "").replace("Z", "+00:00"))
             if stamp.tzinfo is None:

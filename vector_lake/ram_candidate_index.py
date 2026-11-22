@@ -207,7 +207,7 @@ def _matches_current(conn: sqlite3.Connection, snapshot: _Snapshot) -> bool:
                 return False
             if (
                 key != snapshot.keys[position]
-                or blob != snapshot.matrix[position].tobytes()
+                or memoryview(blob) != memoryview(snapshot.matrix[position]).cast("B")
             ):
                 return False
             seen += 1

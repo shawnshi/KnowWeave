@@ -78,6 +78,13 @@ def assess_runtime_health(
     # (measured: one transient materialisation failure wedged every wiki write for
     # hours).  Kept visible as degradation, with an env opt-in for strict operators.
     if outbox_counts.get("failed", 0):
+        failed_filenames = sorted(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT filename FROM mutation_outbox WHERE status = 'failed' AND filename IS NOT NULL"
+            ).fetchall()
+        )
+        detail["failed_outbox_filenames"] = failed_filenames
         message = f"mutation_outbox_failed:{outbox_counts.get('failed', 0)}"
         # A failed mutation entry is a hard fault by contract: it blocks canonical writes
         # until it is cleared, which is also what the write-gate test asserts.  The env
@@ -408,7 +415,7 @@ def assess_runtime_health(
     }
 
 
-def enforce_runtime_write_health(validation_mode: str = "full"):
+def enforce_runtime_write_health(validation_mode: str = "full", *, target_filenames: list[str] | tuple[str, ...] | set[str] | None = None):
     """Block a canonical write only on hard faults, never on repairable drift.
 
     Blocking on degradation would deadlock the system: projection drift, a
@@ -422,6 +429,16 @@ def enforce_runtime_write_health(validation_mode: str = "full"):
     health = assess_runtime_health()
     if health.get("degraded"):
         log.warning("Runtime degradation (non-blocking): %s", "; ".join(health["degraded"]))
+    issues = list(health.get("issues") or [])
+    if (
+        len(issues) == 1
+        and issues[0].startswith("mutation_outbox_failed:")
+        and target_filenames
+    ):
+        failed_files = set(health.get("detail", {}).get("failed_outbox_filenames") or [])
+        if failed_files and failed_files.issubset({str(f) for f in target_filenames if f}):
+            log.warning("Allowing self-healing write for failed outbox target(s): %s", sorted(failed_files))
+            return
     if not health.get("hard_ok", health["ok"]):
         raise RuntimeError(
             "Vector Lake write gate blocked this mutation on a hard runtime fault. "

@@ -40,8 +40,14 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+_CMD_UNSAFE_CHARS = frozenset("&|<>^%\r\n\x00")
+
+
 def _launcher(argv: list[str]) -> list[str]:
     if os.name == "nt" and argv[0].lower().endswith((".cmd", ".bat")):
+        for arg in argv:
+            if any(ch in _CMD_UNSAFE_CHARS for ch in str(arg)):
+                raise ValueError("Refusing unsafe cmd.exe shell metacharacter in batch CLI argument")
         return [os.environ.get("COMSPEC", "cmd.exe"), "/c", *argv]
     return argv
 
@@ -53,8 +59,8 @@ def find_cli_binary(backend: str) -> str | None:
 
 
 def check_cli(backend: str, *, deadline: float | None = None) -> CliCapabilities:
-    if backend not in {"codex", "gemini"}:
-        raise ValueError("CLI ingest backend must be codex or gemini")
+    if backend not in {"codex", "gemini", "agy"}:
+        raise ValueError("CLI ingest backend must be codex, gemini or agy")
     if deadline is None:
         deadline = time.monotonic() + 20
     binary = find_cli_binary(backend)
@@ -63,12 +69,16 @@ def check_cli(backend: str, *, deadline: float | None = None) -> CliCapabilities
     probe = [binary, "exec", "--help"] if backend == "codex" else [binary, "--help"]
     proc = run_contained(_launcher(probe), capture_output=True, text=True, encoding="utf-8",
                          timeout=min(10, _remaining(deadline)), shell=False)
-    flags = ("--sandbox", "--ephemeral", "--output-schema", "--output-last-message") if backend == "codex" else (
-        "--output-format", "--extensions", "--policy", "--prompt",
-    )
-    if proc.returncode or any(flag not in proc.stdout for flag in flags):
+    if backend == "codex":
+        flags = ("--sandbox", "--ephemeral", "--output-schema", "--output-last-message")
+    elif backend == "agy":
+        flags = ("--input-format", "--output-format", "--mode", "--sandbox", "--settings", "--json-schema", "--print-timeout")
+    else:
+        flags = ("--output-format", "--extensions", "--policy", "--prompt")
+    help_text = (proc.stdout + "\n" + proc.stderr) if backend == "agy" else proc.stdout
+    if proc.returncode or any(flag not in help_text for flag in flags):
         raise RuntimeError(f"{backend} CLI lacks required headless/safety capabilities (help exit {proc.returncode})")
-    if backend == "gemini":
+    if backend in {"gemini", "agy"}:
         return CliCapabilities(binary)
     proc = run_contained(_launcher([binary, "features", "list"]), capture_output=True, text=True,
                          encoding="utf-8", timeout=min(10, _remaining(deadline)), shell=False)
@@ -114,6 +124,40 @@ def _gemini_argv(capabilities: CliCapabilities, directory: Path, env: dict) -> l
             "--output-format", "json", "--prompt", read_template("prompts/ingest/cli_bootstrap.md")]
 
 
+def _agy_argv(capabilities: CliCapabilities, directory: Path, remaining: float) -> list[str]:
+    schema = directory / "result-schema.json"
+    schema.write_text(json.dumps(result_schema()), encoding="utf-8")
+    settings = directory / "agy-settings.json"
+    settings.write_text(json.dumps({
+        "allowNonWorkspaceAccess": False,
+        "trustedWorkspaces": [],
+        "permissions": {
+            "deny": [
+                "command(*)",
+                "write(*)",
+                "edit(*)",
+                "read(*)",
+                "mcp(*)",
+                "web(*)",
+                "browser(*)",
+            ],
+            "ask": [],
+            "allow": [],
+        },
+    }), encoding="utf-8")
+    timeout_seconds = max(1, int(remaining) - 5) if remaining > 10 else max(1, int(remaining))
+    return [
+        capabilities.binary,
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--mode", "plan",
+        "--sandbox",
+        "--settings", str(settings),
+        "--json-schema", str(schema),
+        "--print-timeout", f"{timeout_seconds}s",
+    ]
+
+
 def _execution_capabilities(backend: str, deadline: float) -> CliCapabilities:
     """Cache only recognized host CLI identities; explicit --check still probes fresh."""
     from vector_lake.ingest_probe_cache import cached_capabilities
@@ -131,6 +175,28 @@ def _execution_capabilities(backend: str, deadline: float) -> CliCapabilities:
                                CODEX_REQUIRED_FEATURES if backend == "codex" else frozenset())
 
 
+def _extract_agy_response(stdout: str) -> str:
+    result_event = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"agy CLI stream-json line is not JSON: {exc}") from exc
+        if isinstance(item, dict) and item.get("event") == "result":
+            result_event = item.get("result")
+    if (
+        not isinstance(result_event, dict)
+        or result_event.get("error")
+        or str(result_event.get("status") or "").upper() == "ERROR"
+        or not isinstance(result_event.get("response"), str)
+    ):
+        raise ValueError("agy CLI returned an error or omitted its final response")
+    return result_event["response"]
+
+
 def invoke_cli(packet: dict, backend: str, *, use_cache: bool = True) -> dict:
     try:
         deadline = float(os.environ.get("VECTOR_LAKE_MODEL_DEADLINE_MONOTONIC",
@@ -145,8 +211,17 @@ def invoke_cli(packet: dict, backend: str, *, use_cache: bool = True) -> dict:
     env = dict(os.environ)
     with tempfile.TemporaryDirectory(prefix=f"vector-lake-{backend}-") as temporary:
         directory = Path(temporary)
-        argv = _codex_argv(capabilities, directory) if backend == "codex" else _gemini_argv(capabilities, directory, env)
-        proc = run_contained(_launcher(argv), input=prompt, capture_output=True, text=True,
+        remaining = _remaining(deadline)
+        if backend == "codex":
+            argv = _codex_argv(capabilities, directory)
+            stdin_payload = prompt
+        elif backend == "agy":
+            argv = _agy_argv(capabilities, directory, remaining)
+            stdin_payload = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+        else:
+            argv = _gemini_argv(capabilities, directory, env)
+            stdin_payload = prompt
+        proc = run_contained(_launcher(argv), input=stdin_payload, capture_output=True, text=True,
                              encoding="utf-8", timeout=_remaining(deadline), shell=False,
                              cwd=str(directory), env=env)
         if proc.returncode:
@@ -157,6 +232,8 @@ def invoke_cli(packet: dict, backend: str, *, use_cache: bool = True) -> dict:
             if not answer_path.is_file():
                 raise RuntimeError("codex model process returned no final message")
             answer = answer_path.read_text(encoding="utf-8")
+        elif backend == "agy":
+            answer = _extract_agy_response(proc.stdout)
         else:
             try:
                 envelope = json.loads(proc.stdout)

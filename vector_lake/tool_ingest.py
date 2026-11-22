@@ -16,6 +16,7 @@ from vector_lake.ingest_schema_contract import render_schema_contract, schema_sn
 from vector_lake.db_store import mark_file_processed
 from vector_lake import governance_store
 from vector_lake.skeleton_parser import parse_static_skeleton
+from vector_lake.path_safety import is_link_or_junction
 from vector_lake.wiki_utils import (
     canonical_source_name,
     flush_durable,
@@ -30,6 +31,7 @@ from vector_lake.wiki_utils import (
     is_private_raw_source,
     load_config,
     read_frontmatter_only,
+    validate_raw_ingest_source_path,
     validate_wiki_filename,
 )
 from vector_lake.schema_validator import INGEST_EVENT_TAGS, INGEST_INTEGRATION_PREDICATES, VALID_PREDICATES
@@ -1622,33 +1624,42 @@ def prepare_ingest_batch(batch_size: int = 5, *, _progress: dict | None = None) 
 
     config = _load_scan_config()
 
-    target_dirs = [str((get_extension_root() / d).resolve()) for d in config.get("target_directories", [])]
-    if not target_dirs:
+    raw_root = get_raw_dir().resolve()
+    target_dirs: list[Path] = []
+    for raw_target in config.get("target_directories", []):
+        candidate = Path(raw_target)
+        if not candidate.is_absolute():
+            candidate = get_extension_root() / candidate
+        resolved_dir = candidate.resolve()
+        if resolved_dir != raw_root and not resolved_dir.is_relative_to(raw_root):
+            log.warning("Skipping configured target directory outside MEMORY raw root: %s", raw_target)
+            continue
+        if is_link_or_junction(candidate) or is_link_or_junction(resolved_dir):
+            log.warning("Skipping linked target directory: %s", raw_target)
+            continue
+        target_dirs.append(resolved_dir)
+    if not target_dirs and not config.get("target_directories"):
         # An empty or missing list means "the active MEMORY root's raw/ directory".
-        target_dirs = [str(get_raw_dir())]
-    exclude_paths = config.get("exclude_paths", [])
-    supported_exts = set(config.get("supported_extensions", [".md", ".txt"]))
-    
-    files_to_process = []
-    for target_dir in target_dirs:
-        folder = Path(target_dir)
-        if not folder.exists(): continue
-        for root, dirs, files in os.walk(folder):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-            for file in files:
-                if file.startswith('~') or file.startswith('.'): continue
-                
-                filepath = os.path.join(root, file)
-                path_str = filepath.replace("\\", "/")
-                if any(exclude in path_str for exclude in exclude_paths):
-                    continue
-                # The same privacy decision the raw event handler makes.  Without it this
-                # scan enqueued the diary text that handler refused to trigger on.
-                if is_private_raw_source(path_str):
-                    continue
+        target_dirs = [raw_root]
 
-                if os.path.splitext(file)[1].lower() in supported_exts:
-                    files_to_process.append(filepath)
+    files_to_process = []
+    for folder in target_dirs:
+        if not folder.exists():
+            continue
+        for root, dirs, files in os.walk(folder, followlinks=False):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith('.') and not is_link_or_junction(Path(root) / d)
+            ]
+            for file in files:
+                if file.startswith('~') or file.startswith('.'):
+                    continue
+                filepath = os.path.join(root, file)
+                try:
+                    validated = validate_raw_ingest_source_path(filepath)
+                except ValueError:
+                    continue
+                files_to_process.append(str(validated))
                     
     from vector_lake.db_store import get_connection
     init_db()
