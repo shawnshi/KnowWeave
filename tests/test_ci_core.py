@@ -40,7 +40,7 @@ def test_workflow_runs_both_platforms_and_explicit_backends():
     workflow = yaml.safe_load((REPO / '.github/workflows/test.yml').read_text(encoding='utf-8'))
     jobs = list(workflow['jobs'].values())
     matrices = [job.get('strategy', {}).get('matrix', {}) for job in jobs]
-    assert any(set(matrix.get('os', [])) == {'windows-2025', 'ubuntu-26.04', 'macos-26', 'macos-26-intel'} and set(matrix.get('backend', [])) == {'native', 'fallback'} and set(matrix.get('python', [])) == {'3.10', '3.13'} for matrix in matrices)
+    assert any(set(matrix.get('os', [])) == {'windows-2025', 'ubuntu-26.04', 'macos-26', 'macos-26-intel'} and set(matrix.get('backend', [])) == {'native', 'fallback'} and set(matrix.get('python', [])) == {'3.11', '3.13'} for matrix in matrices)
     assert workflow['permissions'] == {'contents': 'read'}
     assert all(job['strategy']['max-parallel'] == 2 for job in jobs)
     commands = '\n'.join(step.get('run', '') for job in jobs for step in job['steps'])

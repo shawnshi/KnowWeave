@@ -4,6 +4,7 @@ version: 11.1.0
 tier: action-allowed
 description: 'Automatically prune isolated or orphaned entities from the knowledge graph.'
 triggers: 'When the user requests to clean up, garbage collect, prune, or remove isolated/orphaned entities from Vector Lake'
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 <system_instructions>
@@ -28,7 +29,7 @@ triggers: 'When the user requests to clean up, garbage collect, prune, or remove
     1. Parse user constraints (e.g., `--days N`, optional `--domain`, `--cluster`, or `--plan-file`).
     2. Run preview: execute `python cli.py gc` (defaults to dry-run) via bash to preview what would be deleted without making changes.
     3. Temporarily store large results in the `scratch/` directory for Sandbox Isolation if the list of orphaned entities is extensive.
-    4. [FABLE 5 CHECKPOINT] Present the preview to the user. Stop and await human approval.
+    4. [HUMAN APPROVAL CHECKPOINT] Present the preview to the user. Stop and await human approval.
     5. Upon receiving explicit human approval, execute `python cli.py gc --apply` via bash to finalize the pruning.
   </workflow>
 
@@ -39,7 +40,7 @@ triggers: 'When the user requests to clean up, garbage collect, prune, or remove
   </tool_dispatch>
 
   <checkpoint_rules>
-    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before running `python cli.py gc --apply` (or passing `--force`), you MUST pause execution, present the preview list of entities to be deleted, and require explicit human approval to proceed.
+    [HUMAN APPROVAL CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before running `python cli.py gc --apply` (or passing `--force`), you MUST pause execution, present the preview list of entities to be deleted, and require explicit human approval to proceed.
   </checkpoint_rules>
 </execution_workflow>
 

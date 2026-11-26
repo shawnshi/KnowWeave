@@ -4,6 +4,7 @@ version: 11.1.0
 tier: action-allowed
 description: 'Cascade-delete a raw source and all related wiki pages.'
 triggers: 'When the user requests to cascade-delete a raw source or remove a source file and its related wiki pages from Vector Lake.'
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 <system_instructions>
@@ -29,7 +30,7 @@ triggers: 'When the user requests to cascade-delete a raw source or remove a sou
     1. **Target Identification:** Extract the `raw_path` argument from the user's request.
     2. **Blast Radius Preview:** Run `python cli.py delete <raw_path>` (defaults to dry-run) via bash to determine the exact impact (nodes and edges to be deleted).
     3. **Sandbox Registration:** Log the previewed blast radius into the `scratch/` sandbox isolation area for safe human review.
-    4. **[FABLE 5 CHECKPOINT]:** Halt operations. Present the deletion blast radius to the human user and request explicit authorization to proceed.
+    4. **[HUMAN APPROVAL CHECKPOINT]:** Halt operations. Present the deletion blast radius to the human user and request explicit authorization to proceed.
     5. **Destructive Execution:** Upon receiving human approval, execute `python cli.py delete <raw_path> --apply` via bash.
     6. **Knowledge Registry Sync:** Run `python cli.py projections` to verify all projections remain healthy.
   </workflow>
@@ -41,7 +42,7 @@ triggers: 'When the user requests to cascade-delete a raw source or remove a sou
   </tool_dispatch>
 
   <checkpoint_rules>
-    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。任何真实数据删除（`--apply`）前，必须向用户清晰呈现将被级联删除的文件和知识图谱节点列表，并等待人类确认。
+    [HUMAN APPROVAL CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。任何真实数据删除（`--apply`）前，必须向用户清晰呈现将被级联删除的文件和知识图谱节点列表，并等待人类确认。
   </checkpoint_rules>
 </execution_workflow>
 

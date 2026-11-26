@@ -4,6 +4,7 @@ version: 1.0.0
 tier: action-allowed
 description: 'Inspect the health of all 8 derived projections (memory_gram, vectors, page_projection, fts_index, tantivy_mirror, claim_index, timeline_events, governance_queue) and reconcile degraded projections.'
 triggers: When the user asks to check projection health, inspect index drift, troubleshoot search lag, or reconcile vector/FTS projections.
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 <system_instructions>
@@ -41,7 +42,7 @@ triggers: When the user asks to check projection health, inspect index drift, tr
        - For any degraded projection, identify whether it is `[auto]` repairable or `[manual]` entry.
        - Assess operational impact (e.g. vector search fallback to pure FTS, outbox lag falling back to index.json).
     3. If reconciliation is requested and projection is repairable:
-       - [FABLE 5 CHECKPOINT] Request human confirmation before mutating database projections.
+       - [HUMAN APPROVAL CHECKPOINT] Request human confirmation before mutating database projections.
        - Run dry-run first: `python cli.py projections --reconcile --only <name>`.
        - Upon confirmation, apply repair: `python cli.py projections --reconcile --apply --only <name>`.
     4. Re-inspect to verify all projections have returned to `HEALTHY`.
@@ -53,7 +54,7 @@ triggers: When the user asks to check projection health, inspect index drift, tr
   </tool_dispatch>
 
   <checkpoint_rules>
-    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。在执行带 `--apply` 参数的投影重构前，必须向用户呈报受影响投影及耗时预估，获得明确授权后执行。
+    [HUMAN APPROVAL CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。在执行带 `--apply` 参数的投影重构前，必须向用户呈报受影响投影及耗时预估，获得明确授权后执行。
   </checkpoint_rules>
 </execution_workflow>
 

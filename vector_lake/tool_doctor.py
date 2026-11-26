@@ -55,7 +55,7 @@ def doctor_vector_lake(deep_dependency_check: bool = False) -> str:
     warnings: list[str] = []
 
     # 1. Environment & Config
-    python_ok = sys.version_info >= (3, 10)
+    python_ok = sys.version_info >= (3, 11)
     checks.append(("Python", python_ok, f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"))
 
     has_api_key = bool(os.environ.get("GEMINI_API_KEY"))
@@ -621,6 +621,34 @@ def doctor_vector_lake(deep_dependency_check: bool = False) -> str:
             )
     except Exception as e:
         checks.append(("Vector Model", False, f"Check failed: {e}"))
+
+    try:
+        from vector_lake.mcp_skills import (
+            audit_skills_directory,
+            resolve_skills_reload,
+            resolve_skills_scope,
+        )
+
+        skills_scope = resolve_skills_scope()
+        skills_reload = resolve_skills_reload()
+        audit = audit_skills_directory()
+        exposed = (
+            0
+            if skills_scope == "off"
+            else audit["total"]
+            if skills_scope == "all"
+            else audit["mcp_native_count"]
+        )
+        ok_skills = not audit["errors"]
+        detail = (
+            f"scope={skills_scope} reload={skills_reload} exposed={exposed} "
+            f"({audit['mcp_native_count']} MCP-native, {audit['cli_gated_count']} CLI-gated)"
+        )
+        if audit["errors"]:
+            detail += f"; errors={audit['errors']}"
+        checks.append(("MCP Skills (SEP-2640)", ok_skills, detail))
+    except Exception as e:
+        checks.append(("MCP Skills (SEP-2640)", False, f"Check failed: {e}"))
 
     lines = ["=== Vector Lake Doctor ==="]
     all_ok = True

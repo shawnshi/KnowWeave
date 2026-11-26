@@ -32,7 +32,7 @@
 
 ### 1\. 环境与部署路径
 
-* Python **≥ 3.10**；目标系统为 Windows 11+、macOS 26+，以及符合内核要求的指定 Linux 发行版。目标与实际验收范围见 [平台说明](docs/PLATFORM_SUPPORT.md)，不能把 CI 配置当成已实测支持。
+* Python **≥ 3.11**（`fastmcp>=4.2.0` 要求）；目标系统为 Windows 11+、macOS 26+，以及符合内核要求的指定 Linux 发行版。目标与实际验收范围见 [平台说明](docs/PLATFORM_SUPPORT.md)，不能把 CI 配置当成已实测支持。
 * **基础部署**可不安装可选 `vector_lake_core`；相关能力会按各自契约降级或提示不可用；加载路径由 `vector_lake/native_core.py` 执行 ABI 版本门禁（当前期望 `0.2.8`），版本不匹配时自动回落纯 Python 并告警。本地从源码更新构建通过 `scripts/install_core.py` 写入版本化不可变槽位，支持 `--offline` 离线构建，并在 `--no-build` 模式下默认拦阻陈旧构建产物（须显式传 `--allow-stale` 才放行）。其他依赖如 rjieba 仍含原生二进制，这不是“禁用所有 Rust/C 扩展”。
 * **预编译核心部署**仅在已取得可信、匹配 checkout / 平台的包时使用 [免编译安装](docs/NATIVE_WHEELS.md)。当前没有公开 Release/PyPI 核心下载渠道；CI 构建包只在任务临时目录，不可据此下载。普通部署不安装 Rust/Cargo/maturin，缺包不自动源码编译。
 * **完整摄取**另需选择并安装 Pi / Gemini / Codex / AGY CLI，在运行它的同一用户身份下完成认证。安装 Python SDK、配置 embedding Key 或通过 `--check`，都不能证明文本模型已经可用。
@@ -168,7 +168,7 @@ flowchart LR
 
 |层 / 技术|职责|是否必需|
 |-|-|-|
-|Python / CLI / MCP（FastMCP）|业务协调、工具暴露、校验与任务生命周期|运行时必需；MCP 用于 Agent 接入|
+|Python / CLI / MCP（FastMCP）|业务协调、工具与 SEP-2640 技能暴露、校验与任务生命周期|运行时必需；MCP 用于 Agent 接入|
 |SQLite / outbox / 租约与 fencing|canonical 提交、队列认领、过期 Worker 拒绝与可重试发布|必需|
 |Markdown / JSON 投影|人可读知识与派生拓扑|由受控流程发布|
 |FTS5 / 图检索 / rjieba|全文、CJK 分词与图扩展|核心检索路径；rjieba 是原生绑定，不存在纯 Python jieba 回退|
@@ -253,6 +253,14 @@ GUI 客户端不会可靠继承当前终端的 venv。必须把下例解释器�
 
 不要将真实 Key 写入仓库示例。上例是通用 `mcpServers` 配置，不是 Pi 专用配置；Pi 入口及重连说明见 [配置指南](docs/CONFIGURATION.md)。在实际连接调用 `runtime_identity` 核对解释器、PID 与选定函数的加载指纹；它不代表整模块或原生映像已验收。还需用受控检索确认目标路径，独立 `doctor` 不能代替该连接验收。
 
+### 通过 MCP 暴露 Agent Skills（SEP-2640）
+
+KnowWeave MCP 服务端基于 `fastmcp>=4.2.0` 原生实现 **SEP-2640（`io.modelcontextprotocol/skills`）**，通过 `skills/list`、`skills/get` 与 `skill://` 资源向客户端按需披露 [`skills/`](skills) 下的技能文档与文件 SHA-256 摘要（不额外新增 MCP Tool，向后兼容标准 `resources/read` 客户端）：
+
+- **默认分层暴露（`VECTOR_LAKE_MCP_SKILLS_SCOPE=mcp`）**：默认仅暴露 13 份纯 MCP 技能，排除 7 份依赖本地 `cli.py` / Runner 的运维技能。
+- **按需扩展或关闭**：受控本机宿主如需全部 20 份技能可设 `VECTOR_LAKE_MCP_SKILLS_SCOPE=all`（CLI 混合技能均带 `compatibility` 声明），或设 `off` 关闭扩展。
+- **运行态观测**：连接后可通过 `runtime_identity` 的 `skills_extension` 字段与 `doctor_vector_lake` 的 `MCP Skills (SEP-2640)` 项核对当前暴露范围与目录摘要。
+
 ## 常驻部署与已知边界
 
 watchdog、runner 和 MCP 是独立进程。重启前两者不会刷新常驻 MCP 的已加载代码；MCP 需在宿主中单独重连，再核对运行身份与实际检索后端。
@@ -291,6 +299,7 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 |摄取与补扫|`VECTOR_LAKE_AUTHOR_SOURCES`、`VECTOR_LAKE_CATCHUP_EMBEDDING_BATCH`、`VECTOR_LAKE_CATCHUP_EMBEDDING_BUDGET_SECONDS`、`VECTOR_LAKE_CATCHUP_INTERVAL_SECONDS`、`VECTOR_LAKE_MAX_AWAITING_SUBAGENT_AGE_SECONDS`、`VECTOR_LAKE_MAX_AWAITING_SUBAGENT_JOBS`、`VECTOR_LAKE_SOURCE_RANK_PENALTY`、`VECTOR_LAKE_SUBAGENT_BACKLOG_BLOCKING`、`VECTOR_LAKE_SUBAGENT_RUN_ID`|[参考](docs/CONFIGURATION.md)|
 |数据路径与载荷|`VECTOR_LAKE_DB_PATH`、`VECTOR_LAKE_MEMORY_DIR`、`VECTOR_LAKE_MEMORY_GRAM_LATENCY_SEARCHES`、`VECTOR_LAKE_MEMORY_GRAM_MAX_BASE_AGE_SECONDS`、`VECTOR_LAKE_MEMORY_SEARCH`、`VECTOR_LAKE_OUTBOX_PAYLOAD_KEEP_DAYS`、`VECTOR_LAKE_PAYLOAD_MAX_BYTES`、`VECTOR_LAKE_PAYLOAD_ROOT`|[参考](docs/CONFIGURATION.md)|
 |检索、索引与运维|`VECTOR_LAKE_AUTHOR_ANNOTATE`、`VECTOR_LAKE_AUTHOR_BOOST`、`VECTOR_LAKE_AUTHOR_FACET`、`VECTOR_LAKE_BACKUP_KEEP`、`VECTOR_LAKE_BACKUP_MAX_BYTES`、`VECTOR_LAKE_CANDIDATE_DEPTH`、`VECTOR_LAKE_CANDIDATE_POOL`、`VECTOR_LAKE_CLAIM_BLOCKS`、`VECTOR_LAKE_DISABLE_WRITE_HEALTH_GATE`、`VECTOR_LAKE_EMBEDDING_DIMENSION`、`VECTOR_LAKE_EMBEDDING_MAX_BATCH_ITEMS`、`VECTOR_LAKE_EMBEDDING_MAX_BATCH_TOKENS`、`VECTOR_LAKE_EMBEDDING_MAX_CHARS_PER_ITEM`、`VECTOR_LAKE_EMBEDDING_MAX_CONSECUTIVE_FAILURES`、`VECTOR_LAKE_EMBEDDING_MAX_RETRIES`、`VECTOR_LAKE_EMBEDDING_MAX_TOKENS_PER_ITEM`、`VECTOR_LAKE_EMBEDDING_MODEL`、`VECTOR_LAKE_EMBEDDING_PREWARM`、`VECTOR_LAKE_EMBEDDING_RPM`、`VECTOR_LAKE_EMBEDDING_RUN_STALE_SECONDS`、`VECTOR_LAKE_EMBEDDING_TIMEOUT_MS`、`VECTOR_LAKE_EMBEDDING_TPM`、`VECTOR_LAKE_EMBEDDING_TRANSPORT`、`VECTOR_LAKE_EMBEDDING_UTILIZATION`、`VECTOR_LAKE_ENTITY_NAME_PRIORITY`、`VECTOR_LAKE_EXPANSION_QUOTA`、`VECTOR_LAKE_FALLBACK_REPARSE_SECONDS`、`VECTOR_LAKE_FTS`、`VECTOR_LAKE_FUSION`、`VECTOR_LAKE_IGNORE_SCHEDULED_LINT_STATE`、`VECTOR_LAKE_LEIDEN_L0_RESOLUTION`、`VECTOR_LAKE_LEIDEN_L1_RESOLUTION`、`VECTOR_LAKE_LEIDEN_SEED`、`VECTOR_LAKE_METADATA_FIRST`、`VECTOR_LAKE_MODEL_DEADLINE_MONOTONIC`、`VECTOR_LAKE_NO_BROWSER`、`VECTOR_LAKE_NUMERIC_THREADS`、`VECTOR_LAKE_OUTBOX_BACKLOG_BLOCKING`、`VECTOR_LAKE_OUTBOX_FAILURE_NONBLOCKING`、`VECTOR_LAKE_OUTBOX_MAX_BACKLOG`、`VECTOR_LAKE_OUTBOX_MAX_PENDING_AGE_SECONDS`、`VECTOR_LAKE_QUERY_CONTEXT_TTL`、`VECTOR_LAKE_RECLAIM_FREE_SPACE`、`VECTOR_LAKE_RERANK_WEIGHT`、`VECTOR_LAKE_SEARCH_LEDGER`、`VECTOR_LAKE_SQLITE_CACHE_KIB`、`VECTOR_LAKE_SQLITE_MMAP_BYTES`、`VECTOR_LAKE_SQLITE_PAGE_SIZE`、`VECTOR_LAKE_STALE_TASK_MAX_AGE_SECONDS`、`VECTOR_LAKE_TERMINAL_FAILED_JOBS_BLOCKING`、`VECTOR_LAKE_TIMELINE_PARITY_BLOCKING`、`VECTOR_LAKE_VECTOR_INDEX`、`VECTOR_LAKE_VECTOR_SIM_SCALE`、`VECTOR_LAKE_WRITE_LOCK_CONTENTION_WINDOW_SECONDS`|[参考](docs/CONFIGURATION.md)|
+|MCP 技能扩展 (SEP-2640)|`VECTOR_LAKE_MCP_SKILLS_RELOAD`、`VECTOR_LAKE_MCP_SKILLS_SCOPE`、`VECTOR_LAKE_SKILLS_DIR`|[参考](CONTEXT.md#41-host-runtime-conventions)|
 
 </details>
 
@@ -298,7 +307,7 @@ macOS/Linux 的依赖与前台入口不代表已提供或验收 systemd / launch
 
 
 
-> **MCP 是主接口**：Agent 直接调用 `vector_lake/mcp_server.py` 注册的工具。本仓库不随附 slash command 兼容层；宿主若打包 skills，应按实际注册的插件命名空间调用。项目保留 `vector-lake-*` 技能标识，不把旧宿主的固定前缀当作跨客户端协议。
+> **MCP 是主接口**：Agent 直接调用 `vector_lake/mcp_server.py` 注册的工具，并由 `vector_lake/mcp_skills.py` 按 SEP-2640（`io.modelcontextprotocol/skills`）暴露受控技能（默认 13 份纯 MCP 技能）。本仓库不随附 slash command 兼容层；宿主若打包 skills，应按实际注册的插件命名空间调用。项目保留 `vector-lake-*` 技能标识，不把旧宿主的固定前缀当作跨客户端协议。
 >
 > 全量恢复、内部调度和重建端点保留在 CLI，避免 Agent 在常规检索中误触重型维护。
 
@@ -557,6 +566,7 @@ node --test tests/topology_ui.test.cjs
 |-|-|
 |`vector_lake/cli_app.py`|CLI 命令与入口分支|
 |`vector_lake/mcp_server.py`|MCP 工具注册|
+|`vector_lake/mcp_skills.py`|SEP-2640（`io.modelcontextprotocol/skills`）技能发现、分层过滤与 SHA-256 清单挂载|
 |`vector_lake/tool_ingest.py`|摄取准备、认领与完成协议|
 |`vector_lake/mutation_coordinator.py`|受控 canonical mutation 与 outbox|
 |`vector_lake/claim_extractor.py` / `claim_migration.py`|完整断言身份、来源归属及显式分页迁移|

@@ -80,17 +80,17 @@ def test_declared_floor_matches_the_requested_minimum(name, minimum):
 
 
 def test_fastmcp_floor_is_on_the_4x_line():
-    """The runtime imports ``fastmcp.FastMCP``; the SDK import path is gone.
+    """The runtime imports ``fastmcp.FastMCP`` and ``fastmcp.skills``; the SDK import path is gone.
 
     The reversal this guards: the tree used to import ``mcp.server.MCPServer``
     (mcp 2.x) with a 1.x ``mcp.server.fastmcp`` fallback, so a floor that let a
     clean install resolve elsewhere emptied the tool surface.  fastmcp 4 also
-    dropped ``_tool_manager``, which is why the floor is 4.0 and not 3.x.
+    dropped ``_tool_manager``, and fastmcp >=4.2 adds SEP-2640 Skills support.
     """
     line = _specifier("fastmcp")
     assert line is not None
-    assert line.replace(" ", "") in {"fastmcp>=4.0.0", "fastmcp>=4.0"}, (
-        f"fastmcp floor must track the 4.x FastMCP API: {line}"
+    assert line.replace(" ", "") in {"fastmcp>=4.2.0", "fastmcp>=4.2"}, (
+        f"fastmcp floor must track the >=4.2 FastMCP SEP-2640 API: {line}"
     )
     assert _specifier("mcp") is None, (
         "mcp is resolved transitively by fastmcp-slim; declaring it directly "

@@ -3,6 +3,7 @@ name: vector-lake-sync
 version: 11.1.0
 tier: action-allowed
 description: 'Trigger a 2-step CoT sync of all raw sources into the Vector Lake Wiki nodes.'
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 <system_instructions>
@@ -25,7 +26,7 @@ description: 'Trigger a 2-step CoT sync of all raw sources into the Vector Lake 
 <execution_workflow>
   <workflow>
     1. Pre-flight Initialization: Present the sync intent and inspect pending tasks via `python cli.py ingest-tasks --list`.
-    2. [FABLE 5 CHECKPOINT] Halt execution and require human approval before queueing new raw sources or running the ingest runner.
+    2. [HUMAN APPROVAL CHECKPOINT] Halt execution and require human approval before queueing new raw sources or running the ingest runner.
     3. Sandbox Setup: Prepare the `scratch/` directory for any intermediate sync state or logging.
     4. CLI / Runner Dispatch: Queue unprocessed raw sources via `python cli.py sync` and let the host Runner (`python scripts/ingest_runner.py`) claim packets, validate read-only model outputs (`files_written` + explicit `integration` disposition), and finalize writes.
     5. Projection Verification: Verify index and projection parity via `inspect_projections` or `get_mutation_status`.
@@ -37,7 +38,7 @@ description: 'Trigger a 2-step CoT sync of all raw sources into the Vector Lake 
   </tool_dispatch>
 
   <checkpoint_rules>
-    - [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before running `python cli.py sync` or `python scripts/ingest_runner.py`, the agent must explicitly ask the user for permission to proceed and wait for their response.
+    - [HUMAN APPROVAL CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before running `python cli.py sync` or `python scripts/ingest_runner.py`, the agent must explicitly ask the user for permission to proceed and wait for their response.
   </checkpoint_rules>
 </execution_workflow>
 

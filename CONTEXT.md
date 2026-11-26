@@ -89,7 +89,7 @@ Conflict rules:
 
 ## 4. CLI Contract & MCP Interface
 
-Agents interact with the system through the 23 registered MCP tools in `vector_lake/mcp_server.py` (for example `search_vector_lake`, `query_logic_lake`, `get_relations`, `get_mutation_status`), while batch ingest and maintenance runs use the CLI/Runner surface (`python cli.py sync`, `python cli.py gc`, `python scripts/ingest_runner.py`).
+Agents interact with the system through the 23 registered MCP tools in `vector_lake/mcp_server.py` (for example `search_vector_lake`, `query_logic_lake`, `get_relations`, `get_mutation_status`), while batch ingest and maintenance runs use the CLI/Runner surface (`python cli.py sync`, `python cli.py gc`, `python scripts/ingest_runner.py`). `vector_lake/mcp_skills.py` additionally exposes packaged Agent Skills from `skills/` via the SEP-2640 (`io.modelcontextprotocol/skills`) MCP extension (`skill://` resources, `skills/list`, and `skills/get`; defaulting to the 13 pure MCP skills).
 
 **Command surfaces**: there is no bundled slash-command compatibility layer. `commands/`
 was removed in the host-convention batch — it held two `commands/*.toml` files that no code
@@ -111,6 +111,9 @@ and `~/.codex` fallbacks (env file, MEMORY root, diary hook, payload sandbox roo
 | `VECTOR_LAKE_PAYLOAD_MAX_BYTES` | Payload size ceiling, default 5 MiB |
 | `VECTOR_LAKE_DIARY_SYNC_SCRIPT` | Overrides `host_env.legacy_diary_sync_script()` |
 | `VECTOR_LAKE_SUBAGENT_RUN_ID` | Namespaces generated subagent task packets |
+| `VECTOR_LAKE_MCP_SKILLS_SCOPE` | SEP-2640 MCP skills exposure scope (`mcp` default = 13 pure MCP skills, `all` = include 7 CLI-gated skills, `off` = disable) |
+| `VECTOR_LAKE_SKILLS_DIR` | Overrides the packaged `skills/` directory served over SEP-2640 (rejects anchors/symlinks) |
+| `VECTOR_LAKE_MCP_SKILLS_RELOAD` | When truthy (`1`/`true`), re-scans the skills directory per MCP request (`false` default) |
 
 The following CLI commands remain the ground truth operating surface for *human operators*:
 

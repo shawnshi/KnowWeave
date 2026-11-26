@@ -47,11 +47,13 @@
 # * rjieba wheel used: rjieba-0.2.1-cp38-abi3-win_amd64.whl, carrying jieba-rs
 #   0.9.x.  Update this pin and tokenizer.JIEBA_RS_PINNED together when a
 #   binding for jieba-rs 0.11 is published.
-# * fastmcp must stay >=4.0: mcp_server.py imports `fastmcp.FastMCP`. The pre-4.x
-#   `_tool_manager` registry is gone (the synchronous fallback now reads the local
-#   provider's components), so a lower floor silently empties doctor's tool count.
-#   4.0.4 verified on Windows/CPython 3.13. It resolves the MCP Python SDK
-#   (`mcp` 2.2.0) transitively, so `mcp` is no longer a direct pin.
+# * fastmcp must stay >=4.2.0: mcp_server.py imports `fastmcp.FastMCP` and mounts
+#   `fastmcp.skills.provider` for SEP-2640 (`io.modelcontextprotocol/skills`).
+#   The pre-4.x `_tool_manager` registry is gone (the synchronous fallback now
+#   reads the local provider's components), and fastmcp >=4.2 adds native
+#   SEP-2640 skills support (requires Python >=3.11).
+#   4.2.6 verified on Windows/CPython 3.13. It resolves the MCP Python SDK
+#   (`mcp` 2.3.0) transitively, so `mcp` is no longer a direct pin.
 # * mistune must stay >=3.3.3: 3.0.0 breaks renderer='ast' and 3.3.0-3.3.2 carry
 #   GHSA-6m44-fpc8-c3rq (RecursionError DoS via nested emphasis in mistune.html()).
 # * fastmcp 4 pulls 27 transitive distributions (fastmcp-slim[client,server]:
@@ -66,7 +68,7 @@ leidenalg==0.12.0
 PyYAML==6.0.3
 watchfiles==1.2.0
 google-genai==2.7.0
-fastmcp==4.0.4
+fastmcp==4.2.6
 sqlite-vec==0.1.9
 tantivy==0.26.2
 rjieba==0.2.1

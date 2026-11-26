@@ -4,6 +4,7 @@ version: 11.1.0
 tier: action-allowed
 description: 'Autonomously scan graph gaps and the governance queue to formulate web research directives.'
 triggers: 'Triggered when the user asks to research graph gaps, explore knowledge, or explicitly run autonomous research.'
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 <system_instructions>
@@ -26,7 +27,7 @@ triggers: 'Triggered when the user asks to research graph gaps, explore knowledg
 <execution_workflow>
   <workflow>
     1. **Scan for Gaps**: Run `python cli.py research` (or `--dry-run`) via bash, or call `review_governance_list` MCP tool to inspect pending gaps.
-    2. **[Fable 5 Checkpoint]**: 必须在此定义强制阻断点，要求人类 Approve。Before invoking a subagent for heavy background research, pause and await human confirmation of the research directives.
+    2. **[HUMAN APPROVAL CHECKPOINT]**: 必须在此定义强制阻断点，要求人类 Approve。Before invoking a subagent for heavy background research, pause and await human confirmation of the research directives.
     3. **Subagent Delegation**: You (the Main Agent) MUST use the `invoke_subagent` tool to delegate this heavy background operation to a `research` subagent (Role: `Autonomous Researcher`).
     4. **Subagent Execution**: Pass the directive into the subagent's Prompt and instruct it to:
        - Execute required web searches using `search_web`.
@@ -42,7 +43,7 @@ triggers: 'Triggered when the user asks to research graph gaps, explore knowledg
   </tool_dispatch>
 
   <checkpoint_rules>
-    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。The main agent must request user approval after generating research directives and before launching subagents.
+    [HUMAN APPROVAL CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。The main agent must request user approval after generating research directives and before launching subagents.
   </checkpoint_rules>
 </execution_workflow>
 

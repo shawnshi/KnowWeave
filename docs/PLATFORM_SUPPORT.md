@@ -7,7 +7,7 @@
 |目标|架构边界|测试入口|证据边界|
 |---|---|---|---|
 |Windows 11 及以上|x64|本机测试；`platform-targets.yml` 的 `windows11`|必须是 workstation；Windows Server runner 不替代 Windows 11|
-|macOS 26 及以上|arm64、x64|`test.yml` 的 `macos-26`、`macos-26-intel`|配置了 native/fallback × CPython 3.10/3.13，需实际 CI 回执|
+|macOS 26 及以上|arm64、x64|`test.yml` 的 `macos-26`、`macos-26-intel`|配置了 native/fallback × CPython 3.11/3.13，需实际 CI 回执|
 |Ubuntu 26.04 LTS 及以上|x64|hosted `ubuntu-26.04`；手动 `ubuntu26`|必须另核验实际内核不低于 6.18.56|
 |Debian 13 及以上|x64|手动 `debian13`|必须另核验实际内核不低于 6.18.56|
 |Fedora 44 及以上|x64|手动 `fedora44`|同上；不以 `ID_LIKE` 冒充指定发行版|

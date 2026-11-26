@@ -21,9 +21,14 @@ SERVER_API = "FastMCP"
 # Global lock against stdout pollution
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', force=True)
 from vector_lake import tools, tool_memory
+from vector_lake.mcp_skills import build_skills_provider
 from vector_lake.tool_timeline import search_timeline_events
 
-mcp = FastMCP("vector-lake")
+_skills_provider, _skills_snapshot = build_skills_provider(update_global_snapshot=True)
+mcp = FastMCP(
+    "vector-lake",
+    providers=[_skills_provider] if _skills_provider is not None else [],
+)
 
 
 def registered_tool_names(server=None) -> list[str]:

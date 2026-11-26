@@ -4,6 +4,7 @@ version: 11.2.1
 tier: action-allowed
 description: 'Start, inspect, or explicitly restart the persistent KnowWeave watchdog and its ingest runner.'
 triggers: 'When the user requests watchdog or runner startup, status inspection, or a controlled restart.'
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 # Watchdog 与 runner 运维

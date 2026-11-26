@@ -4,6 +4,7 @@ version: 11.1.0
 tier: action-allowed
 description: 'Inspect the unified V8 governance queue for contradictions, topology gaps, merge suggestions, and knowledge debt items.'
 triggers: When the user asks to review the Vector Lake governance queue, pending items, contradictions, topology gaps, merge suggestions, or knowledge debt items.
+compatibility: 'Requires local shell access to KnowWeave CLI (cli.py) and operator approval.'
 ---
 
 <system_instructions>
@@ -39,7 +40,7 @@ triggers: When the user asks to review the Vector Lake governance queue, pending
   </tool_dispatch>
 
   <checkpoint_rules>
-    [FABLE 5 CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before resolving any governance item or triggering autonomous research, you MUST pause and request explicit human approval.
+    [HUMAN APPROVAL CHECKPOINT] 必须在此定义强制阻断点，要求人类 Approve。Before resolving any governance item or triggering autonomous research, you MUST pause and request explicit human approval.
   </checkpoint_rules>
 </execution_workflow>
 
@@ -56,7 +57,7 @@ triggers: When the user asks to review the Vector Lake governance queue, pending
   </metrics>
 
   <validation_gate>
-    - Verify that no actions are executed without Fable 5 checkpoint approval.
+    - Verify that no actions are executed without human approval checkpoint approval.
     - Use `scratch/` for Sandbox Isolation if dumping a large list of items temporarily.
   </validation_gate>
 </delivery_standards>

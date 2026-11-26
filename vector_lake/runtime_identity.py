@@ -224,10 +224,31 @@ def _checkout_record() -> dict:
         return {'status': 'unavailable', 'error_type': type(exc).__name__}
 
 
+def _skills_extension_record() -> dict:
+    """Observe loaded SEP-2640 skills snapshot without importing ``vector_lake.mcp_skills``."""
+    module = sys.modules.get('vector_lake.mcp_skills')
+    if module is None:
+        return {'status': 'not_loaded'}
+    if not isinstance(module, types.ModuleType):
+        return {'status': 'unverifiable', 'reason': 'Loaded entry is not a module'}
+    try:
+        snapshot_fn = module.__dict__.get('get_loaded_skills_snapshot')
+        if not callable(snapshot_fn):
+            return {'status': 'unverifiable', 'reason': 'Missing get_loaded_skills_snapshot'}
+        snapshot = snapshot_fn()
+        if not isinstance(snapshot, dict):
+            return {'status': 'unverifiable', 'reason': 'Unexpected snapshot type'}
+        return dict(snapshot)
+    except (AttributeError, TypeError, ValueError) as exc:
+        return {'status': 'unverifiable', 'error_type': type(exc).__name__}
+
+
 def runtime_identity() -> dict:
     """Observe this caller process without importing unloaded core/application modules or opening a DB."""
     return {'schema_version': 1, 'pid': os.getpid(), 'python': sys.version.split()[0],
             'checkout': _checkout_record(),
             'modules': {name: _module_record(name, PACKAGE / (name.rsplit('.', 1)[1]+'.py'), functions, CONSTANT_PROBES.get(name, ())) for name, functions in MODULE_PROBES.items()},
-            'native': _native_record(), 'production_acceptance': 'not_established',
+            'native': _native_record(),
+            'skills_extension': _skills_extension_record(),
+            'production_acceptance': 'not_established',
             'scope_limitations': 'Selected unwrapped function code and explicit public literal constants only; excludes decorator wrappers, defaults, other globals, import-time state, rebound dependency references and whole-module equivalence. Known __main__ hosts are recognized by exact source path without importing them. Source logical SHA replaces CRLF with LF only; diagnostic, not canonical/CAS identity. Disk native SHA is not mapped-image SHA. No release binding, health approval or production acceptance. Not one atomic process/filesystem snapshot.'}
